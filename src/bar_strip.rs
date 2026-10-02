@@ -8,7 +8,8 @@ use iced::advanced::widget::Tree;
 use iced::advanced::{self, Clipboard, Shell};
 use iced::event::Event;
 use iced::mouse;
-use iced::{Color, Element, Length, Point, Rectangle, Size, Theme};
+use iced::alignment;
+use iced::{Color, Element, Length, Pixels, Point, Rectangle, Size, Theme};
 
 const BAR_REST_WIDTH: f32 = 6.0;
 const BAR_REST_HEIGHT: f32 = 30.0;
@@ -21,6 +22,7 @@ pub struct BarStrip<'a> {
     magnification: &'a MagnificationState,
     show_add_button: bool,
     drag: &'a Option<DragState>,
+    scroll_offset: f32,
 }
 
 impl<'a> BarStrip<'a> {
@@ -29,18 +31,20 @@ impl<'a> BarStrip<'a> {
         magnification: &'a MagnificationState,
         show_add_button: bool,
         drag: &'a Option<DragState>,
+        scroll_offset: f32,
     ) -> Self {
         Self {
             notes,
             magnification,
             show_add_button,
             drag,
+            scroll_offset,
         }
     }
 
     fn bar_bounds(&self, layout_bounds: Rectangle) -> Vec<Rectangle> {
         let mut bars = Vec::new();
-        let mut y = layout_bounds.y;
+        let mut y = layout_bounds.y - self.scroll_offset;
         for (i, _note) in self.notes.iter().enumerate() {
             let scale = self.magnification.scale(i);
             let w = BAR_REST_WIDTH * scale;
@@ -161,7 +165,24 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                         },
                         Color::from_rgba(0.0, 0.0, 0.0, 0.3),
                     );
-                    let _ = (preview, text_size);
+                    use iced::advanced::text::Renderer as TextRenderer;
+                    TextRenderer::fill_text(
+                        renderer,
+                        iced::advanced::Text {
+                            content: preview,
+                            bounds: Size::new(text_bounds.width, text_bounds.height),
+                            size: Pixels(text_size),
+                            line_height: iced::widget::text::LineHeight::default(),
+                            font: iced::Font::default(),
+                            align_x: alignment::Horizontal::Left.into(),
+                            align_y: alignment::Vertical::Top,
+                            shaping: iced::widget::text::Shaping::Basic,
+                            wrapping: iced::widget::text::Wrapping::None,
+                        },
+                        Point::new(text_bounds.x, text_bounds.y),
+                        Color::WHITE,
+                        *bar_rect,
+                    );
                 }
             }
         }
@@ -314,6 +335,15 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     shell.publish(Message::DragEnd);
                 }
             }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                if bounds.contains(cursor.position().unwrap_or_default()) {
+                    let dy = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => *y * 30.0,
+                        mouse::ScrollDelta::Pixels { y, .. } => *y,
+                    };
+                    shell.publish(Message::StripScroll(dy));
+                }
+            }
             _ => {}
         }
     }
@@ -359,6 +389,7 @@ pub fn bar_strip<'a>(
     magnification: &'a MagnificationState,
     show_add_button: bool,
     drag: &'a Option<DragState>,
+    scroll_offset: f32,
 ) -> Element<'a, Message> {
-    BarStrip::new(notes, magnification, show_add_button, drag).into()
+    BarStrip::new(notes, magnification, show_add_button, drag, scroll_offset).into()
 }

@@ -63,7 +63,7 @@ pub fn note_panel<'a>(
             ..Default::default()
         });
 
-    let close_btn = button(text("✕").size(14))
+    let delete_btn = button(text("🗑").size(13))
         .on_press(Message::DeleteRequested)
         .padding(4)
         .style(|_theme: &Theme, _status| button::Style {
@@ -76,10 +76,25 @@ pub fn note_panel<'a>(
             ..Default::default()
         });
 
+    let close_btn = button(text("✕").size(14))
+        .on_press(Message::ClosePanel)
+        .padding(4)
+        .style(|_theme: &Theme, _status| button::Style {
+            background: Some(Color::from_rgba(0.4, 0.4, 0.4, 0.6).into()),
+            text_color: Color::WHITE,
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
     let top_bar = row![
         color_btn,
         Space::new().width(Fill),
         expand_btn,
+        Space::new().width(4),
+        delete_btn,
         Space::new().width(4),
         close_btn,
     ]

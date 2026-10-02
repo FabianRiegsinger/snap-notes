@@ -27,6 +27,7 @@ pub enum Message {
     DragStart(usize),
     DragMove(f32),
     DragEnd,
+    StripScroll(f32),
     Tick(Instant),
     SaveTick,
     ToggleVisibility,
@@ -37,6 +38,7 @@ pub struct App {
     store: NoteStore,
     magnification: MagnificationState,
     cursor_in_strip: bool,
+    cursor_y: Option<f32>,
     active_note: Option<Uuid>,
     editor_content: Option<text_editor::Content>,
     panel_slide: AnimationState,
@@ -44,6 +46,7 @@ pub struct App {
     expand_animation: AnimationState,
     color_picker_open: bool,
     drag: Option<DragState>,
+    scroll_offset: f32,
     confirm_delete: Option<Uuid>,
     animating: bool,
     visible: bool,
@@ -72,6 +75,7 @@ impl App {
                 store,
                 magnification: MagnificationState::new(),
                 cursor_in_strip: false,
+                cursor_y: None,
                 active_note: None,
                 editor_content: None,
                 panel_slide: AnimationState::new(0.0),
@@ -79,6 +83,7 @@ impl App {
                 expand_animation: AnimationState::new(0.0),
                 color_picker_open: false,
                 drag: None,
+                scroll_offset: 0.0,
                 confirm_delete: None,
                 animating: false,
                 visible: true,
@@ -91,8 +96,7 @@ impl App {
         match message {
             Message::StripHover(y) => {
                 self.cursor_in_strip = y.is_some();
-                let centers: Vec<f32> = self.bar_centers();
-                self.magnification.update(y, &centers, 1.0 / 60.0);
+                self.cursor_y = y;
                 self.animating = true;
                 if let Some(cursor_y) = y {
                     if self.drag.is_some() {
@@ -165,16 +169,14 @@ impl App {
             Message::Tick(_now) => {
                 let dt = 1.0 / 60.0;
                 let centers = self.bar_centers();
-                let mag_active = self.magnification.update(None, &centers, dt);
+                let mag_active = self.magnification.update(self.cursor_y, &centers, dt);
                 let panel_active = self.panel_slide.tick(dt);
                 let expand_active = self.expand_animation.tick(dt);
                 self.animating = mag_active || panel_active || expand_active;
 
-                if self.panel_slide.value() < 0.01 && self.active_note.is_some() && self.panel_slide.value() < 0.01 {
-                    if self.panel_slide.value() < 0.001 {
-                        self.active_note = None;
-                        self.editor_content = None;
-                    }
+                if self.active_note.is_some() && self.panel_slide.value() < 0.001 {
+                    self.active_note = None;
+                    self.editor_content = None;
                 }
             }
             Message::SaveTick => {
@@ -246,6 +248,9 @@ impl App {
                     }
                 }
             }
+            Message::StripScroll(delta) => {
+                self.scroll_offset = (self.scroll_offset - delta).max(0.0);
+            }
             Message::ToggleVisibility => {
                 self.visible = !self.visible;
             }
@@ -265,6 +270,7 @@ impl App {
             &self.magnification,
             self.cursor_in_strip,
             &self.drag,
+            self.scroll_offset,
         );
 
         if let (Some(id), Some(content)) = (self.active_note, &self.editor_content) {
@@ -308,13 +314,17 @@ impl App {
     fn bar_centers(&self) -> Vec<f32> {
         let bar_height = 30.0;
         let gap = 4.0;
+        let mut y = 0.0f32;
         self.store
             .notes()
             .iter()
             .enumerate()
             .map(|(i, _)| {
                 let scale = self.magnification.scale(i);
-                i as f32 * (bar_height + gap) + (bar_height * scale) / 2.0
+                let h = bar_height * scale;
+                let center = y + h / 2.0;
+                y += h + gap;
+                center
             })
             .collect()
     }
