@@ -1,3 +1,4 @@
+mod animation;
 mod note;
 mod store;
 
