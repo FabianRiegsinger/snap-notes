@@ -11,8 +11,10 @@ pub fn note_panel<'a>(
     content: &'a text_editor::Content,
     slide_progress: f32,
     confirm_delete: bool,
+    expanded: bool,
+    panel_width: f32,
 ) -> Element<'a, Message> {
-    let width = 300.0 * slide_progress;
+    let width = panel_width * slide_progress;
     if width < 1.0 {
         return Space::new().width(0).height(0).into();
     }
@@ -43,8 +45,13 @@ pub fn note_panel<'a>(
         })
         .padding(4);
 
-    let expand_btn = button(text("⤢").size(16))
-        .on_press(Message::ExpandNote)
+    let (expand_icon, expand_msg) = if expanded {
+        ("⤡", Message::ShrinkNote)
+    } else {
+        ("⤢", Message::ExpandNote)
+    };
+    let expand_btn = button(text(expand_icon).size(16))
+        .on_press(expand_msg)
         .padding(4)
         .style(|_theme: &Theme, _status| button::Style {
             background: Some(Color::from_rgba(0.3, 0.3, 0.3, 0.6).into()),

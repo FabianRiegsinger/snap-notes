@@ -1,6 +1,7 @@
 mod animation;
 mod app;
 mod bar_strip;
+mod color_picker;
 mod note;
 mod note_panel;
 mod store;

@@ -1,5 +1,6 @@
 use crate::animation::{AnimationState, MagnificationState};
 use crate::bar_strip::bar_strip;
+use crate::color_picker::color_picker;
 use crate::note::NoteColor;
 use crate::note_panel::note_panel;
 use crate::store::NoteStore;
@@ -180,9 +181,26 @@ impl App {
             Message::ToggleColorPicker => {
                 self.color_picker_open = !self.color_picker_open;
             }
-            Message::ColorChosen(_) => {}
-            Message::ExpandNote => {}
-            Message::ShrinkNote => {}
+            Message::ColorChosen(color) => {
+                if let Some(id) = self.active_note {
+                    if let Some(note) = self.store.note_mut(id) {
+                        note.color = color;
+                        note.updated_at = chrono::Utc::now();
+                    }
+                    self.store.mark_dirty();
+                    self.color_picker_open = false;
+                }
+            }
+            Message::ExpandNote => {
+                self.expanded = true;
+                self.expand_animation.set_target(1.0);
+                self.animating = true;
+            }
+            Message::ShrinkNote => {
+                self.expanded = false;
+                self.expand_animation.set_target(0.0);
+                self.animating = true;
+            }
             Message::DragStart(_) => {}
             Message::DragMove(_) => {}
             Message::DragEnd => {}
@@ -198,6 +216,8 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        use iced::widget::column;
+
         let strip = bar_strip(
             self.store.notes(),
             &self.magnification,
@@ -206,13 +226,24 @@ impl App {
 
         if let (Some(id), Some(content)) = (self.active_note, &self.editor_content) {
             if let Some(note) = self.store.notes().iter().find(|n| n.id == id) {
+                let expand_progress = self.expand_animation.value();
+                let panel_width = 300.0 + (400.0 * expand_progress);
                 let panel = note_panel(
                     note,
                     content,
                     self.panel_slide.value(),
                     self.confirm_delete.is_some(),
+                    self.expanded,
+                    panel_width,
                 );
-                return row![panel, strip].into();
+
+                let mut panel_col: iced::widget::Column<'_, Message> = column![panel];
+
+                if self.color_picker_open {
+                    panel_col = panel_col.push(color_picker(&note.color));
+                }
+
+                return row![panel_col, strip].into();
             }
         }
 
