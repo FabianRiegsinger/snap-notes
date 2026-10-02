@@ -94,6 +94,11 @@ impl App {
                 let centers: Vec<f32> = self.bar_centers();
                 self.magnification.update(y, &centers, 1.0 / 60.0);
                 self.animating = true;
+                if let Some(cursor_y) = y {
+                    if self.drag.is_some() {
+                        return self.update(Message::DragMove(cursor_y));
+                    }
+                }
             }
             Message::BarClicked(index) => {
                 if let Some(note) = self.store.notes().get(index) {
@@ -201,9 +206,46 @@ impl App {
                 self.expand_animation.set_target(0.0);
                 self.animating = true;
             }
-            Message::DragStart(_) => {}
-            Message::DragMove(_) => {}
-            Message::DragEnd => {}
+            Message::DragStart(index) => {
+                let centers = self.bar_centers();
+                let origin_y = centers.get(index).copied().unwrap_or(0.0);
+                self.drag = Some(DragState {
+                    bar_index: index,
+                    origin_y,
+                    current_y: origin_y,
+                });
+            }
+            Message::DragMove(y) => {
+                if let Some(drag) = &mut self.drag {
+                    drag.current_y = y;
+                }
+            }
+            Message::DragEnd => {
+                if let Some(drag) = self.drag.take() {
+                    let moved = (drag.current_y - drag.origin_y).abs() > 5.0;
+                    if moved {
+                        let bars = self.bar_centers();
+                        let mut target = bars.len();
+                        for (i, center) in bars.iter().enumerate() {
+                            if drag.current_y < *center {
+                                target = i;
+                                break;
+                            }
+                        }
+                        if target != drag.bar_index && target != drag.bar_index + 1 {
+                            let to = if target > drag.bar_index {
+                                target - 1
+                            } else {
+                                target
+                            };
+                            self.store.reorder(drag.bar_index, to);
+                            self.store.mark_dirty();
+                        }
+                    } else {
+                        return self.update(Message::BarClicked(drag.bar_index));
+                    }
+                }
+            }
             Message::ToggleVisibility => {
                 self.visible = !self.visible;
             }
@@ -222,6 +264,7 @@ impl App {
             self.store.notes(),
             &self.magnification,
             self.cursor_in_strip,
+            &self.drag,
         );
 
         if let (Some(id), Some(content)) = (self.active_note, &self.editor_content) {

@@ -1,5 +1,5 @@
 use crate::animation::MagnificationState;
-use crate::app::Message;
+use crate::app::{DragState, Message};
 use crate::note::Note;
 
 use iced::advanced::layout::{self, Layout};
@@ -20,6 +20,7 @@ pub struct BarStrip<'a> {
     notes: &'a [Note],
     magnification: &'a MagnificationState,
     show_add_button: bool,
+    drag: &'a Option<DragState>,
 }
 
 impl<'a> BarStrip<'a> {
@@ -27,11 +28,13 @@ impl<'a> BarStrip<'a> {
         notes: &'a [Note],
         magnification: &'a MagnificationState,
         show_add_button: bool,
+        drag: &'a Option<DragState>,
     ) -> Self {
         Self {
             notes,
             magnification,
             show_add_button,
+            drag,
         }
     }
 
@@ -47,6 +50,16 @@ impl<'a> BarStrip<'a> {
             y += h + BAR_GAP;
         }
         bars
+    }
+
+    fn insertion_index(&self, cursor_y: f32, bars: &[Rectangle]) -> usize {
+        for (i, bar) in bars.iter().enumerate() {
+            let center = bar.y + bar.height / 2.0;
+            if cursor_y < center {
+                return i;
+            }
+        }
+        bars.len()
     }
 
     fn add_button_bounds(&self, layout_bounds: Rectangle) -> Rectangle {
@@ -96,14 +109,23 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
     ) {
         let bounds = layout.bounds();
         let bars = self.bar_bounds(bounds);
+        let dragging_index = self.drag.as_ref().map(|d| d.bar_index);
+        let drag_active = self.drag.as_ref().map_or(false, |d| {
+            (d.current_y - d.origin_y).abs() > 5.0
+        });
 
         for (i, bar_rect) in bars.iter().enumerate() {
             if let Some(note) = self.notes.get(i) {
+                let alpha = if drag_active && Some(i) == dragging_index {
+                    0.3
+                } else {
+                    note.color.rgba[3]
+                };
                 let color = Color::from_rgba(
                     note.color.rgba[0],
                     note.color.rgba[1],
                     note.color.rgba[2],
-                    note.color.rgba[3],
+                    alpha,
                 );
                 renderer::Renderer::fill_quad(
                     renderer,
@@ -191,6 +213,59 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 Color::WHITE,
             );
         }
+
+        if let Some(drag) = &self.drag {
+            if drag_active {
+                if let Some(note) = self.notes.get(drag.bar_index) {
+                    let scale = self.magnification.scale(drag.bar_index);
+                    let w = BAR_REST_WIDTH * scale;
+                    let h = BAR_REST_HEIGHT * scale;
+                    let x = bounds.x + bounds.width - w;
+                    let ghost_y = drag.current_y - h / 2.0;
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: Rectangle::new(
+                                Point::new(x, ghost_y),
+                                Size::new(w, h),
+                            ),
+                            border: iced::Border {
+                                radius: CORNER_RADIUS.into(),
+                                ..Default::default()
+                            },
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        Color::from_rgba(
+                            note.color.rgba[0],
+                            note.color.rgba[1],
+                            note.color.rgba[2],
+                            0.8,
+                        ),
+                    );
+
+                    let target = self.insertion_index(drag.current_y, &bars);
+                    let indicator_y = if target < bars.len() {
+                        bars[target].y - BAR_GAP / 2.0
+                    } else {
+                        bars.last().map_or(bounds.y, |b| b.y + b.height + BAR_GAP / 2.0)
+                    };
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: Rectangle::new(
+                                Point::new(bounds.x + bounds.width - 20.0, indicator_y - 1.0),
+                                Size::new(20.0, 2.0),
+                            ),
+                            border: Default::default(),
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        Color::from_rgba(1.0, 1.0, 1.0, 0.8),
+                    );
+                }
+            }
+        }
     }
 
     fn update(
@@ -222,7 +297,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     let bars = self.bar_bounds(bounds);
                     for (i, bar_rect) in bars.iter().enumerate() {
                         if bar_rect.contains(pos) {
-                            shell.publish(Message::BarClicked(i));
+                            shell.publish(Message::DragStart(i));
                             return;
                         }
                     }
@@ -232,6 +307,11 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             shell.publish(Message::AddNote);
                         }
                     }
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if self.drag.is_some() {
+                    shell.publish(Message::DragEnd);
                 }
             }
             _ => {}
@@ -246,6 +326,9 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         _viewport: &Rectangle,
         _renderer: &iced::Renderer,
     ) -> mouse::Interaction {
+        if self.drag.as_ref().map_or(false, |d| (d.current_y - d.origin_y).abs() > 5.0) {
+            return mouse::Interaction::Grabbing;
+        }
         if let Some(pos) = cursor.position() {
             let bounds = layout.bounds();
             let bars = self.bar_bounds(bounds);
@@ -275,6 +358,7 @@ pub fn bar_strip<'a>(
     notes: &'a [Note],
     magnification: &'a MagnificationState,
     show_add_button: bool,
+    drag: &'a Option<DragState>,
 ) -> Element<'a, Message> {
-    BarStrip::new(notes, magnification, show_add_button).into()
+    BarStrip::new(notes, magnification, show_add_button, drag).into()
 }
