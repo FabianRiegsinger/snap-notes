@@ -1,0 +1,395 @@
+use crate::animation::MagnificationState;
+use crate::app::{DragState, Message};
+use crate::note::Note;
+
+use iced::advanced::layout::{self, Layout};
+use iced::advanced::renderer;
+use iced::advanced::widget::Tree;
+use iced::advanced::{self, Clipboard, Shell};
+use iced::event::Event;
+use iced::mouse;
+use iced::alignment;
+use iced::{Color, Element, Length, Pixels, Point, Rectangle, Size, Theme};
+
+const BAR_REST_WIDTH: f32 = 6.0;
+const BAR_REST_HEIGHT: f32 = 30.0;
+const BAR_GAP: f32 = 4.0;
+const ADD_BUTTON_SIZE: f32 = 20.0;
+const CORNER_RADIUS: f32 = 3.0;
+
+pub struct BarStrip<'a> {
+    notes: &'a [Note],
+    magnification: &'a MagnificationState,
+    show_add_button: bool,
+    drag: &'a Option<DragState>,
+    scroll_offset: f32,
+}
+
+impl<'a> BarStrip<'a> {
+    pub fn new(
+        notes: &'a [Note],
+        magnification: &'a MagnificationState,
+        show_add_button: bool,
+        drag: &'a Option<DragState>,
+        scroll_offset: f32,
+    ) -> Self {
+        Self {
+            notes,
+            magnification,
+            show_add_button,
+            drag,
+            scroll_offset,
+        }
+    }
+
+    fn bar_bounds(&self, layout_bounds: Rectangle) -> Vec<Rectangle> {
+        let mut bars = Vec::new();
+        let mut y = layout_bounds.y - self.scroll_offset;
+        for (i, _note) in self.notes.iter().enumerate() {
+            let scale = self.magnification.scale(i);
+            let w = BAR_REST_WIDTH * scale;
+            let h = BAR_REST_HEIGHT * scale;
+            let x = layout_bounds.x + layout_bounds.width - w;
+            bars.push(Rectangle::new(Point::new(x, y), Size::new(w, h)));
+            y += h + BAR_GAP;
+        }
+        bars
+    }
+
+    fn insertion_index(&self, cursor_y: f32, bars: &[Rectangle]) -> usize {
+        for (i, bar) in bars.iter().enumerate() {
+            let center = bar.y + bar.height / 2.0;
+            if cursor_y < center {
+                return i;
+            }
+        }
+        bars.len()
+    }
+
+    fn add_button_bounds(&self, layout_bounds: Rectangle) -> Rectangle {
+        let bars = self.bar_bounds(layout_bounds);
+        let y = bars
+            .last()
+            .map(|b| b.y + b.height + BAR_GAP * 2.0)
+            .unwrap_or(layout_bounds.y);
+        let x = layout_bounds.x + layout_bounds.width - ADD_BUTTON_SIZE;
+        Rectangle::new(Point::new(x, y), Size::new(ADD_BUTTON_SIZE, ADD_BUTTON_SIZE))
+    }
+}
+
+impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
+    fn size(&self) -> Size<Length> {
+        let max_scale = (0..self.notes.len())
+            .map(|i| self.magnification.scale(i))
+            .fold(1.0f32, f32::max);
+        let width = (BAR_REST_WIDTH * max_scale).max(ADD_BUTTON_SIZE + 4.0);
+        Size::new(Length::Fixed(width + 30.0), Length::Fill)
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let max_scale = (0..self.notes.len())
+            .map(|i| self.magnification.scale(i))
+            .fold(1.0f32, f32::max);
+        let width = (BAR_REST_WIDTH * max_scale).max(ADD_BUTTON_SIZE + 4.0) + 30.0;
+        let limits = limits.width(Length::Fixed(width)).height(Length::Fill);
+        let size = limits.resolve(width, f32::INFINITY, Size::new(width, 0.0));
+        layout::Node::new(size)
+    }
+
+    fn draw(
+        &self,
+        _tree: &Tree,
+        renderer: &mut iced::Renderer,
+        _theme: &Theme,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+        let bounds = layout.bounds();
+        let bars = self.bar_bounds(bounds);
+        let dragging_index = self.drag.as_ref().map(|d| d.bar_index);
+        let drag_active = self.drag.as_ref().map_or(false, |d| {
+            (d.current_y - d.origin_y).abs() > 5.0
+        });
+
+        for (i, bar_rect) in bars.iter().enumerate() {
+            if let Some(note) = self.notes.get(i) {
+                let alpha = if drag_active && Some(i) == dragging_index {
+                    0.3
+                } else {
+                    note.color.rgba[3]
+                };
+                let color = Color::from_rgba(
+                    note.color.rgba[0],
+                    note.color.rgba[1],
+                    note.color.rgba[2],
+                    alpha,
+                );
+                renderer::Renderer::fill_quad(
+                    renderer,
+                    renderer::Quad {
+                        bounds: *bar_rect,
+                        border: iced::Border {
+                            radius: CORNER_RADIUS.into(),
+                            ..Default::default()
+                        },
+                        shadow: Default::default(),
+                        snap: true,
+                    },
+                    color,
+                );
+
+                let scale = self.magnification.scale(i);
+                if scale > 2.0 && !note.content.is_empty() {
+                    let preview: String = note.content.chars().take(40).collect();
+                    let text_size = 10.0 * (scale / 5.0).min(1.0);
+                    let text_bounds = Rectangle {
+                        x: bar_rect.x + 2.0,
+                        y: bar_rect.y + 2.0,
+                        width: bar_rect.width - 4.0,
+                        height: bar_rect.height - 4.0,
+                    };
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: text_bounds,
+                            border: Default::default(),
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                    );
+                    use iced::advanced::text::Renderer as TextRenderer;
+                    TextRenderer::fill_text(
+                        renderer,
+                        iced::advanced::Text {
+                            content: preview,
+                            bounds: Size::new(text_bounds.width, text_bounds.height),
+                            size: Pixels(text_size),
+                            line_height: iced::widget::text::LineHeight::default(),
+                            font: iced::Font::default(),
+                            align_x: alignment::Horizontal::Left.into(),
+                            align_y: alignment::Vertical::Top,
+                            shaping: iced::widget::text::Shaping::Basic,
+                            wrapping: iced::widget::text::Wrapping::None,
+                        },
+                        Point::new(text_bounds.x, text_bounds.y),
+                        Color::WHITE,
+                        *bar_rect,
+                    );
+                }
+            }
+        }
+
+        if self.show_add_button {
+            let btn = self.add_button_bounds(bounds);
+            renderer::Renderer::fill_quad(
+                renderer,
+                renderer::Quad {
+                    bounds: btn,
+                    border: iced::Border {
+                        radius: (ADD_BUTTON_SIZE / 2.0).into(),
+                        width: 1.5,
+                        color: Color::from_rgba(0.6, 0.6, 0.6, 0.8),
+                    },
+                    shadow: Default::default(),
+                    snap: true,
+                },
+                Color::from_rgba(0.3, 0.3, 0.3, 0.5),
+            );
+            let plus_h = 2.0;
+            let plus_len = ADD_BUTTON_SIZE * 0.4;
+            let cx = btn.x + btn.width / 2.0;
+            let cy = btn.y + btn.height / 2.0;
+            renderer::Renderer::fill_quad(
+                renderer,
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        Point::new(cx - plus_len / 2.0, cy - plus_h / 2.0),
+                        Size::new(plus_len, plus_h),
+                    ),
+                    border: Default::default(),
+                    shadow: Default::default(),
+                    snap: true,
+                },
+                Color::WHITE,
+            );
+            renderer::Renderer::fill_quad(
+                renderer,
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        Point::new(cx - plus_h / 2.0, cy - plus_len / 2.0),
+                        Size::new(plus_h, plus_len),
+                    ),
+                    border: Default::default(),
+                    shadow: Default::default(),
+                    snap: true,
+                },
+                Color::WHITE,
+            );
+        }
+
+        if let Some(drag) = &self.drag {
+            if drag_active {
+                if let Some(note) = self.notes.get(drag.bar_index) {
+                    let scale = self.magnification.scale(drag.bar_index);
+                    let w = BAR_REST_WIDTH * scale;
+                    let h = BAR_REST_HEIGHT * scale;
+                    let x = bounds.x + bounds.width - w;
+                    let ghost_y = drag.current_y - h / 2.0;
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: Rectangle::new(
+                                Point::new(x, ghost_y),
+                                Size::new(w, h),
+                            ),
+                            border: iced::Border {
+                                radius: CORNER_RADIUS.into(),
+                                ..Default::default()
+                            },
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        Color::from_rgba(
+                            note.color.rgba[0],
+                            note.color.rgba[1],
+                            note.color.rgba[2],
+                            0.8,
+                        ),
+                    );
+
+                    let target = self.insertion_index(drag.current_y, &bars);
+                    let indicator_y = if target < bars.len() {
+                        bars[target].y - BAR_GAP / 2.0
+                    } else {
+                        bars.last().map_or(bounds.y, |b| b.y + b.height + BAR_GAP / 2.0)
+                    };
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: Rectangle::new(
+                                Point::new(bounds.x + bounds.width - 20.0, indicator_y - 1.0),
+                                Size::new(20.0, 2.0),
+                            ),
+                            border: Default::default(),
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        Color::from_rgba(1.0, 1.0, 1.0, 0.8),
+                    );
+                }
+            }
+        }
+    }
+
+    fn update(
+        &mut self,
+        _tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
+        let bounds = layout.bounds();
+
+        match event {
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                if bounds.contains(*position) {
+                    shell.publish(Message::StripHover(Some(position.y)));
+                } else {
+                    shell.publish(Message::StripHover(None));
+                }
+            }
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                shell.publish(Message::StripHover(None));
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(pos) = cursor.position() {
+                    let bars = self.bar_bounds(bounds);
+                    for (i, bar_rect) in bars.iter().enumerate() {
+                        if bar_rect.contains(pos) {
+                            shell.publish(Message::DragStart(i));
+                            return;
+                        }
+                    }
+                    if self.show_add_button {
+                        let btn = self.add_button_bounds(bounds);
+                        if btn.contains(pos) {
+                            shell.publish(Message::AddNote);
+                        }
+                    }
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if self.drag.is_some() {
+                    shell.publish(Message::DragEnd);
+                }
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                if bounds.contains(cursor.position().unwrap_or_default()) {
+                    let dy = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => *y * 30.0,
+                        mouse::ScrollDelta::Pixels { y, .. } => *y,
+                    };
+                    shell.publish(Message::StripScroll(dy));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        _tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+        _renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        if self.drag.as_ref().map_or(false, |d| (d.current_y - d.origin_y).abs() > 5.0) {
+            return mouse::Interaction::Grabbing;
+        }
+        if let Some(pos) = cursor.position() {
+            let bounds = layout.bounds();
+            let bars = self.bar_bounds(bounds);
+            for bar_rect in &bars {
+                if bar_rect.contains(pos) {
+                    return mouse::Interaction::Pointer;
+                }
+            }
+            if self.show_add_button {
+                let btn = self.add_button_bounds(bounds);
+                if btn.contains(pos) {
+                    return mouse::Interaction::Pointer;
+                }
+            }
+        }
+        mouse::Interaction::None
+    }
+}
+
+impl<'a> From<BarStrip<'a>> for Element<'a, Message> {
+    fn from(strip: BarStrip<'a>) -> Self {
+        Self::new(strip)
+    }
+}
+
+pub fn bar_strip<'a>(
+    notes: &'a [Note],
+    magnification: &'a MagnificationState,
+    show_add_button: bool,
+    drag: &'a Option<DragState>,
+    scroll_offset: f32,
+) -> Element<'a, Message> {
+    BarStrip::new(notes, magnification, show_add_button, drag, scroll_offset).into()
+}
