@@ -22,14 +22,14 @@ jobs:
             os: macos-latest
             bin: work-notes
           - name: linux-x64
-            os: ubuntu-latest
+            os: ubuntu-24.04
             bin: work-notes
           - name: linux-arm64
             os: ubuntu-24.04-arm
             bin: work-notes
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -49,7 +49,7 @@ jobs:
       - name: Build release
         run: cargo build --release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: work-notes-${{ matrix.name }}
           path: target/release/${{ matrix.bin }}
