@@ -1,9 +1,10 @@
 use crate::animation::{AnimationState, MagnificationState};
 use crate::bar_strip::bar_strip;
 use crate::note::NoteColor;
+use crate::note_panel::note_panel;
 use crate::store::NoteStore;
 
-use iced::widget::{text_editor, row};
+use iced::widget::{row, text_editor};
 use iced::{Element, Subscription, Task};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -100,6 +101,8 @@ impl App {
                     self.active_note = Some(id);
                     self.editor_content = Some(content);
                     self.panel_slide.set_target(1.0);
+                    self.color_picker_open = false;
+                    self.confirm_delete = None;
                     self.animating = true;
                 }
             }
@@ -111,18 +114,62 @@ impl App {
                 self.animating = true;
                 self.store.mark_dirty();
             }
+            Message::NoteEdited(action) => {
+                if let Some(content) = &mut self.editor_content {
+                    let is_edit = action.is_edit();
+                    content.perform(action);
+                    if is_edit {
+                        if let Some(id) = self.active_note {
+                            let text = content.text();
+                            if let Some(note) = self.store.note_mut(id) {
+                                note.content = text.trim_end_matches('\n').to_string();
+                                note.updated_at = chrono::Utc::now();
+                            }
+                            self.store.mark_dirty();
+                        }
+                    }
+                }
+            }
+            Message::ClosePanel => {
+                self.panel_slide.set_target(0.0);
+                self.animating = true;
+                self.color_picker_open = false;
+                self.confirm_delete = None;
+            }
+            Message::DeleteRequested => {
+                if let Some(id) = self.active_note {
+                    self.confirm_delete = Some(id);
+                }
+            }
+            Message::ConfirmDelete(confirmed) => {
+                if confirmed {
+                    if let Some(id) = self.confirm_delete.take() {
+                        self.store.delete_note(id);
+                        let _ = self.store.save();
+                        self.store.did_save();
+                        self.active_note = None;
+                        self.editor_content = None;
+                        self.panel_slide.set_target(0.0);
+                        self.animating = true;
+                    }
+                } else {
+                    self.confirm_delete = None;
+                }
+            }
             Message::Tick(_now) => {
                 let dt = 1.0 / 60.0;
                 let centers = self.bar_centers();
-                let cursor_y = if self.cursor_in_strip {
-                    None // magnification already handled in StripHover
-                } else {
-                    None
-                };
-                let mag_active = self.magnification.update(cursor_y, &centers, dt);
+                let mag_active = self.magnification.update(None, &centers, dt);
                 let panel_active = self.panel_slide.tick(dt);
                 let expand_active = self.expand_animation.tick(dt);
                 self.animating = mag_active || panel_active || expand_active;
+
+                if self.panel_slide.value() < 0.01 && self.active_note.is_some() && self.panel_slide.value() < 0.01 {
+                    if self.panel_slide.value() < 0.001 {
+                        self.active_note = None;
+                        self.editor_content = None;
+                    }
+                }
             }
             Message::SaveTick => {
                 if self.store.should_save() {
@@ -130,18 +177,9 @@ impl App {
                     self.store.did_save();
                 }
             }
-            Message::NoteEdited(_action) => {}
-            Message::ClosePanel => {
-                self.panel_slide.set_target(0.0);
-                self.animating = true;
-                if self.panel_slide.value() < 0.01 {
-                    self.active_note = None;
-                    self.editor_content = None;
-                }
+            Message::ToggleColorPicker => {
+                self.color_picker_open = !self.color_picker_open;
             }
-            Message::DeleteRequested => {}
-            Message::ConfirmDelete(_) => {}
-            Message::ToggleColorPicker => {}
             Message::ColorChosen(_) => {}
             Message::ExpandNote => {}
             Message::ShrinkNote => {}
@@ -166,6 +204,18 @@ impl App {
             self.cursor_in_strip,
         );
 
+        if let (Some(id), Some(content)) = (self.active_note, &self.editor_content) {
+            if let Some(note) = self.store.notes().iter().find(|n| n.id == id) {
+                let panel = note_panel(
+                    note,
+                    content,
+                    self.panel_slide.value(),
+                    self.confirm_delete.is_some(),
+                );
+                return row![panel, strip].into();
+            }
+        }
+
         row![strip].into()
     }
 
@@ -173,7 +223,8 @@ impl App {
         let save = iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveTick);
 
         if self.animating {
-            let tick = iced::time::every(Duration::from_millis(16)).map(Message::Tick);
+            let tick =
+                iced::time::every(Duration::from_millis(16)).map(Message::Tick);
             Subscription::batch([tick, save])
         } else {
             save

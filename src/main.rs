@@ -2,6 +2,7 @@ mod animation;
 mod app;
 mod bar_strip;
 mod note;
+mod note_panel;
 mod store;
 
 use app::App;
