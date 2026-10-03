@@ -5,6 +5,7 @@
 use crate::app::Message;
 
 /// Ids of the menu items, in menu order.
+#[cfg(any(windows, target_os = "macos", test))]
 pub const MENU_IDS: [&str; 4] = ["toggle", "new", "settings", "quit"];
 
 /// The app message a menu item id stands for.
@@ -20,6 +21,7 @@ pub fn message_for(id: &str) -> Option<Message> {
 
 /// A monochrome note glyph as RGBA: a sheet outline with three text lines in
 /// `color` on transparent.
+#[cfg(any(windows, target_os = "macos", test))]
 pub fn icon_rgba(size: u32, color: [u8; 3]) -> Vec<u8> {
     let s = size as f32 / 36.0;
     let inside = |x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32| {

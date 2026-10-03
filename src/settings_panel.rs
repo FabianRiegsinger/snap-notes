@@ -80,6 +80,7 @@ fn slider_row<'a>(settings: &Settings, key: SettingKey, a: f32) -> Element<'a, M
 }
 
 /// Whether the user may flip `toggle` right now.
+#[cfg(any(windows, target_os = "macos", test))]
 pub fn toggle_enabled(settings: &Settings, toggle: SettingToggle, tray_ok: bool) -> bool {
     let dock_is_lifeline = toggle == SettingToggle::DockIcon && settings.is_on(toggle) && !tray_ok;
     settings.can_toggle(toggle) && !dock_is_lifeline

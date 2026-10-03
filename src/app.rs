@@ -34,6 +34,8 @@ pub enum Message {
     ToggleSettings,
     CloseSettings,
     SettingChanged(SettingKey, f32),
+    // Only the macOS/Windows settings panel shows these toggles.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     SettingToggled(SettingToggle),
     ResetGroup(SettingsGroup),
     /// Palette slot whose preset grid is open (`None` closes it).

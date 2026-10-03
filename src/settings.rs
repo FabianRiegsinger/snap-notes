@@ -158,6 +158,7 @@ pub enum SettingToggle {
 }
 
 impl SettingToggle {
+    #[cfg(any(windows, target_os = "macos"))]
     pub const ALL: [SettingToggle; 2] = [SettingToggle::MenuBarIcon, SettingToggle::DockIcon];
 
     fn other(self) -> SettingToggle {
