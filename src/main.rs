@@ -5,6 +5,7 @@ mod color_picker;
 mod note;
 mod note_panel;
 mod pass_wheel;
+mod peek;
 mod platform;
 mod store;
 

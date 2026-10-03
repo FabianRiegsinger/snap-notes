@@ -3,6 +3,10 @@ use crate::color_picker::color_picker;
 use crate::note::Note;
 use crate::pass_wheel::pass_wheel;
 
+use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, Scrollable};
+use iced::advanced::widget::{Id, Operation};
+use iced::Rectangle;
+
 use iced::widget::{
     button, column, container, mouse_area, row, scrollable, text, text_editor, text_input, Space,
 };
@@ -19,19 +23,61 @@ const TITLE_FAMILY: font::Family = font::Family::Name("Helvetica Neue");
 const TITLE_FAMILY: font::Family = font::Family::Name("Segoe UI");
 #[cfg(not(any(target_os = "macos", windows)))]
 const TITLE_FAMILY: font::Family = font::Family::SansSerif;
-const TITLE_FONT: Font = Font {
+pub(crate) const TITLE_FONT: Font = Font {
     family: TITLE_FAMILY,
     weight: font::Weight::Bold,
     ..Font::DEFAULT
 };
 
-pub const BODY_SCROLL_ID: &str = "note-body-scroll";
+const BODY_SCROLL_ID: &str = "note-body-scroll";
 const BODY_EDITOR_ID: &str = "note-body-editor";
+/// Space kept below the last line when following the caret (part of the
+/// editor's bottom padding).
+const CARET_MARGIN: f32 = 12.0;
+
+/// Scrolls the note body just enough to show its last line, and only if that
+/// line has gone below the visible area. Runs against the real layout, so it
+/// sees the text height after the edit that triggered it.
+pub fn reveal_last_line() -> iced::Task<Message> {
+    iced::advanced::widget::operate(RevealLastLine(Id::new(BODY_SCROLL_ID)))
+}
+
+struct RevealLastLine(Id);
+
+impl<T> Operation<T> for RevealLastLine {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+        translation: Vector,
+        state: &mut dyn Scrollable,
+    ) {
+        if id != Some(&self.0) {
+            return;
+        }
+        let caret_bottom = content_bounds.height - CARET_MARGIN;
+        let visible_bottom = translation.y + bounds.height;
+        if caret_bottom > visible_bottom {
+            state.scroll_to(AbsoluteOffset {
+                x: None,
+                y: Some(caret_bottom - bounds.height),
+            });
+        }
+    }
+}
 /// Approximate heights of everything above/below the body, used to size the
 /// editor so it fills the note without forcing a scrollbar.
 const CHROME_HEIGHT: f32 = 72.0;
 const PICKER_HEIGHT: f32 = 148.0;
 const CONFIRM_HEIGHT: f32 = 46.0;
+
+/// How much lighter than its bar a note's paper is.
+pub(crate) const PAPER_LIGHTEN: f32 = -0.12;
 
 const INK: [f32; 3] = [0.13, 0.12, 0.10];
 const RADIUS: f32 = 1.0;
@@ -51,12 +97,12 @@ pub struct PostIt<'a> {
     pub dragging: bool,
 }
 
-fn ink(alpha: f32) -> Color {
+pub(crate) fn ink(alpha: f32) -> Color {
     Color::from_rgba(INK[0], INK[1], INK[2], alpha)
 }
 
 /// Mixes the note color toward black (`amount > 0`) or white (`amount < 0`).
-fn shade(note: &Note, amount: f32, alpha: f32) -> Color {
+pub(crate) fn shade(note: &Note, amount: f32, alpha: f32) -> Color {
     let [r, g, b, _] = note.color.rgba;
     let mix = |c: f32| {
         if amount >= 0.0 {
@@ -107,7 +153,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     };
 
     // Starts as the bar color so the morph has no seam where it meets the bar.
-    let paper = shade(note, -0.12 * morph_progress, 1.0);
+    let paper = shade(note, PAPER_LIGHTEN * morph_progress, 1.0);
     let shadow_alpha = 0.28 * morph_progress;
 
     let inner: Element<'_, Message> = if a < 0.01 {
@@ -347,4 +393,73 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             ..Default::default()
         })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::advanced::widget::operation::scrollable::RelativeOffset;
+    use iced::{Point, Size};
+
+    #[derive(Default)]
+    struct FakeScrollable {
+        scrolled_to: Option<f32>,
+    }
+
+    impl Scrollable for FakeScrollable {
+        fn snap_to(&mut self, _offset: RelativeOffset<Option<f32>>) {}
+
+        fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
+            self.scrolled_to = offset.y;
+        }
+
+        fn scroll_by(&mut self, _: AbsoluteOffset, _: Rectangle, _: Rectangle) {}
+    }
+
+    /// Runs the operation on a body `viewport` px tall showing `content` px of
+    /// text, currently scrolled down by `offset`.
+    fn run(viewport: f32, content: f32, offset: f32) -> Option<f32> {
+        let id = Id::new(BODY_SCROLL_ID);
+        let mut state = FakeScrollable::default();
+        Operation::<()>::scrollable(
+            &mut RevealLastLine(id.clone()),
+            Some(&id),
+            Rectangle::new(Point::ORIGIN, Size::new(300.0, viewport)),
+            Rectangle::new(Point::ORIGIN, Size::new(300.0, content)),
+            Vector::new(0.0, offset),
+            &mut state,
+        );
+        state.scrolled_to
+    }
+
+    #[test]
+    fn no_scroll_while_text_fits() {
+        assert_eq!(run(250.0, 120.0, 0.0), None);
+        assert_eq!(run(250.0, 250.0 + CARET_MARGIN, 0.0), None);
+    }
+
+    #[test]
+    fn scrolls_just_enough_once_text_passes_bottom() {
+        let to = run(250.0, 300.0, 0.0).expect("should scroll");
+        assert!((to - (300.0 - CARET_MARGIN - 250.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn no_scroll_when_last_line_already_visible() {
+        assert_eq!(run(250.0, 300.0, 60.0), None);
+    }
+
+    #[test]
+    fn ignores_other_scrollables() {
+        let mut state = FakeScrollable::default();
+        Operation::<()>::scrollable(
+            &mut RevealLastLine(Id::new(BODY_SCROLL_ID)),
+            Some(&Id::new("something-else")),
+            Rectangle::new(Point::ORIGIN, Size::new(300.0, 100.0)),
+            Rectangle::new(Point::ORIGIN, Size::new(300.0, 900.0)),
+            Vector::ZERO,
+            &mut state,
+        );
+        assert_eq!(state.scrolled_to, None);
+    }
 }

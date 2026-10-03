@@ -23,6 +23,9 @@ pub const OPEN_WIDTH: f32 = STRIP_WIDTH + NOTE_GAP + NOTE_EXPANDED_SIZE + NOTE_M
 /// While mouse passthrough is on, how often the OS cursor is polled to notice
 /// it entering the strip or the note again.
 const CURSOR_POLL: Duration = Duration::from_millis(50);
+/// How long the cursor rests on a bar before it widens into a peek.
+const PEEK_DELAY: Duration = Duration::from_secs(1);
+const PEEK_POLL: Duration = Duration::from_millis(100);
 /// Share of the monitor height the docked window occupies (centered).
 const HEIGHT_FRACTION: f32 = 0.9;
 
@@ -59,6 +62,7 @@ pub enum Message {
     MouseButton(bool),
     WindowUnfocused,
     PollCursor,
+    PeekTick(Instant),
     CursorPolled(Option<Point>),
 }
 
@@ -91,6 +95,11 @@ pub struct App {
     /// Grab offset (cursor minus note top-left) while the open note is dragged.
     note_drag: Option<Vector>,
     note_drag_pos: Option<Point>,
+    /// Bar under the cursor and since when, for the hover peek delay.
+    hover_bar: Option<(Uuid, Instant)>,
+    /// Note whose bar is widened into a peek (kept while it collapses).
+    peek_note: Option<Uuid>,
+    peek: Morph,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +152,9 @@ impl App {
                 last_cursor: None,
                 note_drag: None,
                 note_drag_pos: None,
+                hover_bar: None,
+                peek_note: None,
+                peek: Morph::peek(),
             },
             window::oldest().then(|id| match id {
                 Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
@@ -158,6 +170,7 @@ impl App {
                     self.cursor_y = y;
                     self.animating = true;
                 }
+                self.update_hover();
                 if let Some(cursor_y) = y {
                     if self.drag.is_some() {
                         return self.update(Message::DragMove(cursor_y));
@@ -212,11 +225,10 @@ impl App {
                             }
                             self.store.mark_dirty();
                         }
-                        // Keep the caret in view while writing at the end.
+                        // Follow the caret only once writing at the end runs
+                        // past the bottom of the note.
                         if content.cursor().position.line + 1 >= content.line_count() {
-                            return iced::widget::operation::snap_to_end(
-                                crate::note_panel::BODY_SCROLL_ID,
-                            );
+                            return crate::note_panel::reveal_last_line();
                         }
                     }
                 }
@@ -253,9 +265,12 @@ impl App {
                     .clamp(0.0, 1.0 / 30.0);
                 self.last_tick = Some(now);
 
-                let centers = self.bar_centers();
+                let centers = self.magnification_centers();
                 let mag_active = self.magnification.update(self.cursor_y, &centers, dt);
-                let morph_active = self.morph.tick(dt);
+                let morph_active = self.morph.tick(dt) | self.peek.tick(dt);
+                if self.peek.is_closed() {
+                    self.peek_note = None;
+                }
                 let expand_active = self.expand_animation.tick(dt);
                 self.animating = mag_active || morph_active || expand_active;
                 if !self.animating {
@@ -295,7 +310,18 @@ impl App {
                 self.expand_animation.set_target(0.0);
                 self.animating = true;
             }
+            Message::PeekTick(now) => {
+                self.update_hover();
+                if let Some((id, since)) = self.hover_bar {
+                    if !self.peek.is_opening() && now.duration_since(since) >= PEEK_DELAY {
+                        self.peek_note = Some(id);
+                        self.peek.open();
+                        self.animating = true;
+                    }
+                }
+            }
             Message::DragStart(index, origin_y) => {
+                self.hide_peek();
                 // Origin is the press position, so a click without movement
                 // opens the note even when pressed far from the bar's center.
                 self.drag = Some(DragState {
@@ -408,6 +434,9 @@ impl App {
             &self.magnification,
             &self.drag,
             self.scroll_offset,
+            self.peek_note
+                .and_then(|id| self.store.notes().iter().position(|n| n.id == id))
+                .map(|index| (index, self.peek.progress())),
         ))
         .width(Fill)
         .height(Fill)
@@ -477,6 +506,9 @@ impl App {
         if self.passthrough {
             subs.push(iced::time::every(CURSOR_POLL).map(|_| Message::PollCursor));
         }
+        if self.hover_bar.is_some() && !self.peek.is_opening() {
+            subs.push(iced::time::every(PEEK_POLL).map(Message::PeekTick));
+        }
         Subscription::batch(subs)
     }
 
@@ -492,6 +524,7 @@ impl App {
 
         let switching = self.active_note.is_some_and(|active| active != id);
         self.editor_content = Some(text_editor::Content::with_text(&note.content));
+        self.hide_peek();
         self.active_note = Some(id);
         self.pending_delete = None;
         self.color_picker_open = false;
@@ -597,6 +630,7 @@ impl App {
         if want {
             // No more cursor events will arrive, so drop the hover state now.
             self.cursor_y = None;
+            self.update_hover();
             self.note_hovered = false;
             self.animating = true;
             window::enable_mouse_passthrough(id)
@@ -617,6 +651,40 @@ impl App {
             }
             self.store.mark_dirty();
         }
+    }
+
+    /// Tracks which bar the cursor rests on. Leaving it collapses the peek;
+    /// moving to another bar while a peek is showing peeks it right away.
+    fn update_hover(&mut self) {
+        let hovered = match (self.cursor_y, self.active_note, &self.drag) {
+            (Some(y), None, None) => {
+                let strip = self.strip_layout();
+                strip
+                    .bars
+                    .iter()
+                    .position(|bar| (bar.y..=bar.y + bar.height).contains(&y))
+                    .map(|i| self.store.notes()[i].id)
+            }
+            _ => None,
+        };
+        if hovered == self.hover_bar.map(|(id, _)| id) {
+            return;
+        }
+        self.hover_bar = hovered.map(|id| (id, Instant::now()));
+        match hovered {
+            Some(id) if self.peek.is_opening() => {
+                self.peek_note = Some(id);
+                self.peek.restart();
+            }
+            _ => self.peek.close(),
+        }
+        self.animating = true;
+    }
+
+    fn hide_peek(&mut self) {
+        self.hover_bar = None;
+        self.peek_note = None;
+        self.peek = Morph::peek();
     }
 
     fn note_frame(&self) -> Option<MorphFrame> {
@@ -679,6 +747,17 @@ impl App {
             Point::new(right - width, center_y - height / 2.0),
             Size::new(width, height),
         )
+    }
+
+    /// Bar centers plus the add button's, which magnifies along with them.
+    fn magnification_centers(&self) -> Vec<f32> {
+        let strip = self.strip_layout();
+        strip
+            .bars
+            .iter()
+            .chain([&strip.add_button])
+            .map(|r| r.y + r.height / 2.0)
+            .collect()
     }
 
     fn bar_centers(&self) -> Vec<f32> {

@@ -5,21 +5,32 @@ pub fn gaussian_scale(distance: f32, max_mag: f32, spread: f32) -> f32 {
 }
 
 const STIFFNESS: f32 = 300.0;
-const DAMPING: f32 = 34.64; // 2.0 * sqrt(300.0) ≈ 34.64 (critically damped)
+/// Dock magnification follows the cursor much faster (settles in ~0.15 s).
+const MAGNIFICATION_STIFFNESS: f32 = 1100.0;
 const SETTLE_THRESHOLD: f32 = 0.001;
+const MAX_STEP: f32 = 1.0 / 240.0;
 
+/// Critically damped spring: fast as the stiffness allows, without overshoot.
 pub struct AnimationState {
     current: f32,
     target: f32,
     velocity: f32,
+    stiffness: f32,
+    damping: f32,
 }
 
 impl AnimationState {
     pub fn new(value: f32) -> Self {
+        Self::with_stiffness(value, STIFFNESS)
+    }
+
+    pub fn with_stiffness(value: f32, stiffness: f32) -> Self {
         Self {
             current: value,
             target: value,
             velocity: 0.0,
+            stiffness,
+            damping: 2.0 * stiffness.sqrt(),
         }
     }
 
@@ -28,10 +39,16 @@ impl AnimationState {
     }
 
     pub fn tick(&mut self, dt: f32) -> bool {
+        // Fixed small substeps keep stiff springs stable on slow frames.
+        let steps = (dt / MAX_STEP).ceil().max(1.0);
+        let step = dt / steps;
+        for _ in 0..steps as usize {
+            let accel =
+                -self.stiffness * (self.current - self.target) - self.damping * self.velocity;
+            self.velocity += accel * step;
+            self.current += self.velocity * step;
+        }
         let displacement = self.current - self.target;
-        let accel = -STIFFNESS * displacement - DAMPING * self.velocity;
-        self.velocity += accel * dt;
-        self.current += self.velocity * dt;
 
         if displacement.abs() < SETTLE_THRESHOLD && self.velocity.abs() < SETTLE_THRESHOLD {
             self.current = self.target;
@@ -61,7 +78,8 @@ impl MagnificationState {
 
     pub fn sync_count(&mut self, count: usize) {
         while self.scales.len() < count {
-            self.scales.push(AnimationState::new(1.0));
+            self.scales
+                .push(AnimationState::with_stiffness(1.0, MAGNIFICATION_STIFFNESS));
         }
         self.scales.truncate(count);
     }
@@ -89,18 +107,34 @@ impl MagnificationState {
 
 const OPEN_SECS: f32 = 0.45;
 const CLOSE_SECS: f32 = 0.34;
+const PEEK_OPEN_SECS: f32 = 0.28;
+const PEEK_CLOSE_SECS: f32 = 0.2;
 
-/// Time-based progress for the note open/close morph (0 = docked bar, 1 = full note).
+/// Time-based progress between a docked bar (0) and its expanded form (1).
 pub struct Morph {
     progress: f32,
     opening: bool,
+    open_secs: f32,
+    close_secs: f32,
 }
 
 impl Morph {
+    /// Timing for opening a full note.
     pub fn new() -> Self {
+        Self::with_durations(OPEN_SECS, CLOSE_SECS)
+    }
+
+    /// Quicker timing for the hover peek.
+    pub fn peek() -> Self {
+        Self::with_durations(PEEK_OPEN_SECS, PEEK_CLOSE_SECS)
+    }
+
+    fn with_durations(open_secs: f32, close_secs: f32) -> Self {
         Self {
             progress: 0.0,
             opening: false,
+            open_secs,
+            close_secs,
         }
     }
 
@@ -131,10 +165,10 @@ impl Morph {
 
     pub fn tick(&mut self, dt: f32) -> bool {
         if self.opening {
-            self.progress = (self.progress + dt / OPEN_SECS).min(1.0);
+            self.progress = (self.progress + dt / self.open_secs).min(1.0);
             self.progress < 1.0
         } else {
-            self.progress = (self.progress - dt / CLOSE_SECS).max(0.0);
+            self.progress = (self.progress - dt / self.close_secs).max(0.0);
             self.progress > 0.0
         }
     }
@@ -223,6 +257,12 @@ mod tests {
         let mid = anim.value();
         anim.set_target(0.0);
         anim.tick(1.0 / 60.0);
+        // Momentum carries it on briefly, but without a jump...
+        assert!((anim.value() - mid).abs() < 0.05);
+        // ...and it is heading back within a few frames.
+        for _ in 0..3 {
+            anim.tick(1.0 / 60.0);
+        }
         assert!(anim.value() < mid);
     }
 
@@ -266,6 +306,37 @@ mod tests {
         let h_frac = (mid.rect.height - from.height) / (to.height - from.height);
         assert!(w_frac > h_frac);
         assert_eq!(mid.content_alpha, 0.0);
+    }
+
+    #[test]
+    fn magnification_settles_quickly_without_overshoot() {
+        let mut mag = MagnificationState::new();
+        let centers = vec![100.0];
+        let target = 1.0 + MAX_MAG;
+        let mut peak: f32 = 0.0;
+        let mut frames_to_95 = None;
+        for frame in 1..=120 {
+            mag.update(Some(100.0), &centers, 1.0 / 60.0);
+            let s = mag.scale(0);
+            peak = peak.max(s);
+            if frames_to_95.is_none() && s - 1.0 >= 0.95 * MAX_MAG {
+                frames_to_95 = Some(frame);
+            }
+        }
+        // Reaches 95% within ~0.2 s at 60 fps and never overshoots.
+        let frames = frames_to_95.expect("never reached 95%");
+        assert!(frames <= 12, "took {frames} frames");
+        assert!(peak <= target + 0.001);
+    }
+
+    #[test]
+    fn magnification_is_stable_at_low_frame_rates() {
+        let mut mag = MagnificationState::new();
+        let centers = vec![100.0];
+        for _ in 0..60 {
+            mag.update(Some(100.0), &centers, 1.0 / 30.0);
+        }
+        assert!((mag.scale(0) - (1.0 + MAX_MAG)).abs() < 0.01);
     }
 
     #[test]

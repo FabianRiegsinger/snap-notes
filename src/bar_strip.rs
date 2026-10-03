@@ -1,6 +1,7 @@
 use crate::animation::MagnificationState;
 use crate::app::{DragState, Message};
 use crate::note::Note;
+use crate::peek::draw_peek;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
@@ -17,8 +18,12 @@ pub const BAR_GAP: f32 = 12.0;
 pub const STRIP_WIDTH: f32 = 64.0;
 /// Horizontal space between the screen edge and the bars.
 pub const EDGE_MARGIN: f32 = 10.0;
-const ADD_BUTTON_SIZE: f32 = 30.0;
 const ADD_BUTTON_GAP: f32 = 20.0;
+/// The add button is shaped like a bar and magnifies with them, but its
+/// height grows less so it stays a compact "slot" rather than a tall note.
+const ADD_MAX_HEIGHT_SCALE: f32 = 1.4;
+/// Magnification at which the "+" inside the add bar is fully visible.
+const ADD_PLUS_SCALE: f32 = 3.0;
 const EDGE_PADDING: f32 = 16.0;
 const CORNER_RADIUS: f32 = 3.0;
 
@@ -34,6 +39,8 @@ pub struct StripLayout {
 /// `bounds`. Centering on the *current* (magnified) height keeps the hovered
 /// bar roughly in place while its neighbours grow. If the stack is taller than
 /// the bounds, it is top-aligned and scrolled by `scroll_offset`.
+///
+/// `scale(count)` is the add button's magnification.
 pub fn compute_layout(
     count: usize,
     scale: impl Fn(usize) -> f32,
@@ -43,7 +50,12 @@ pub fn compute_layout(
     let heights: Vec<f32> = (0..count).map(|i| BAR_REST_HEIGHT * scale(i)).collect();
     let bars_height: f32 = heights.iter().sum::<f32>() + BAR_GAP * count.saturating_sub(1) as f32;
     let add_gap = if count > 0 { ADD_BUTTON_GAP } else { 0.0 };
-    let content_height = bars_height + add_gap + ADD_BUTTON_SIZE;
+    let add_scale = scale(count);
+    let add_size = Size::new(
+        BAR_REST_WIDTH * add_scale,
+        BAR_REST_HEIGHT * add_scale.min(ADD_MAX_HEIGHT_SCALE),
+    );
+    let content_height = bars_height + add_gap + add_size.height;
 
     let available = bounds.height - 2.0 * EDGE_PADDING;
     let (mut y, max_scroll) = if content_height <= available {
@@ -67,13 +79,10 @@ pub fn compute_layout(
         y += add_gap - BAR_GAP;
     }
 
-    let add_button = Rectangle::new(
-        Point::new(right - ADD_BUTTON_SIZE, y),
-        Size::new(ADD_BUTTON_SIZE, ADD_BUTTON_SIZE),
-    );
+    let add_button = Rectangle::new(Point::new(right - add_size.width, y), add_size);
     let add_hit_area = Rectangle::new(
         Point::new(bounds.x, y - add_gap / 2.0),
-        Size::new(bounds.width, ADD_BUTTON_SIZE + add_gap / 2.0 + EDGE_PADDING),
+        Size::new(bounds.width, add_size.height + add_gap / 2.0 + EDGE_PADDING),
     );
 
     StripLayout {
@@ -89,6 +98,8 @@ pub struct BarStrip<'a> {
     magnification: &'a MagnificationState,
     drag: &'a Option<DragState>,
     scroll_offset: f32,
+    /// Bar index being peeked and the peek's progress (0..=1).
+    peek: Option<(usize, f32)>,
 }
 
 impl<'a> BarStrip<'a> {
@@ -97,12 +108,14 @@ impl<'a> BarStrip<'a> {
         magnification: &'a MagnificationState,
         drag: &'a Option<DragState>,
         scroll_offset: f32,
+        peek: Option<(usize, f32)>,
     ) -> Self {
         Self {
             notes,
             magnification,
             drag,
             scroll_offset,
+            peek,
         }
     }
 
@@ -164,6 +177,14 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             .is_some_and(|d| (d.current_y - d.origin_y).abs() > 5.0);
 
         for (i, bar_rect) in bars.iter().enumerate() {
+            if let Some((peek_index, progress)) = self.peek {
+                if peek_index == i && progress > 0.0 {
+                    if let Some(note) = self.notes.get(i) {
+                        draw_peek(renderer, note, *bar_rect, CORNER_RADIUS, progress);
+                    }
+                    continue;
+                }
+            }
             if let Some(note) = self.notes.get(i) {
                 let alpha = if drag_active && Some(i) == dragging_index {
                     0.3
@@ -237,60 +258,51 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             }
         }
 
+        // Add button: an "empty slot" bar. At rest it is a hollow outline
+        // the size of a note bar; magnified it fills in and shows a "+".
         let btn = strip.add_button;
         let hovered = cursor.is_over(strip.add_hit_area) && self.drag.is_none();
-        let (fill, border, plus) = if hovered {
-            (
-                Color::from_rgba(1.0, 1.0, 1.0, 0.95),
-                Color::from_rgba(1.0, 1.0, 1.0, 1.0),
-                Color::from_rgb(0.15, 0.15, 0.17),
-            )
-        } else {
-            (
-                Color::from_rgba(0.2, 0.2, 0.22, 0.6),
-                Color::from_rgba(1.0, 1.0, 1.0, 0.35),
-                Color::from_rgba(1.0, 1.0, 1.0, 0.85),
-            )
-        };
+        let reveal = ((self.magnification.scale(self.notes.len()) - 1.0) / (ADD_PLUS_SCALE - 1.0))
+            .clamp(0.0, 1.0);
+        let fill_alpha = if hovered { 0.9 } else { 0.15 + 0.5 * reveal };
+        let shade = if hovered { 0.3 } else { 0.45 };
         renderer::Renderer::fill_quad(
             renderer,
             renderer::Quad {
                 bounds: btn,
                 border: iced::Border {
-                    radius: (ADD_BUTTON_SIZE / 2.0).into(),
-                    width: 1.5,
-                    color: border,
+                    radius: CORNER_RADIUS.into(),
+                    width: 1.5 * (1.0 - reveal),
+                    color: Color::from_rgba(0.45, 0.46, 0.5, 0.75),
                 },
-                shadow: iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, if hovered { 0.35 } else { 0.0 }),
-                    offset: iced::Vector::new(0.0, 2.0),
-                    blur_radius: 6.0,
-                },
+                shadow: Default::default(),
                 snap: true,
             },
-            fill,
+            Color::from_rgba(shade, shade + 0.01, shade + 0.05, fill_alpha),
         );
-        let plus_h = 2.0;
-        let plus_len = ADD_BUTTON_SIZE * 0.42;
-        let cx = btn.x + btn.width / 2.0;
-        let cy = btn.y + btn.height / 2.0;
-        for size in [Size::new(plus_len, plus_h), Size::new(plus_h, plus_len)] {
-            renderer::Renderer::fill_quad(
-                renderer,
-                renderer::Quad {
-                    bounds: Rectangle::new(
-                        Point::new(cx - size.width / 2.0, cy - size.height / 2.0),
-                        size,
-                    ),
-                    border: iced::Border {
-                        radius: 1.0.into(),
-                        ..Default::default()
+        if reveal > 0.0 {
+            let thickness = 2.0;
+            let len = (btn.width.min(btn.height) * 0.5).max(thickness);
+            let cx = btn.x + btn.width / 2.0;
+            let cy = btn.y + btn.height / 2.0;
+            for size in [Size::new(len, thickness), Size::new(thickness, len)] {
+                renderer::Renderer::fill_quad(
+                    renderer,
+                    renderer::Quad {
+                        bounds: Rectangle::new(
+                            Point::new(cx - size.width / 2.0, cy - size.height / 2.0),
+                            size,
+                        ),
+                        border: iced::Border {
+                            radius: 1.0.into(),
+                            ..Default::default()
+                        },
+                        shadow: Default::default(),
+                        snap: true,
                     },
-                    shadow: Default::default(),
-                    snap: true,
-                },
-                plus,
-            );
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.95 * reveal),
+                );
+            }
         }
 
         if let Some(drag) = &self.drag {
@@ -439,8 +451,9 @@ pub fn bar_strip<'a>(
     magnification: &'a MagnificationState,
     drag: &'a Option<DragState>,
     scroll_offset: f32,
+    peek: Option<(usize, f32)>,
 ) -> Element<'a, Message> {
-    BarStrip::new(notes, magnification, drag, scroll_offset).into()
+    BarStrip::new(notes, magnification, drag, scroll_offset, peek).into()
 }
 
 #[cfg(test)]
@@ -489,6 +502,19 @@ mod tests {
         for bar in l.bars.iter().chain([&l.add_button]) {
             assert!((STRIP_WIDTH - (bar.x + bar.width) - EDGE_MARGIN).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn add_button_is_bar_shaped_at_rest() {
+        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0);
+        assert_eq!(l.add_button.size(), l.bars[0].size());
+    }
+
+    #[test]
+    fn magnified_add_button_widens_but_stays_compact() {
+        let l = compute_layout(3, |i| if i == 3 { 5.0 } else { 1.0 }, bounds(900.0), 0.0);
+        assert!((l.add_button.width - BAR_REST_WIDTH * 5.0).abs() < 0.01);
+        assert!((l.add_button.height - BAR_REST_HEIGHT * ADD_MAX_HEIGHT_SCALE).abs() < 0.01);
     }
 
     #[test]
