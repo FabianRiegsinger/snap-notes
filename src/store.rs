@@ -77,7 +77,6 @@ impl NoteStore {
 
     /// Gives every note colored `old` the color `new`. Returns whether any
     /// note changed; the caller marks the store dirty.
-    #[allow(dead_code)] // TEMP: used by the settings panel in a later commit.
     pub fn recolor(&mut self, old: NoteColor, new: NoteColor) -> bool {
         let mut changed = false;
         for note in self.notes.iter_mut().filter(|n| n.color == old) {

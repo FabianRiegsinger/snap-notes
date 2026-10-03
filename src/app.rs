@@ -3,7 +3,8 @@ use crate::bar_strip::{band, bar_strip, compute_layout, StripLayout, STRIP_WIDTH
 use crate::note::NoteColor;
 use crate::note_panel::{post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
-use crate::settings::{Settings, SettingsStore};
+use crate::settings::{SettingKey, Settings, SettingsGroup, SettingsStore};
+use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::NoteStore;
 
 use iced::widget::{container, mouse_area, opaque, pin, stack, text_editor, Space};
@@ -28,6 +29,12 @@ pub enum Message {
     BarClicked(usize),
     AddNote,
     ToggleSettings,
+    CloseSettings,
+    SettingChanged(SettingKey, f32),
+    ResetGroup(SettingsGroup),
+    /// Palette slot whose preset grid is open (`None` closes it).
+    PaletteSlotSelected(Option<usize>),
+    PaletteColorChosen(NoteColor),
     NoteEdited(text_editor::Action),
     TitleEdited(String),
     NoteHovered(bool),
@@ -95,6 +102,12 @@ pub struct App {
     /// Note whose bar is widened into a peek (kept while it collapses).
     peek_note: Option<Uuid>,
     peek: Morph,
+    /// The settings panel is showing (kept while it folds back into the gear).
+    settings_open: bool,
+    settings_morph: Morph,
+    /// Gear center when the panel opened; the panel stays centered on it.
+    settings_anchor_y: f32,
+    palette_slot: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +137,7 @@ impl App {
         }
         let morph = Morph::new(s.motion.speed);
         let peek = Morph::peek(s.motion.speed);
+        let settings_morph = Morph::new(s.motion.speed);
         let expand_animation = AnimationState::new(0.0, s.motion.stiffness);
         let window_size = Size::new(Self::docked_width(s, false), 600.0);
         (
@@ -158,6 +172,10 @@ impl App {
                 hover_bar: None,
                 peek_note: None,
                 peek,
+                settings_open: false,
+                settings_morph,
+                settings_anchor_y: 0.0,
+                palette_slot: None,
             },
             window::oldest().then(|id| match id {
                 Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
@@ -181,7 +199,59 @@ impl App {
                 }
             }
             Message::BarClicked(index) => return self.open_note(index),
-            Message::ToggleSettings => {}
+            Message::ToggleSettings => {
+                if self.settings_open && self.settings_morph.is_opening() {
+                    return self.update(Message::CloseSettings);
+                }
+                let close_note = self.update(Message::ClosePanel);
+                self.hide_peek();
+                let gear = self.strip_layout().settings_button;
+                self.settings_anchor_y = gear.y + gear.height / 2.0;
+                self.settings_open = true;
+                self.palette_slot = None;
+                self.settings_morph.open();
+                self.animating = true;
+                return Task::batch([close_note, self.dock_window()]);
+            }
+            Message::CloseSettings => {
+                if self.settings_open {
+                    self.settings_morph.close();
+                    self.animating = true;
+                }
+            }
+            Message::SettingChanged(key, value) => {
+                self.settings.settings_mut().set(key, value);
+                return self.apply_settings();
+            }
+            Message::ResetGroup(group) => {
+                if group == SettingsGroup::Palette {
+                    let changes = self.settings.settings_mut().reset_palette();
+                    for (old, new) in changes {
+                        if self.store.recolor(old, new) {
+                            self.store.mark_dirty();
+                        }
+                    }
+                } else {
+                    self.settings.settings_mut().reset(group);
+                }
+                return self.apply_settings();
+            }
+            Message::PaletteSlotSelected(slot) => {
+                self.palette_slot = slot;
+            }
+            Message::PaletteColorChosen(color) => {
+                if let Some(slot) = self.palette_slot {
+                    if let Some(old) = self
+                        .settings
+                        .settings_mut()
+                        .replace_palette_color(slot, color)
+                    {
+                        if self.store.recolor(old, color) {
+                            self.store.mark_dirty();
+                        }
+                    }
+                }
+            }
             Message::AddNote => {
                 self.store.add_note(&self.settings.settings().palette);
                 self.store.mark_dirty();
@@ -276,9 +346,14 @@ impl App {
                     dt,
                     &self.settings.settings().hover,
                 );
-                let morph_active = self.morph.tick(dt) | self.peek.tick(dt);
+                let morph_active =
+                    self.morph.tick(dt) | self.peek.tick(dt) | self.settings_morph.tick(dt);
                 if self.peek.is_closed() {
                     self.peek_note = None;
+                }
+                if self.settings_open && self.settings_morph.is_closed() {
+                    self.settings_open = false;
+                    self.palette_slot = None;
                 }
                 let expand_active = self.expand_animation.tick(dt);
                 self.animating = mag_active || morph_active || expand_active;
@@ -402,7 +477,13 @@ impl App {
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 use keyboard::key::Named;
                 match key.as_ref() {
+                    keyboard::Key::Named(Named::Escape) if self.settings_open => {
+                        return self.update(Message::CloseSettings)
+                    }
                     keyboard::Key::Named(Named::Escape) => return self.update(Message::ClosePanel),
+                    keyboard::Key::Character(",") if modifiers.command() => {
+                        return self.update(Message::ToggleSettings)
+                    }
                     keyboard::Key::Character("n") if modifiers.command() => {
                         return self.update(Message::AddNote)
                     }
@@ -428,8 +509,10 @@ impl App {
                 }
             }
             Message::WindowUnfocused => {
-                // Clicking another app (through the passthrough area) closes the note.
-                return self.update(Message::ClosePanel);
+                // Clicking another app (through the passthrough area) closes
+                // the note and the settings.
+                let close_settings = self.update(Message::CloseSettings);
+                return Task::batch([close_settings, self.update(Message::ClosePanel)]);
             }
             Message::PollCursor => {
                 if let Some(id) = self.window_id {
@@ -499,6 +582,25 @@ impl App {
             }
         }
 
+        if let Some(frame) = self.settings_frame() {
+            let rect = frame.rect;
+            if rect.width >= 1.0 && rect.height >= 1.0 {
+                layers.push(
+                    mouse_area(Space::new().width(Fill).height(Fill))
+                        .on_press(Message::CloseSettings)
+                        .into(),
+                );
+                let panel = settings_panel(SettingsView {
+                    settings: self.settings.settings(),
+                    size: rect.size(),
+                    morph_progress: self.settings_morph.progress(),
+                    content_alpha: frame.content_alpha,
+                    selected_slot: self.palette_slot,
+                });
+                layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
+            }
+        }
+
         layers.push(strip.into());
         stack(layers).width(Fill).height(Fill).into()
     }
@@ -547,6 +649,10 @@ impl App {
         let switching = self.active_note.is_some_and(|active| active != id);
         self.editor_content = Some(text_editor::Content::with_text(&note.content));
         self.hide_peek();
+        // A note and the settings never show at the same time.
+        if self.settings_open {
+            self.settings_morph.close();
+        }
         self.active_note = Some(id);
         self.pending_delete = None;
         self.color_picker_open = false;
@@ -608,7 +714,10 @@ impl App {
             monitor
         } else {
             Size::new(
-                Self::docked_width(self.settings.settings(), self.active_note.is_some()),
+                Self::docked_width(
+                    self.settings.settings(),
+                    self.active_note.is_some() || self.settings_open,
+                ),
                 (monitor.height * self.settings.settings().window.height_fraction).round(),
             )
         };
@@ -624,7 +733,7 @@ impl App {
     }
 
     /// Whether the window should catch the mouse at `position`: over the bar
-    /// stack or the open note. Everywhere else clicks go to the apps behind.
+    /// stack, the open note or the settings. Everywhere else clicks go to the apps behind.
     fn is_interactive(&self, position: Point) -> bool {
         let strip = self.strip_layout();
         let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y)
@@ -632,10 +741,10 @@ impl App {
         let bottom = strip.settings_hit_area.y + strip.settings_hit_area.height;
         let over_strip = position.x >= self.window_size.width - STRIP_WIDTH
             && (top..=bottom).contains(&position.y);
-        let over_note = self
-            .note_frame()
-            .is_some_and(|frame| frame.rect.expand(8.0).contains(position));
-        over_strip || over_note
+        let over_panel = |frame: Option<MorphFrame>| {
+            frame.is_some_and(|frame| frame.rect.expand(8.0).contains(position))
+        };
+        over_strip || over_panel(self.note_frame()) || over_panel(self.settings_frame())
     }
 
     fn update_passthrough(&mut self, cursor: Option<Point>) -> Task<Message> {
@@ -680,7 +789,7 @@ impl App {
     /// moving to another bar while a peek is showing peeks it right away.
     fn update_hover(&mut self) {
         let hovered = match (self.cursor_y, self.active_note, &self.drag) {
-            (Some(y), None, None) => {
+            (Some(y), None, None) if !self.settings_open => {
                 let strip = self.strip_layout();
                 strip
                     .bars
@@ -708,6 +817,28 @@ impl App {
         self.hover_bar = None;
         self.peek_note = None;
         self.peek = Morph::peek(self.settings.settings().motion.speed);
+    }
+
+    /// The settings panel's current frame, morphing out of the gear slot.
+    fn settings_frame(&self) -> Option<MorphFrame> {
+        if !self.settings_open {
+            return None;
+        }
+        let source = self.strip_layout().settings_button;
+        let height = (self.window_size.height - 2.0 * NOTE_MARGIN).min(PANEL_MAX_HEIGHT);
+        let right = self.window_size.width - STRIP_WIDTH - NOTE_GAP;
+        let min_center = NOTE_MARGIN + height / 2.0;
+        let max_center = self.window_size.height - NOTE_MARGIN - height / 2.0;
+        let center_y = if max_center > min_center {
+            self.settings_anchor_y.clamp(min_center, max_center)
+        } else {
+            self.window_size.height / 2.0
+        };
+        let target = Rectangle::new(
+            Point::new(right - PANEL_WIDTH, center_y - height / 2.0),
+            Size::new(PANEL_WIDTH, height),
+        );
+        Some(morph_frame(source, target, self.settings_morph.progress()))
     }
 
     fn note_frame(&self) -> Option<MorphFrame> {
@@ -747,12 +878,12 @@ impl App {
 
     /// Applies changed settings to running state: animation speeds, scroll
     /// bounds and the docked window size.
-    #[allow(dead_code)] // TEMP: called by the settings panel in the next commit.
     fn apply_settings(&mut self) -> Task<Message> {
         let s = self.settings.settings();
         let (speed, stiffness) = (s.motion.speed, s.motion.stiffness);
         self.morph.set_speed(speed);
         self.peek.set_speed(speed);
+        self.settings_morph.set_speed(speed);
         let target = if self.expanded { 1.0 } else { 0.0 };
         self.expand_animation = AnimationState::new(self.expand_animation.value(), stiffness);
         self.expand_animation.set_target(target);

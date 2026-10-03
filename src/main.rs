@@ -8,6 +8,7 @@ mod pass_wheel;
 mod peek;
 mod platform;
 mod settings;
+mod settings_panel;
 mod store;
 
 use app::App;

@@ -11,49 +11,12 @@ pub fn color_picker<'a>(current: &NoteColor, palette: &'a [NoteColor]) -> Elemen
             let btns: Vec<Element<'_, Message>> = chunk
                 .iter()
                 .map(|color| {
-                    let is_current = color.to_hex() == current.to_hex();
-                    let c = *color;
-                    let r = c.rgba[0];
-                    let g = c.rgba[1];
-                    let b = c.rgba[2];
-
-                    let swatch_content: Element<'_, Message> = if is_current {
-                        container(text("✓").size(12))
-                            .width(24)
-                            .height(24)
-                            .align_x(iced::Alignment::Center)
-                            .align_y(iced::Alignment::Center)
-                            .style(move |_theme: &Theme| container::Style {
-                                background: Some(Color::from_rgb(r, g, b).into()),
-                                border: iced::Border {
-                                    radius: 12.0.into(),
-                                    width: 2.0,
-                                    color: Color::WHITE,
-                                },
-                                ..Default::default()
-                            })
-                            .into()
-                    } else {
-                        container(Space::new().width(24).height(24))
-                            .style(move |_theme: &Theme| container::Style {
-                                background: Some(Color::from_rgb(r, g, b).into()),
-                                border: iced::Border {
-                                    radius: 12.0.into(),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            })
-                            .into()
-                    };
-
-                    button(swatch_content)
-                        .on_press(Message::ColorChosen(c))
-                        .padding(2)
-                        .style(|_theme: &Theme, _status| button::Style {
-                            background: None,
-                            ..Default::default()
-                        })
-                        .into()
+                    swatch(
+                        *color,
+                        24.0,
+                        *color == *current,
+                        Message::ColorChosen(*color),
+                    )
                 })
                 .collect();
             row(btns).spacing(4).into()
@@ -69,6 +32,43 @@ pub fn color_picker<'a>(current: &NoteColor, palette: &'a [NoteColor]) -> Elemen
                 width: 1.0,
                 color: Color::from_rgba(0.4, 0.4, 0.4, 0.5),
             },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// A round color button; `selected` adds a white ring and a check mark.
+pub(crate) fn swatch<'a>(
+    color: NoteColor,
+    size: f32,
+    selected: bool,
+    on_press: Message,
+) -> Element<'a, Message> {
+    let [r, g, b, _] = color.rgba;
+    let mark: Element<'a, Message> = if selected {
+        text("✓").size(size / 2.0).into()
+    } else {
+        Space::new().into()
+    };
+    let face = container(mark)
+        .width(size)
+        .height(size)
+        .align_x(iced::Alignment::Center)
+        .align_y(iced::Alignment::Center)
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Color::from_rgb(r, g, b).into()),
+            border: iced::Border {
+                radius: (size / 2.0).into(),
+                width: if selected { 2.0 } else { 0.0 },
+                color: Color::WHITE,
+            },
+            ..Default::default()
+        });
+    button(face)
+        .on_press(on_press)
+        .padding(2)
+        .style(|_theme: &Theme, _status| button::Style {
+            background: None,
             ..Default::default()
         })
         .into()

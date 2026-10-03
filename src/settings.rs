@@ -1,8 +1,5 @@
 //! User-adjustable visual settings, persisted next to the notes.
 
-// TEMP: wired into the app in a later commit.
-#![allow(dead_code)]
-
 use crate::app::{NOTE_GAP, NOTE_MARGIN};
 use crate::bar_strip::STRIP_WIDTH;
 use crate::note::{NoteColor, PALETTE};
@@ -333,6 +330,27 @@ impl Settings {
         }
     }
 
+    /// Puts `color` into palette slot `slot` and returns the color it
+    /// replaced, or `None` if there is no such slot.
+    pub fn replace_palette_color(&mut self, slot: usize, color: NoteColor) -> Option<NoteColor> {
+        let entry = self.palette.get_mut(slot)?;
+        Some(std::mem::replace(entry, color))
+    }
+
+    /// Restores the default palette and returns `(old, default)` for every
+    /// slot that changed, so notes can follow.
+    pub fn reset_palette(&mut self) -> Vec<(NoteColor, NoteColor)> {
+        let changes = self
+            .palette
+            .iter()
+            .zip(PALETTE)
+            .filter(|(old, new)| **old != *new)
+            .map(|(old, new)| (*old, new))
+            .collect();
+        self.palette = PALETTE.to_vec();
+        changes
+    }
+
     /// Window width that fits the strip plus a fully expanded note.
     pub fn open_width(&self) -> f32 {
         STRIP_WIDTH + NOTE_GAP + self.notes.expanded_size + NOTE_MARGIN
@@ -591,6 +609,23 @@ mod tests {
         assert!(!store.should_save(), "debounced");
         store.save().unwrap();
         assert_eq!(SettingsStore::load(path).settings().bars.gap, 20.0);
+    }
+
+    #[test]
+    fn replace_palette_color_returns_old() {
+        let mut s = Settings::default();
+        assert_eq!(s.replace_palette_color(2, PRESETS[0]), Some(PALETTE[2]));
+        assert_eq!(s.palette[2], PRESETS[0]);
+        assert_eq!(s.replace_palette_color(20, PRESETS[0]), None);
+    }
+
+    #[test]
+    fn reset_palette_reports_changed_slots() {
+        let mut s = Settings::default();
+        s.replace_palette_color(1, PRESETS[5]);
+        assert_eq!(s.reset_palette(), vec![(PRESETS[5], PALETTE[1])]);
+        assert_eq!(s.palette, PALETTE.to_vec());
+        assert!(s.reset_palette().is_empty());
     }
 
     #[test]
