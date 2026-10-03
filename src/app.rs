@@ -120,6 +120,9 @@ pub struct App {
     palette_slot: Option<usize>,
     /// The menu bar / tray icon exists.
     tray_ok: bool,
+    /// The tray icon could not be created, so the Dock icon is shown this
+    /// session regardless of the saved setting.
+    tray_failed: bool,
     /// Switching the Dock / taskbar icon briefly takes focus away from the
     /// window; until then losing focus doesn't close the note or settings.
     keep_open_until: Option<Instant>,
@@ -144,61 +147,67 @@ fn data_dir() -> PathBuf {
 impl App {
     pub fn boot() -> (Self, Task<Message>) {
         let settings = SettingsStore::load(data_dir().join("settings.json"));
-        let s = settings.settings();
         let mut store = NoteStore::load(data_dir().join("notes.json"));
         if store.notes().is_empty() {
-            store.seed_templates(&s.palette);
+            store.seed_templates(&settings.settings().palette);
             let _ = store.save();
         }
-        let morph = Morph::new(s.motion.speed);
-        let peek = Morph::peek(s.motion.speed);
-        let settings_morph = Morph::new(s.motion.speed);
-        let expand_animation = AnimationState::new(0.0, s.motion.stiffness);
-        let window_size = Size::new(Self::docked_width(s, false), 600.0);
         (
-            Self {
-                store,
-                settings,
-                magnification: MagnificationState::new(),
-                cursor_y: None,
-                active_note: None,
-                editor_content: None,
-                morph,
-                anchor_y: 0.0,
-                pending_delete: None,
-                expanded: false,
-                expand_animation,
-                color_picker_open: false,
-                note_hovered: false,
-                drag: None,
-                scroll_offset: 0.0,
-                confirm_delete: None,
-                animating: false,
-                last_tick: None,
-                visible: true,
-                window_id: None,
-                monitor: None,
-                window_size,
-                passthrough: false,
-                mouse_down: false,
-                last_cursor: None,
-                note_drag: None,
-                note_drag_pos: None,
-                hover_bar: None,
-                peek_note: None,
-                peek,
-                settings_open: false,
-                settings_morph,
-                settings_anchor_y: 0.0,
-                palette_slot: None,
-                tray_ok: false,
-                keep_open_until: None,
-            },
+            Self::new(store, settings),
             window::oldest().then(|id| match id {
                 Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
                 None => Task::none(),
             }),
         )
+    }
+
+    /// App state around already loaded stores, before any window exists.
+    fn new(store: NoteStore, settings: SettingsStore) -> Self {
+        let s = settings.settings();
+        let morph = Morph::new(s.motion.speed);
+        let peek = Morph::peek(s.motion.speed);
+        let settings_morph = Morph::new(s.motion.speed);
+        let expand_animation = AnimationState::new(0.0, s.motion.stiffness);
+        let window_size = Size::new(Self::docked_width(s, false), 600.0);
+        Self {
+            store,
+            settings,
+            magnification: MagnificationState::new(),
+            cursor_y: None,
+            active_note: None,
+            editor_content: None,
+            morph,
+            anchor_y: 0.0,
+            pending_delete: None,
+            expanded: false,
+            expand_animation,
+            color_picker_open: false,
+            note_hovered: false,
+            drag: None,
+            scroll_offset: 0.0,
+            confirm_delete: None,
+            animating: false,
+            last_tick: None,
+            visible: true,
+            window_id: None,
+            monitor: None,
+            window_size,
+            passthrough: false,
+            mouse_down: false,
+            last_cursor: None,
+            note_drag: None,
+            note_drag_pos: None,
+            hover_bar: None,
+            peek_note: None,
+            peek,
+            settings_open: false,
+            settings_morph,
+            settings_anchor_y: 0.0,
+            palette_slot: None,
+            tray_ok: false,
+            tray_failed: false,
+            keep_open_until: None,
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -219,6 +228,12 @@ impl App {
             Message::ToggleSettings => {
                 if self.settings_open && self.settings_morph.is_opening() {
                     return self.update(Message::CloseSettings);
+                }
+                if self.settings_open {
+                    // Still folding away: unfold again from where it is.
+                    self.settings_morph.open();
+                    self.animating = true;
+                    return Task::none();
                 }
                 let close_note = self.update(Message::ClosePanel);
                 self.hide_peek();
@@ -505,8 +520,9 @@ impl App {
             Message::TrayReady(ok) => {
                 self.tray_ok = ok;
                 // Without a tray icon the Dock icon is the only way back in.
-                if !ok && !self.settings.settings().app.show_dock_icon {
-                    self.settings.settings_mut().app.show_dock_icon = true;
+                // Forced for this session only; the saved choice stays.
+                self.tray_failed = !ok;
+                if !ok {
                     return self.apply_app_visibility();
                 }
             }
@@ -523,6 +539,11 @@ impl App {
                 };
                 let mut tasks = Vec::new();
                 // Adding a note or opening settings needs the notes on screen.
+                let settings_showing = self.settings_open && self.settings_morph.is_opening();
+                if matches!(message, Message::ToggleSettings) && settings_showing {
+                    // The menu item opens settings; it never closes them.
+                    return Task::none();
+                }
                 let needs_notes = matches!(message, Message::AddNote | Message::ToggleSettings);
                 if needs_notes && !self.visible {
                     tasks.push(self.update(Message::ToggleVisibility));
@@ -684,6 +705,7 @@ impl App {
                     content_alpha: frame.content_alpha,
                     selected_slot: self.palette_slot,
                     tray_ok: self.tray_ok,
+                    dock_forced: self.tray_failed,
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
             }
@@ -970,18 +992,20 @@ impl App {
         }
     }
 
+    fn dock_icon_shown(&self) -> bool {
+        self.settings.settings().app.show_dock_icon || self.tray_failed
+    }
+
     /// Shows or hides the menu bar icon and the Dock icon to match settings.
     fn apply_app_visibility(&self) -> Task<Message> {
         let Some(id) = self.window_id else {
             return Task::none();
         };
-        let app = self.settings.settings().app.clone();
+        let menu_bar = self.settings.settings().app.show_menu_bar_icon;
+        let dock = self.dock_icon_shown();
         Task::batch([
-            window::run(id, move |w| tray::set_visible(w, app.show_menu_bar_icon)).discard(),
-            window::run(id, move |w| {
-                platform::set_dock_icon_visible(w, app.show_dock_icon)
-            })
-            .discard(),
+            window::run(id, move |w| tray::set_visible(w, menu_bar)).discard(),
+            window::run(id, move |w| platform::set_dock_icon_visible(w, dock)).discard(),
         ])
     }
 
@@ -993,9 +1017,7 @@ impl App {
         self.morph.set_speed(speed);
         self.peek.set_speed(speed);
         self.settings_morph.set_speed(speed);
-        let target = if self.expanded { 1.0 } else { 0.0 };
-        self.expand_animation = AnimationState::new(self.expand_animation.value(), stiffness);
-        self.expand_animation.set_target(target);
+        self.expand_animation.set_stiffness(stiffness);
         self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
         self.animating = true;
         self.dock_window()
@@ -1057,5 +1079,62 @@ impl App {
             .iter()
             .map(|bar| bar.y + bar.height / 2.0)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::SettingToggle;
+
+    fn app_in(dir: &tempfile::TempDir) -> App {
+        let store = NoteStore::load(dir.path().join("notes.json"));
+        let settings = SettingsStore::load(dir.path().join("settings.json"));
+        App::new(store, settings)
+    }
+
+    /// Runs frame ticks until animations settle.
+    fn settle(app: &mut App) {
+        let mut now = Instant::now();
+        for _ in 0..240 {
+            now += Duration::from_millis(16);
+            let _ = app.update(Message::Tick(now));
+        }
+    }
+
+    #[test]
+    fn reopening_closing_settings_keeps_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::ToggleSettings);
+        settle(&mut app);
+        app.settings_anchor_y = 123.0;
+        let _ = app.update(Message::ToggleSettings);
+        assert!(!app.settings_morph.is_opening());
+        let _ = app.update(Message::ToggleSettings);
+        assert!(app.settings_morph.is_opening());
+        assert_eq!(app.settings_anchor_y, 123.0);
+    }
+
+    #[test]
+    fn tray_settings_item_only_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::TrayMenu("settings".into()));
+        settle(&mut app);
+        let _ = app.update(Message::TrayMenu("settings".into()));
+        assert!(app.settings_open && app.settings_morph.is_opening());
+    }
+
+    #[test]
+    fn tray_failure_shows_dock_without_saving_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.settings.settings_mut().toggle(SettingToggle::DockIcon);
+        app.settings.did_save();
+        let _ = app.update(Message::TrayReady(false));
+        assert!(app.dock_icon_shown());
+        assert!(!app.settings.settings().app.show_dock_icon);
+        assert!(!app.settings.is_dirty());
     }
 }
