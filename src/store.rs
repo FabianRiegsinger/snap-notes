@@ -78,10 +78,19 @@ impl NoteStore {
     /// Gives every note colored `old` the color `new`. Returns whether any
     /// note changed; the caller marks the store dirty.
     pub fn recolor(&mut self, old: NoteColor, new: NoteColor) -> bool {
+        self.recolor_many(&[(old, new)])
+    }
+
+    /// Applies several `(old, new)` recolors at once: each note moves at most
+    /// once, by the first pair matching its original color, so chained pairs
+    /// (`a -> b`, `b -> c`) don't feed into each other.
+    pub fn recolor_many(&mut self, changes: &[(NoteColor, NoteColor)]) -> bool {
         let mut changed = false;
-        for note in self.notes.iter_mut().filter(|n| n.color == old) {
-            note.color = new;
-            changed = true;
+        for note in &mut self.notes {
+            if let Some((_, new)) = changes.iter().find(|(old, _)| *old == note.color) {
+                note.color = *new;
+                changed = true;
+            }
         }
         changed
     }
@@ -198,6 +207,20 @@ mod tests {
         let colors: Vec<_> = store.notes().iter().map(|n| n.color).collect();
         assert_eq!(colors, vec![c, c, b]);
         assert!(!store.recolor(a, c));
+    }
+
+    #[test]
+    fn recolor_many_maps_each_note_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = NoteStore::load(dir.path().join("n.json"));
+        let (x, y, z) = (PALETTE[0], PALETTE[1], PALETTE[2]);
+        for color in [x, y] {
+            let id = store.add_note(&PALETTE);
+            store.note_mut(id).unwrap().color = color;
+        }
+        assert!(store.recolor_many(&[(x, y), (y, z)]));
+        let colors: Vec<_> = store.notes().iter().map(|n| n.color).collect();
+        assert_eq!(colors, vec![y, z]);
     }
 
     #[test]

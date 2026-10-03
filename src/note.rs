@@ -15,14 +15,18 @@ impl NoteColor {
         }
     }
 
-    pub fn from_hex(hex: &str) -> Self {
-        let hex = hex.trim_start_matches('#');
-        let r = u8::from_str_radix(&hex[0..2], 16).unwrap() as f32 / 255.0;
-        let g = u8::from_str_radix(&hex[2..4], 16).unwrap() as f32 / 255.0;
-        let b = u8::from_str_radix(&hex[4..6], 16).unwrap() as f32 / 255.0;
-        Self {
-            rgba: [r, g, b, 1.0],
+    /// Parses `#RRGGBB` (the `#` is optional); `None` for anything else.
+    pub fn parse_hex(hex: &str) -> Option<Self> {
+        let hex = hex.strip_prefix('#').unwrap_or(hex);
+        if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
         }
+        let channel = |i: usize| {
+            u8::from_str_radix(&hex[i..i + 2], 16)
+                .ok()
+                .map(|v| v as f32 / 255.0)
+        };
+        Some(Self::new(channel(0)?, channel(2)?, channel(4)?))
     }
 
     pub fn to_hex(self) -> String {
@@ -57,7 +61,8 @@ impl Serialize for NoteColor {
 impl<'de> Deserialize<'de> for NoteColor {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Ok(Self::from_hex(&s))
+        // A hand-edited, invalid color must not make the whole file unreadable.
+        Ok(Self::parse_hex(&s).unwrap_or(PALETTE[0]))
     }
 }
 
@@ -123,11 +128,27 @@ mod tests {
 
     #[test]
     fn note_color_roundtrip_hex() {
-        let color = NoteColor::from_hex("#FF6B6B");
+        let color = NoteColor::parse_hex("#FF6B6B").unwrap();
         assert_eq!(color.to_hex(), "#FF6B6B");
         let json = serde_json::to_string(&color).unwrap();
         let back: NoteColor = serde_json::from_str(&json).unwrap();
         assert_eq!(back.to_hex(), "#FF6B6B");
+    }
+
+    #[test]
+    fn invalid_hex_is_rejected_without_panicking() {
+        for bad in ["#FFF", "red", "#GGGGGG", "", "#FF6B6Bé"] {
+            assert_eq!(NoteColor::parse_hex(bad), None, "{bad}");
+        }
+        assert_eq!(NoteColor::parse_hex("#ff6b6b"), Some(PALETTE[0]));
+    }
+
+    #[test]
+    fn note_with_invalid_color_still_loads() {
+        let json = r##"{"id":"6f1c2c1e-6c1a-4a8e-9a43-2a1f0e0f9b11","color":"#FFF","content":"hi","order":0,"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}"##;
+        let note: Note = serde_json::from_str(json).unwrap();
+        assert_eq!(note.content, "hi");
+        assert_eq!(note.color, PALETTE[0]);
     }
 
     #[test]

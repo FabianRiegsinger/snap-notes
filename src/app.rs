@@ -226,10 +226,8 @@ impl App {
             Message::ResetGroup(group) => {
                 if group == SettingsGroup::Palette {
                     let changes = self.settings.settings_mut().reset_palette();
-                    for (old, new) in changes {
-                        if self.store.recolor(old, new) {
-                            self.store.mark_dirty();
-                        }
+                    if self.store.recolor_many(&changes) {
+                        self.store.mark_dirty();
                     }
                 } else {
                     self.settings.settings_mut().reset(group);
@@ -351,7 +349,8 @@ impl App {
                 if self.peek.is_closed() {
                     self.peek_note = None;
                 }
-                if self.settings_open && self.settings_morph.is_closed() {
+                let settings_closed = self.settings_open && self.settings_morph.is_closed();
+                if settings_closed {
                     self.settings_open = false;
                     self.palette_slot = None;
                 }
@@ -363,6 +362,10 @@ impl App {
 
                 if self.active_note.is_some() && self.morph.is_closed() {
                     return self.finish_close();
+                }
+                if settings_closed {
+                    // Without passthrough the window shrinks back to the strip.
+                    return self.dock_window();
                 }
             }
             Message::SaveTick => {

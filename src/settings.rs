@@ -4,7 +4,7 @@ use crate::app::{NOTE_GAP, NOTE_MARGIN};
 use crate::bar_strip::STRIP_WIDTH;
 use crate::note::{NoteColor, PALETTE};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::fs;
 use std::io;
 use std::ops::RangeInclusive;
@@ -13,8 +13,7 @@ use std::time::{Duration, Instant};
 
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BarSettings {
     pub width: f32,
     pub height: f32,
@@ -31,8 +30,7 @@ impl Default for BarSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HoverSettings {
     pub magnification: f32,
     pub spread: f32,
@@ -49,8 +47,7 @@ impl Default for HoverSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NoteSettings {
     pub size: f32,
     pub expanded_size: f32,
@@ -71,8 +68,7 @@ impl Default for NoteSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MotionSettings {
     /// Divides the open/close/peek durations: 2 is twice as fast.
     pub speed: f32,
@@ -88,8 +84,7 @@ impl Default for MotionSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WindowSettings {
     /// Share of the screen height the bar strip may use (centered).
     pub height_fraction: f32,
@@ -103,8 +98,7 @@ impl Default for WindowSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Settings {
     pub bars: BarSettings,
     pub hover: HoverSettings,
@@ -210,6 +204,25 @@ impl SettingKey {
         }
     }
 
+    /// Group and field name of this setting in `settings.json`.
+    fn json_path(self) -> (&'static str, &'static str) {
+        match self {
+            SettingKey::BarWidth => ("bars", "width"),
+            SettingKey::BarHeight => ("bars", "height"),
+            SettingKey::BarGap => ("bars", "gap"),
+            SettingKey::Magnification => ("hover", "magnification"),
+            SettingKey::Spread => ("hover", "spread"),
+            SettingKey::PeekDelay => ("hover", "peek_delay_secs"),
+            SettingKey::NoteSize => ("notes", "size"),
+            SettingKey::ExpandedSize => ("notes", "expanded_size"),
+            SettingKey::PaperTint => ("notes", "paper_tint"),
+            SettingKey::IdleControlAlpha => ("notes", "idle_control_alpha"),
+            SettingKey::Speed => ("motion", "speed"),
+            SettingKey::Stiffness => ("motion", "stiffness"),
+            SettingKey::HeightFraction => ("window", "height_fraction"),
+        }
+    }
+
     /// Slider step size.
     pub fn step(self) -> f32 {
         match self {
@@ -275,6 +288,43 @@ impl SettingKey {
 }
 
 impl Settings {
+    /// Reads settings leniently: every valid value is kept, and anything
+    /// missing, mistyped or out of range falls back to (or is clamped
+    /// toward) its default, so one bad entry never discards the rest.
+    pub fn from_json(json: &str) -> Settings {
+        let mut settings = Settings::default();
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            return settings;
+        };
+        // `ALL` lists `NoteSize` before `ExpandedSize`, so the size rule in
+        // `set` sees the stored size first.
+        for key in SettingKey::ALL {
+            let (group, field) = key.json_path();
+            if let Some(v) = value
+                .get(group)
+                .and_then(|g| g.get(field))
+                .and_then(|v| v.as_f64())
+            {
+                settings.set(key, v as f32);
+            }
+        }
+        if let Some(entries) = value.get("palette").and_then(|p| p.as_array()) {
+            if entries.len() == PALETTE.len() {
+                settings.palette = entries
+                    .iter()
+                    .zip(PALETTE)
+                    .map(|(entry, default)| {
+                        entry
+                            .as_str()
+                            .and_then(NoteColor::parse_hex)
+                            .unwrap_or(default)
+                    })
+                    .collect();
+            }
+        }
+        settings
+    }
+
     fn field(&mut self, key: SettingKey) -> &mut f32 {
         match key {
             SettingKey::BarWidth => &mut self.bars.width,
@@ -307,17 +357,6 @@ impl Settings {
         self.notes.expanded_size = self.notes.expanded_size.max(self.notes.size);
     }
 
-    /// Brings values read from disk back into their ranges.
-    pub fn clamp(&mut self) {
-        for key in SettingKey::ALL {
-            let value = self.get(key);
-            self.set(key, value);
-        }
-        if self.palette.len() != PALETTE.len() {
-            self.palette = PALETTE.to_vec();
-        }
-    }
-
     pub fn reset(&mut self, group: SettingsGroup) {
         let d = Settings::default();
         match group {
@@ -330,21 +369,25 @@ impl Settings {
         }
     }
 
-    /// Puts `color` into palette slot `slot` and returns the color it
-    /// replaced, or `None` if there is no such slot.
+    /// Puts `color` into palette slot `slot`. Returns the replaced color when
+    /// notes using it should follow to `color`: not when there is no such
+    /// slot, and not when another slot still holds that color (its notes
+    /// can't be told apart and stay as they are).
     pub fn replace_palette_color(&mut self, slot: usize, color: NoteColor) -> Option<NoteColor> {
         let entry = self.palette.get_mut(slot)?;
-        Some(std::mem::replace(entry, color))
+        let old = std::mem::replace(entry, color);
+        (!self.palette.contains(&old)).then_some(old)
     }
 
     /// Restores the default palette and returns `(old, default)` for every
-    /// slot that changed, so notes can follow.
+    /// slot that changed, so notes can follow. Colors that are also in the
+    /// default palette are left out: their notes keep them.
     pub fn reset_palette(&mut self) -> Vec<(NoteColor, NoteColor)> {
         let changes = self
             .palette
             .iter()
             .zip(PALETTE)
-            .filter(|(old, new)| **old != *new)
+            .filter(|(old, _)| !PALETTE.contains(old))
             .map(|(old, new)| (*old, new))
             .collect();
         self.palette = PALETTE.to_vec();
@@ -367,11 +410,9 @@ pub struct SettingsStore {
 impl SettingsStore {
     /// Loads `path`, falling back to defaults when it is missing or invalid.
     pub fn load(path: PathBuf) -> Self {
-        let mut settings = fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
+        let settings = fs::read_to_string(&path)
+            .map(|json| Settings::from_json(&json))
             .unwrap_or_default();
-        settings.clamp();
         Self {
             settings,
             path,
@@ -508,13 +549,13 @@ mod tests {
     #[test]
     fn json_roundtrip() {
         let s = Settings::default();
-        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        let back = Settings::from_json(&serde_json::to_string(&s).unwrap());
         assert_eq!(back, s);
     }
 
     #[test]
     fn partial_json_fills_defaults() {
-        let s: Settings = serde_json::from_str(r#"{"bars":{"width":9}}"#).unwrap();
+        let s = Settings::from_json(r#"{"bars":{"width":9}}"#);
         let expected = Settings {
             bars: BarSettings {
                 width: 9.0,
@@ -527,30 +568,22 @@ mod tests {
 
     #[test]
     fn unknown_keys_ignored() {
-        let s: Settings = serde_json::from_str(r#"{"future":1,"bars":{"x":2}}"#).unwrap();
+        let s = Settings::from_json(r#"{"future":1,"bars":{"x":2}}"#);
         assert_eq!(s, Settings::default());
     }
 
     #[test]
     fn out_of_range_values_clamp() {
-        let mut s = Settings::default();
-        s.bars.width = 100.0;
-        s.hover.spread = -5.0;
-        s.motion.speed = f32::NAN;
-        s.clamp();
+        let s = Settings::from_json(r#"{"bars":{"width":100},"hover":{"spread":-5}}"#);
         assert_eq!(s.bars.width, 12.0);
         assert_eq!(s.hover.spread, 20.0);
-        assert_eq!(s.motion.speed, 1.0);
     }
 
     #[test]
-    fn wrong_palette_length_resets() {
-        let mut s = Settings {
-            palette: PALETTE[..3].to_vec(),
-            ..Settings::default()
-        };
-        s.clamp();
-        assert_eq!(s.palette, PALETTE.to_vec());
+    fn non_finite_value_resets_to_default() {
+        let mut s = Settings::default();
+        s.set(SettingKey::Speed, f32::NAN);
+        assert_eq!(s.motion.speed, 1.0);
     }
 
     #[test]
@@ -625,6 +658,50 @@ mod tests {
         s.replace_palette_color(1, PRESETS[5]);
         assert_eq!(s.reset_palette(), vec![(PRESETS[5], PALETTE[1])]);
         assert_eq!(s.palette, PALETTE.to_vec());
+        assert!(s.reset_palette().is_empty());
+    }
+
+    #[test]
+    fn one_bad_value_keeps_the_rest() {
+        let s = Settings::from_json(r#"{"bars":{"width":"9","gap":20},"hover":null}"#);
+        assert_eq!(s.bars.gap, 20.0);
+        assert_eq!(s.bars.width, BarSettings::default().width);
+        assert_eq!(s.hover, HoverSettings::default());
+    }
+
+    #[test]
+    fn bad_palette_entry_falls_back_per_slot() {
+        let mut hexes: Vec<String> = PRESETS[..20].iter().map(|c| c.to_hex()).collect();
+        hexes[3] = "#FFF".into();
+        let json = serde_json::json!({ "palette": hexes }).to_string();
+        let s = Settings::from_json(&json);
+        assert_eq!(s.palette[2], PRESETS[2]);
+        assert_eq!(s.palette[3], PALETTE[3]);
+        let short = Settings::from_json(r##"{"palette":["#FFF"]}"##);
+        assert_eq!(short.palette, PALETTE.to_vec());
+    }
+
+    #[test]
+    fn invalid_json_loads_defaults() {
+        assert_eq!(Settings::from_json("{nope"), Settings::default());
+    }
+
+    #[test]
+    fn replacing_a_shared_color_leaves_its_notes_alone() {
+        let mut s = Settings::default();
+        let (a, b) = (PRESETS[0], PRESETS[1]);
+        assert_eq!(s.replace_palette_color(1, a), Some(PALETTE[1]));
+        assert_eq!(s.replace_palette_color(3, a), Some(PALETTE[3]));
+        // Slot 1 still uses `a`, so its notes must keep it.
+        assert_eq!(s.replace_palette_color(3, b), None);
+        assert_eq!(s.palette[1], a);
+        assert_eq!(s.palette[3], b);
+    }
+
+    #[test]
+    fn reset_palette_skips_colors_still_in_defaults() {
+        let mut s = Settings::default();
+        s.replace_palette_color(0, PALETTE[5]);
         assert!(s.reset_palette().is_empty());
     }
 
