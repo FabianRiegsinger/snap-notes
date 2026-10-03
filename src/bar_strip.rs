@@ -8,10 +8,9 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
 use iced::advanced::widget::Tree;
 use iced::advanced::{self, Clipboard, Shell};
-use iced::alignment;
 use iced::event::Event;
 use iced::mouse;
-use iced::{Color, Element, Length, Pixels, Point, Rectangle, Size, Theme};
+use iced::{Color, Element, Length, Point, Rectangle, Size, Theme};
 
 pub const STRIP_WIDTH: f32 = 64.0;
 /// Horizontal space between the screen edge and the bars.
@@ -256,51 +255,6 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     },
                     color,
                 );
-
-                let scale = self.magnification.scale(i);
-                let preview_source = if note.title.is_empty() {
-                    &note.content
-                } else {
-                    &note.title
-                };
-                if scale > 2.0 && !preview_source.is_empty() {
-                    let preview: String = preview_source.chars().take(40).collect();
-                    let text_size = 10.0 * (scale / 5.0).min(1.0);
-                    let text_bounds = Rectangle {
-                        x: bar_rect.x + 2.0,
-                        y: bar_rect.y + 2.0,
-                        width: bar_rect.width - 4.0,
-                        height: bar_rect.height - 4.0,
-                    };
-                    renderer::Renderer::fill_quad(
-                        renderer,
-                        renderer::Quad {
-                            bounds: text_bounds,
-                            border: Default::default(),
-                            shadow: Default::default(),
-                            snap: true,
-                        },
-                        Color::from_rgba(0.0, 0.0, 0.0, 0.3),
-                    );
-                    use iced::advanced::text::Renderer as TextRenderer;
-                    TextRenderer::fill_text(
-                        renderer,
-                        iced::advanced::Text {
-                            content: preview,
-                            bounds: Size::new(text_bounds.width, text_bounds.height),
-                            size: Pixels(text_size),
-                            line_height: iced::widget::text::LineHeight::default(),
-                            font: iced::Font::default(),
-                            align_x: alignment::Horizontal::Left.into(),
-                            align_y: alignment::Vertical::Top,
-                            shaping: iced::widget::text::Shaping::Basic,
-                            wrapping: iced::widget::text::Wrapping::None,
-                        },
-                        Point::new(text_bounds.x, text_bounds.y),
-                        Color::WHITE,
-                        *bar_rect,
-                    );
-                }
             }
         }
 

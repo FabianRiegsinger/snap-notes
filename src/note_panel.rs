@@ -78,7 +78,8 @@ const EDITOR_PADDING_BOTTOM: f32 = 18.0;
 const EDITOR_PADDING_Y: f32 = EDITOR_PADDING_TOP + EDITOR_PADDING_BOTTOM;
 
 const INK: [f32; 3] = [0.13, 0.12, 0.10];
-const RADIUS: f32 = 1.0;
+/// Corner radius of an open note (and of a fully open peek).
+pub(crate) const NOTE_RADIUS: f32 = 8.0;
 
 pub struct PostIt<'a> {
     pub note: &'a Note,
@@ -394,7 +395,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         .style(move |_theme: &Theme| container::Style {
             background: Some(Background::Color(paper)),
             border: Border {
-                radius: RADIUS.into(),
+                radius: NOTE_RADIUS.into(),
                 ..Default::default()
             },
             shadow: Shadow {

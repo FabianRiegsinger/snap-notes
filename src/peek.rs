@@ -4,7 +4,7 @@
 
 use crate::animation::{ease_out_cubic, lerp};
 use crate::note::Note;
-use crate::note_panel::{ink, shade, TITLE_FONT};
+use crate::note_panel::{ink, shade, NOTE_RADIUS, TITLE_FONT};
 
 use iced::advanced::renderer::{self, Quad};
 use iced::advanced::text::Renderer as _;
@@ -133,6 +133,11 @@ pub fn peek_layout(
     }
 }
 
+/// Corner radius while opening: the bar's, rounding into the note's.
+fn peek_radius(bar_radius: f32, progress: f32) -> f32 {
+    lerp(bar_radius, NOTE_RADIUS, ease_out_cubic(progress))
+}
+
 /// Draws the peek: the bar's color turning into paper, then the title,
 /// divider and body fading in once the peek is nearly fully open.
 pub fn draw_peek(
@@ -153,7 +158,7 @@ pub fn draw_peek(
         Quad {
             bounds: rect,
             border: Border {
-                radius: radius.into(),
+                radius: peek_radius(radius, progress).into(),
                 ..Default::default()
             },
             shadow: Shadow {
@@ -301,6 +306,12 @@ mod tests {
 
     fn screen() -> Rectangle {
         Rectangle::new(Point::ORIGIN, Size::new(1000.0, 900.0))
+    }
+
+    #[test]
+    fn peek_corners_round_like_the_note() {
+        assert_eq!(peek_radius(3.0, 0.0), 3.0);
+        assert_eq!(peek_radius(3.0, 1.0), NOTE_RADIUS);
     }
 
     #[test]
