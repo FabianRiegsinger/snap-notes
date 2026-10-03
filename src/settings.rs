@@ -98,6 +98,23 @@ impl Default for WindowSettings {
     }
 }
 
+/// Where the app shows up besides its notes. At least one stays visible so
+/// the app can always be reached.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AppSettings {
+    pub show_menu_bar_icon: bool,
+    pub show_dock_icon: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            show_menu_bar_icon: true,
+            show_dock_icon: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Settings {
     pub bars: BarSettings,
@@ -106,6 +123,7 @@ pub struct Settings {
     pub motion: MotionSettings,
     pub window: WindowSettings,
     pub palette: Vec<NoteColor>,
+    pub app: AppSettings,
 }
 
 impl Default for Settings {
@@ -117,6 +135,7 @@ impl Default for Settings {
             motion: MotionSettings::default(),
             window: WindowSettings::default(),
             palette: PALETTE.to_vec(),
+            app: AppSettings::default(),
         }
     }
 }
@@ -129,6 +148,26 @@ pub enum SettingsGroup {
     Motion,
     Window,
     Palette,
+    App,
+}
+
+#[allow(dead_code)] // TEMP: used by the settings panel in the next commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingToggle {
+    MenuBarIcon,
+    DockIcon,
+}
+
+#[allow(dead_code)] // TEMP: used by the settings panel in the next commit.
+impl SettingToggle {
+    pub const ALL: [SettingToggle; 2] = [SettingToggle::MenuBarIcon, SettingToggle::DockIcon];
+
+    fn other(self) -> SettingToggle {
+        match self {
+            SettingToggle::MenuBarIcon => SettingToggle::DockIcon,
+            SettingToggle::DockIcon => SettingToggle::MenuBarIcon,
+        }
+    }
 }
 
 impl SettingsGroup {
@@ -148,6 +187,7 @@ impl SettingsGroup {
             SettingsGroup::Motion => "Motion",
             SettingsGroup::Window => "Window",
             SettingsGroup::Palette => "Palette",
+            SettingsGroup::App => "App",
         }
     }
 }
@@ -322,7 +362,48 @@ impl Settings {
                     .collect();
             }
         }
+        let app = value.get("app");
+        for (field, target) in [
+            ("show_menu_bar_icon", &mut settings.app.show_menu_bar_icon),
+            ("show_dock_icon", &mut settings.app.show_dock_icon),
+        ] {
+            if let Some(v) = app.and_then(|a| a.get(field)).and_then(|v| v.as_bool()) {
+                *target = v;
+            }
+        }
+        if !settings.app.show_menu_bar_icon && !settings.app.show_dock_icon {
+            settings.app.show_menu_bar_icon = true;
+        }
         settings
+    }
+
+    #[allow(dead_code)] // TEMP: used by the settings panel in the next commit.
+    pub fn is_on(&self, toggle: SettingToggle) -> bool {
+        match toggle {
+            SettingToggle::MenuBarIcon => self.app.show_menu_bar_icon,
+            SettingToggle::DockIcon => self.app.show_dock_icon,
+        }
+    }
+
+    #[allow(dead_code)] // TEMP: used by the settings panel in the next commit.
+    /// Whether `toggle` may flip: turning it off is refused while the other
+    /// icon is already hidden.
+    pub fn can_toggle(&self, toggle: SettingToggle) -> bool {
+        !self.is_on(toggle) || self.is_on(toggle.other())
+    }
+
+    #[allow(dead_code)] // TEMP: used by the settings panel in the next commit.
+    /// Flips `toggle` if allowed. Returns whether anything changed.
+    pub fn toggle(&mut self, toggle: SettingToggle) -> bool {
+        if !self.can_toggle(toggle) {
+            return false;
+        }
+        let value = match toggle {
+            SettingToggle::MenuBarIcon => &mut self.app.show_menu_bar_icon,
+            SettingToggle::DockIcon => &mut self.app.show_dock_icon,
+        };
+        *value = !*value;
+        true
     }
 
     fn field(&mut self, key: SettingKey) -> &mut f32 {
@@ -366,6 +447,7 @@ impl Settings {
             SettingsGroup::Motion => self.motion = d.motion,
             SettingsGroup::Window => self.window = d.window,
             SettingsGroup::Palette => self.palette = d.palette,
+            SettingsGroup::App => self.app = d.app,
         }
     }
 
@@ -703,6 +785,62 @@ mod tests {
         let mut s = Settings::default();
         s.replace_palette_color(0, PALETTE[5]);
         assert!(s.reset_palette().is_empty());
+    }
+
+    #[test]
+    fn app_defaults_show_both() {
+        let s = Settings::default();
+        assert!(s.app.show_menu_bar_icon && s.app.show_dock_icon);
+    }
+
+    #[test]
+    fn app_settings_load_from_json() {
+        let s = Settings::from_json(r#"{"app":{"show_dock_icon":false}}"#);
+        assert!(!s.app.show_dock_icon);
+        assert!(s.app.show_menu_bar_icon);
+    }
+
+    #[test]
+    fn app_settings_ignore_non_bool() {
+        let s = Settings::from_json(r#"{"app":{"show_dock_icon":"no"}}"#);
+        assert!(s.app.show_dock_icon);
+    }
+
+    #[test]
+    fn both_hidden_in_file_restores_menu_bar_icon() {
+        let s =
+            Settings::from_json(r#"{"app":{"show_menu_bar_icon":false,"show_dock_icon":false}}"#);
+        assert!(s.app.show_menu_bar_icon);
+        assert!(!s.app.show_dock_icon);
+    }
+
+    #[test]
+    fn toggle_refuses_to_hide_last_icon() {
+        let mut s = Settings::default();
+        assert!(s.toggle(SettingToggle::DockIcon));
+        assert!(!s.is_on(SettingToggle::DockIcon));
+        assert!(!s.can_toggle(SettingToggle::MenuBarIcon));
+        assert!(!s.toggle(SettingToggle::MenuBarIcon));
+        assert!(s.is_on(SettingToggle::MenuBarIcon));
+        assert!(s.can_toggle(SettingToggle::DockIcon));
+        assert!(s.toggle(SettingToggle::DockIcon));
+        assert!(s.is_on(SettingToggle::DockIcon));
+    }
+
+    #[test]
+    fn reset_app_group_shows_both() {
+        let mut s = Settings::default();
+        s.toggle(SettingToggle::DockIcon);
+        s.reset(SettingsGroup::App);
+        assert_eq!(s.app, AppSettings::default());
+    }
+
+    #[test]
+    fn json_roundtrip_keeps_app_settings() {
+        let mut s = Settings::default();
+        s.toggle(SettingToggle::MenuBarIcon);
+        let back = Settings::from_json(&serde_json::to_string(&s).unwrap());
+        assert_eq!(back, s);
     }
 
     #[test]
