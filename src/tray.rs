@@ -86,8 +86,7 @@ mod native {
             let icon = Icon::from_rgba(icon_rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE).ok()?;
             let tray = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
-                .with_icon(icon)
-                .with_icon_as_template(true)
+                .with_icon_templated(icon)
                 .with_tooltip("Work Notes")
                 .build()
                 .ok()?;
