@@ -59,6 +59,7 @@ Every struct derives `Serialize`/`Deserialize` with `#[serde(default)]` at struc
 ### Derived Values
 
 - `OPEN_WIDTH` becomes a function of `&Settings`: `STRIP_WIDTH + NOTE_GAP + notes.expanded_size + NOTE_MARGIN`. Its callers (`main.rs` window size, `App::docked_width`) take it from settings.
+- On passthrough platforms (macOS, Windows) the window covers the whole monitor, so `window.height_fraction` limits the strip's layout band (vertically centered, `height * fraction`) instead of the window height.
 - When `notes.expanded_size` or `window.height_fraction` changes, `App` calls `dock_window()` to resize and reposition the window.
 
 ## Threading Settings Through the Code
