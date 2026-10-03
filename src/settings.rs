@@ -1,0 +1,609 @@
+//! User-adjustable visual settings, persisted next to the notes.
+
+// TEMP: wired into the app in a later commit.
+#![allow(dead_code)]
+
+use crate::app::{NOTE_GAP, NOTE_MARGIN};
+use crate::bar_strip::STRIP_WIDTH;
+use crate::note::{NoteColor, PALETTE};
+
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io;
+use std::ops::RangeInclusive;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+const DEBOUNCE: Duration = Duration::from_millis(500);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BarSettings {
+    pub width: f32,
+    pub height: f32,
+    pub gap: f32,
+}
+
+impl Default for BarSettings {
+    fn default() -> Self {
+        Self {
+            width: 6.0,
+            height: 30.0,
+            gap: 12.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HoverSettings {
+    pub magnification: f32,
+    pub spread: f32,
+    pub peek_delay_secs: f32,
+}
+
+impl Default for HoverSettings {
+    fn default() -> Self {
+        Self {
+            magnification: 4.0,
+            spread: 60.0,
+            peek_delay_secs: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NoteSettings {
+    pub size: f32,
+    pub expanded_size: f32,
+    /// How much lighter (negative) or darker than its bar a note's paper is.
+    pub paper_tint: f32,
+    /// Header controls stay this faint until the note is hovered.
+    pub idle_control_alpha: f32,
+}
+
+impl Default for NoteSettings {
+    fn default() -> Self {
+        Self {
+            size: 320.0,
+            expanded_size: 560.0,
+            paper_tint: -0.12,
+            idle_control_alpha: 0.3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MotionSettings {
+    /// Divides the open/close/peek durations: 2 is twice as fast.
+    pub speed: f32,
+    pub stiffness: f32,
+}
+
+impl Default for MotionSettings {
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            stiffness: 300.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowSettings {
+    /// Share of the screen height the bar strip may use (centered).
+    pub height_fraction: f32,
+}
+
+impl Default for WindowSettings {
+    fn default() -> Self {
+        Self {
+            height_fraction: 0.9,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub bars: BarSettings,
+    pub hover: HoverSettings,
+    pub notes: NoteSettings,
+    pub motion: MotionSettings,
+    pub window: WindowSettings,
+    pub palette: Vec<NoteColor>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            bars: BarSettings::default(),
+            hover: HoverSettings::default(),
+            notes: NoteSettings::default(),
+            motion: MotionSettings::default(),
+            window: WindowSettings::default(),
+            palette: PALETTE.to_vec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsGroup {
+    Bars,
+    Hover,
+    Notes,
+    Motion,
+    Window,
+    Palette,
+}
+
+impl SettingsGroup {
+    pub const SLIDERS: [SettingsGroup; 5] = [
+        SettingsGroup::Bars,
+        SettingsGroup::Hover,
+        SettingsGroup::Notes,
+        SettingsGroup::Motion,
+        SettingsGroup::Window,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsGroup::Bars => "Bars",
+            SettingsGroup::Hover => "Hover",
+            SettingsGroup::Notes => "Notes",
+            SettingsGroup::Motion => "Motion",
+            SettingsGroup::Window => "Window",
+            SettingsGroup::Palette => "Palette",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingKey {
+    BarWidth,
+    BarHeight,
+    BarGap,
+    Magnification,
+    Spread,
+    PeekDelay,
+    NoteSize,
+    ExpandedSize,
+    PaperTint,
+    IdleControlAlpha,
+    Speed,
+    Stiffness,
+    HeightFraction,
+}
+
+impl SettingKey {
+    pub const ALL: [SettingKey; 13] = [
+        SettingKey::BarWidth,
+        SettingKey::BarHeight,
+        SettingKey::BarGap,
+        SettingKey::Magnification,
+        SettingKey::Spread,
+        SettingKey::PeekDelay,
+        SettingKey::NoteSize,
+        SettingKey::ExpandedSize,
+        SettingKey::PaperTint,
+        SettingKey::IdleControlAlpha,
+        SettingKey::Speed,
+        SettingKey::Stiffness,
+        SettingKey::HeightFraction,
+    ];
+
+    pub fn range(self) -> RangeInclusive<f32> {
+        match self {
+            SettingKey::BarWidth => 3.0..=12.0,
+            SettingKey::BarHeight => 16.0..=60.0,
+            SettingKey::BarGap => 4.0..=24.0,
+            SettingKey::Magnification => 1.0..=6.0,
+            SettingKey::Spread => 20.0..=120.0,
+            SettingKey::PeekDelay => 0.3..=3.0,
+            SettingKey::NoteSize => 240.0..=440.0,
+            SettingKey::ExpandedSize => 400.0..=800.0,
+            SettingKey::PaperTint => -0.3..=0.3,
+            SettingKey::IdleControlAlpha => 0.0..=1.0,
+            SettingKey::Speed => 0.5..=2.0,
+            SettingKey::Stiffness => 150.0..=600.0,
+            SettingKey::HeightFraction => 0.5..=1.0,
+        }
+    }
+
+    /// Slider step size.
+    pub fn step(self) -> f32 {
+        match self {
+            SettingKey::PaperTint
+            | SettingKey::IdleControlAlpha
+            | SettingKey::Speed
+            | SettingKey::HeightFraction => 0.01,
+            SettingKey::Magnification | SettingKey::PeekDelay => 0.1,
+            _ => 1.0,
+        }
+    }
+
+    pub fn group(self) -> SettingsGroup {
+        match self {
+            SettingKey::BarWidth | SettingKey::BarHeight | SettingKey::BarGap => {
+                SettingsGroup::Bars
+            }
+            SettingKey::Magnification | SettingKey::Spread | SettingKey::PeekDelay => {
+                SettingsGroup::Hover
+            }
+            SettingKey::NoteSize
+            | SettingKey::ExpandedSize
+            | SettingKey::PaperTint
+            | SettingKey::IdleControlAlpha => SettingsGroup::Notes,
+            SettingKey::Speed | SettingKey::Stiffness => SettingsGroup::Motion,
+            SettingKey::HeightFraction => SettingsGroup::Window,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingKey::BarWidth => "Width",
+            SettingKey::BarHeight => "Height",
+            SettingKey::BarGap => "Gap",
+            SettingKey::Magnification => "Magnification",
+            SettingKey::Spread => "Spread",
+            SettingKey::PeekDelay => "Peek delay",
+            SettingKey::NoteSize => "Size",
+            SettingKey::ExpandedSize => "Expanded size",
+            SettingKey::PaperTint => "Paper tint",
+            SettingKey::IdleControlAlpha => "Idle control opacity",
+            SettingKey::Speed => "Animation speed",
+            SettingKey::Stiffness => "Spring stiffness",
+            SettingKey::HeightFraction => "Strip height",
+        }
+    }
+
+    pub fn format(self, v: f32) -> String {
+        match self {
+            SettingKey::BarWidth
+            | SettingKey::BarHeight
+            | SettingKey::BarGap
+            | SettingKey::NoteSize
+            | SettingKey::ExpandedSize => format!("{v:.0} px"),
+            SettingKey::Magnification | SettingKey::Speed => format!("{v:.1}×"),
+            SettingKey::PeekDelay => format!("{v:.1} s"),
+            SettingKey::PaperTint | SettingKey::IdleControlAlpha | SettingKey::HeightFraction => {
+                format!("{:.0} %", v * 100.0)
+            }
+            SettingKey::Spread | SettingKey::Stiffness => format!("{v:.0}"),
+        }
+    }
+}
+
+impl Settings {
+    fn field(&mut self, key: SettingKey) -> &mut f32 {
+        match key {
+            SettingKey::BarWidth => &mut self.bars.width,
+            SettingKey::BarHeight => &mut self.bars.height,
+            SettingKey::BarGap => &mut self.bars.gap,
+            SettingKey::Magnification => &mut self.hover.magnification,
+            SettingKey::Spread => &mut self.hover.spread,
+            SettingKey::PeekDelay => &mut self.hover.peek_delay_secs,
+            SettingKey::NoteSize => &mut self.notes.size,
+            SettingKey::ExpandedSize => &mut self.notes.expanded_size,
+            SettingKey::PaperTint => &mut self.notes.paper_tint,
+            SettingKey::IdleControlAlpha => &mut self.notes.idle_control_alpha,
+            SettingKey::Speed => &mut self.motion.speed,
+            SettingKey::Stiffness => &mut self.motion.stiffness,
+            SettingKey::HeightFraction => &mut self.window.height_fraction,
+        }
+    }
+
+    pub fn get(&self, key: SettingKey) -> f32 {
+        *self.clone().field(key)
+    }
+
+    /// Sets `key` clamped to its range. The expanded note never gets
+    /// smaller than the regular one: raising the size raises it too.
+    pub fn set(&mut self, key: SettingKey, value: f32) {
+        let default = Settings::default().get(key);
+        let range = key.range();
+        let value = if value.is_finite() { value } else { default };
+        *self.field(key) = value.clamp(*range.start(), *range.end());
+        self.notes.expanded_size = self.notes.expanded_size.max(self.notes.size);
+    }
+
+    /// Brings values read from disk back into their ranges.
+    pub fn clamp(&mut self) {
+        for key in SettingKey::ALL {
+            let value = self.get(key);
+            self.set(key, value);
+        }
+        if self.palette.len() != PALETTE.len() {
+            self.palette = PALETTE.to_vec();
+        }
+    }
+
+    pub fn reset(&mut self, group: SettingsGroup) {
+        let d = Settings::default();
+        match group {
+            SettingsGroup::Bars => self.bars = d.bars,
+            SettingsGroup::Hover => self.hover = d.hover,
+            SettingsGroup::Notes => self.notes = d.notes,
+            SettingsGroup::Motion => self.motion = d.motion,
+            SettingsGroup::Window => self.window = d.window,
+            SettingsGroup::Palette => self.palette = d.palette,
+        }
+    }
+
+    /// Window width that fits the strip plus a fully expanded note.
+    pub fn open_width(&self) -> f32 {
+        STRIP_WIDTH + NOTE_GAP + self.notes.expanded_size + NOTE_MARGIN
+    }
+}
+
+pub struct SettingsStore {
+    settings: Settings,
+    path: PathBuf,
+    dirty: bool,
+    last_mark: Option<Instant>,
+}
+
+impl SettingsStore {
+    /// Loads `path`, falling back to defaults when it is missing or invalid.
+    pub fn load(path: PathBuf) -> Self {
+        let mut settings = fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
+            .unwrap_or_default();
+        settings.clamp();
+        Self {
+            settings,
+            path,
+            dirty: false,
+            last_mark: None,
+        }
+    }
+
+    pub fn save(&self) -> io::Result<()> {
+        let json = serde_json::to_string_pretty(&self.settings)?;
+        let tmp = self.path.with_extension("json.tmp");
+        fs::write(&tmp, &json)?;
+        fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Mutable access; marks the settings for saving.
+    pub fn settings_mut(&mut self) -> &mut Settings {
+        self.dirty = true;
+        self.last_mark = Some(Instant::now());
+        &mut self.settings
+    }
+
+    pub fn should_save(&self) -> bool {
+        self.dirty && self.last_mark.is_some_and(|t| t.elapsed() >= DEBOUNCE)
+    }
+
+    pub fn did_save(&mut self) {
+        self.dirty = false;
+        self.last_mark = None;
+    }
+}
+
+/// Replacement colors offered by the palette editor: 12 hues (every 30°)
+/// in 5 tints from deep to pale.
+pub const PRESETS: [NoteColor; 60] = [
+    NoteColor::new(0.787, 0.113, 0.113),
+    NoteColor::new(0.787, 0.45, 0.113),
+    NoteColor::new(0.787, 0.787, 0.113),
+    NoteColor::new(0.45, 0.787, 0.113),
+    NoteColor::new(0.113, 0.787, 0.113),
+    NoteColor::new(0.113, 0.787, 0.45),
+    NoteColor::new(0.113, 0.787, 0.787),
+    NoteColor::new(0.113, 0.45, 0.787),
+    NoteColor::new(0.113, 0.113, 0.787),
+    NoteColor::new(0.45, 0.113, 0.787),
+    NoteColor::new(0.787, 0.113, 0.787),
+    NoteColor::new(0.787, 0.113, 0.45),
+    NoteColor::new(0.887, 0.213, 0.213),
+    NoteColor::new(0.887, 0.55, 0.213),
+    NoteColor::new(0.887, 0.887, 0.213),
+    NoteColor::new(0.55, 0.887, 0.213),
+    NoteColor::new(0.213, 0.887, 0.213),
+    NoteColor::new(0.213, 0.887, 0.55),
+    NoteColor::new(0.213, 0.887, 0.887),
+    NoteColor::new(0.213, 0.55, 0.887),
+    NoteColor::new(0.213, 0.213, 0.887),
+    NoteColor::new(0.55, 0.213, 0.887),
+    NoteColor::new(0.887, 0.213, 0.887),
+    NoteColor::new(0.887, 0.213, 0.55),
+    NoteColor::new(0.912, 0.388, 0.388),
+    NoteColor::new(0.912, 0.65, 0.388),
+    NoteColor::new(0.912, 0.912, 0.388),
+    NoteColor::new(0.65, 0.912, 0.388),
+    NoteColor::new(0.388, 0.912, 0.388),
+    NoteColor::new(0.388, 0.912, 0.65),
+    NoteColor::new(0.388, 0.912, 0.912),
+    NoteColor::new(0.388, 0.65, 0.912),
+    NoteColor::new(0.388, 0.388, 0.912),
+    NoteColor::new(0.65, 0.388, 0.912),
+    NoteColor::new(0.912, 0.388, 0.912),
+    NoteColor::new(0.912, 0.388, 0.65),
+    NoteColor::new(0.938, 0.562, 0.562),
+    NoteColor::new(0.938, 0.75, 0.562),
+    NoteColor::new(0.937, 0.938, 0.562),
+    NoteColor::new(0.75, 0.938, 0.562),
+    NoteColor::new(0.562, 0.938, 0.562),
+    NoteColor::new(0.562, 0.938, 0.75),
+    NoteColor::new(0.562, 0.937, 0.938),
+    NoteColor::new(0.562, 0.75, 0.938),
+    NoteColor::new(0.562, 0.562, 0.938),
+    NoteColor::new(0.75, 0.562, 0.938),
+    NoteColor::new(0.938, 0.562, 0.937),
+    NoteColor::new(0.938, 0.562, 0.75),
+    NoteColor::new(0.963, 0.737, 0.737),
+    NoteColor::new(0.963, 0.85, 0.737),
+    NoteColor::new(0.963, 0.963, 0.737),
+    NoteColor::new(0.85, 0.963, 0.737),
+    NoteColor::new(0.737, 0.963, 0.737),
+    NoteColor::new(0.737, 0.963, 0.85),
+    NoteColor::new(0.737, 0.963, 0.963),
+    NoteColor::new(0.737, 0.85, 0.963),
+    NoteColor::new(0.737, 0.737, 0.963),
+    NoteColor::new(0.85, 0.737, 0.963),
+    NoteColor::new(0.963, 0.737, 0.963),
+    NoteColor::new(0.963, 0.737, 0.85),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::note::PALETTE;
+
+    #[test]
+    fn defaults_match_current_constants() {
+        let s = Settings::default();
+        assert_eq!((s.bars.width, s.bars.height, s.bars.gap), (6.0, 30.0, 12.0));
+        assert_eq!(
+            (
+                s.hover.magnification,
+                s.hover.spread,
+                s.hover.peek_delay_secs
+            ),
+            (4.0, 60.0, 1.0)
+        );
+        assert_eq!(
+            (
+                s.notes.size,
+                s.notes.expanded_size,
+                s.notes.paper_tint,
+                s.notes.idle_control_alpha
+            ),
+            (320.0, 560.0, -0.12, 0.3)
+        );
+        assert_eq!((s.motion.speed, s.motion.stiffness), (1.0, 300.0));
+        assert_eq!(s.window.height_fraction, 0.9);
+        assert_eq!(s.palette, PALETTE.to_vec());
+    }
+
+    #[test]
+    fn json_roundtrip() {
+        let s = Settings::default();
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn partial_json_fills_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"bars":{"width":9}}"#).unwrap();
+        let expected = Settings {
+            bars: BarSettings {
+                width: 9.0,
+                ..BarSettings::default()
+            },
+            ..Settings::default()
+        };
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn unknown_keys_ignored() {
+        let s: Settings = serde_json::from_str(r#"{"future":1,"bars":{"x":2}}"#).unwrap();
+        assert_eq!(s, Settings::default());
+    }
+
+    #[test]
+    fn out_of_range_values_clamp() {
+        let mut s = Settings::default();
+        s.bars.width = 100.0;
+        s.hover.spread = -5.0;
+        s.motion.speed = f32::NAN;
+        s.clamp();
+        assert_eq!(s.bars.width, 12.0);
+        assert_eq!(s.hover.spread, 20.0);
+        assert_eq!(s.motion.speed, 1.0);
+    }
+
+    #[test]
+    fn wrong_palette_length_resets() {
+        let mut s = Settings {
+            palette: PALETTE[..3].to_vec(),
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(s.palette, PALETTE.to_vec());
+    }
+
+    #[test]
+    fn set_keeps_expanded_at_least_size() {
+        let mut s = Settings::default();
+        s.set(SettingKey::NoteSize, 440.0);
+        assert!(s.notes.expanded_size >= 440.0);
+        s.set(SettingKey::ExpandedSize, 400.0);
+        assert_eq!(s.notes.expanded_size, 440.0);
+    }
+
+    #[test]
+    fn get_set_every_key() {
+        let mut s = Settings::default();
+        for key in SettingKey::ALL {
+            let end = *key.range().end();
+            s.set(key, end);
+            assert_eq!(s.get(key), end, "{key:?}");
+            s.set(key, end + 1000.0);
+            assert_eq!(s.get(key), end, "{key:?} clamps");
+        }
+    }
+
+    #[test]
+    fn reset_group_restores_only_that_group() {
+        let mut s = Settings::default();
+        s.set(SettingKey::BarWidth, 10.0);
+        s.set(SettingKey::Spread, 100.0);
+        s.reset(SettingsGroup::Bars);
+        assert_eq!(s.bars, BarSettings::default());
+        assert_eq!(s.hover.spread, 100.0);
+    }
+
+    #[test]
+    fn store_corrupt_file_loads_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{nope").unwrap();
+        assert_eq!(*SettingsStore::load(path).settings(), Settings::default());
+    }
+
+    #[test]
+    fn store_load_clamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"bars":{"width":500}}"#).unwrap();
+        assert_eq!(SettingsStore::load(path).settings().bars.width, 12.0);
+    }
+
+    #[test]
+    fn store_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut store = SettingsStore::load(path.clone());
+        store.settings_mut().set(SettingKey::BarGap, 20.0);
+        assert!(!store.should_save(), "debounced");
+        store.save().unwrap();
+        assert_eq!(SettingsStore::load(path).settings().bars.gap, 20.0);
+    }
+
+    #[test]
+    fn presets_are_60_distinct() {
+        let hexes: std::collections::HashSet<_> = PRESETS.iter().map(|c| c.to_hex()).collect();
+        assert_eq!(hexes.len(), 60);
+    }
+
+    #[test]
+    fn open_width_follows_expanded_size() {
+        let mut s = Settings::default();
+        let base = s.open_width();
+        s.set(SettingKey::ExpandedSize, 700.0);
+        assert_eq!(s.open_width(), base + 140.0);
+    }
+}

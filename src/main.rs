@@ -7,6 +7,7 @@ mod note_panel;
 mod pass_wheel;
 mod peek;
 mod platform;
+mod settings;
 mod store;
 
 use app::App;

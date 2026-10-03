@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 const NOTE_SIZE: f32 = 320.0;
 const NOTE_EXPANDED_SIZE: f32 = 560.0;
-const NOTE_GAP: f32 = 18.0;
-const NOTE_MARGIN: f32 = 24.0;
+pub(crate) const NOTE_GAP: f32 = 18.0;
+pub(crate) const NOTE_MARGIN: f32 = 24.0;
 /// Window width while a note is open: room for the expanded note and its shadow.
 pub const OPEN_WIDTH: f32 = STRIP_WIDTH + NOTE_GAP + NOTE_EXPANDED_SIZE + NOTE_MARGIN;
 /// While mouse passthrough is on, how often the OS cursor is polled to notice

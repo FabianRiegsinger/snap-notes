@@ -3,7 +3,7 @@ use rand::seq::IndexedRandom;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct NoteColor {
     pub rgba: [f32; 4],
 }
@@ -35,6 +35,13 @@ impl NoteColor {
     pub fn random() -> Self {
         let mut rng = rand::rng();
         *PALETTE.choose(&mut rng).unwrap()
+    }
+}
+
+/// Colors are stored as hex, so two colors are equal when their hex is.
+impl PartialEq for NoteColor {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_hex() == other.to_hex()
     }
 }
 
