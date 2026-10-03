@@ -1,10 +1,11 @@
+use crate::settings::HoverSettings;
+
 use iced::Rectangle;
 
 pub fn gaussian_scale(distance: f32, max_mag: f32, spread: f32) -> f32 {
     1.0 + max_mag * (-distance * distance / (spread * spread)).exp()
 }
 
-const STIFFNESS: f32 = 300.0;
 /// Dock magnification follows the cursor much faster (settles in ~0.15 s).
 const MAGNIFICATION_STIFFNESS: f32 = 1100.0;
 const SETTLE_THRESHOLD: f32 = 0.001;
@@ -20,8 +21,8 @@ pub struct AnimationState {
 }
 
 impl AnimationState {
-    pub fn new(value: f32) -> Self {
-        Self::with_stiffness(value, STIFFNESS)
+    pub fn new(value: f32, stiffness: f32) -> Self {
+        Self::with_stiffness(value, stiffness)
     }
 
     pub fn with_stiffness(value: f32, stiffness: f32) -> Self {
@@ -64,9 +65,6 @@ impl AnimationState {
     }
 }
 
-const MAX_MAG: f32 = 4.0;
-const SPREAD: f32 = 60.0;
-
 pub struct MagnificationState {
     scales: Vec<AnimationState>,
 }
@@ -84,12 +82,18 @@ impl MagnificationState {
         self.scales.truncate(count);
     }
 
-    pub fn update(&mut self, cursor_y: Option<f32>, bar_centers: &[f32], dt: f32) -> bool {
+    pub fn update(
+        &mut self,
+        cursor_y: Option<f32>,
+        bar_centers: &[f32],
+        dt: f32,
+        hover: &HoverSettings,
+    ) -> bool {
         self.sync_count(bar_centers.len());
         let mut animating = false;
         for (i, center) in bar_centers.iter().enumerate() {
             let target = match cursor_y {
-                Some(y) => gaussian_scale((y - center).abs(), MAX_MAG, SPREAD),
+                Some(y) => gaussian_scale((y - center).abs(), hover.magnification, hover.spread),
                 None => 1.0,
             };
             self.scales[i].set_target(target);
@@ -114,28 +118,37 @@ const PEEK_CLOSE_SECS: f32 = 0.2;
 pub struct Morph {
     progress: f32,
     opening: bool,
-    open_secs: f32,
-    close_secs: f32,
+    /// Durations at speed 1.
+    base_open_secs: f32,
+    base_close_secs: f32,
+    speed: f32,
 }
 
 impl Morph {
-    /// Timing for opening a full note.
-    pub fn new() -> Self {
-        Self::with_durations(OPEN_SECS, CLOSE_SECS)
+    /// Timing for opening a full note; `speed` 2 runs twice as fast.
+    pub fn new(speed: f32) -> Self {
+        Self::with_durations(OPEN_SECS, CLOSE_SECS, speed)
     }
 
     /// Quicker timing for the hover peek.
-    pub fn peek() -> Self {
-        Self::with_durations(PEEK_OPEN_SECS, PEEK_CLOSE_SECS)
+    pub fn peek(speed: f32) -> Self {
+        Self::with_durations(PEEK_OPEN_SECS, PEEK_CLOSE_SECS, speed)
     }
 
-    fn with_durations(open_secs: f32, close_secs: f32) -> Self {
+    fn with_durations(base_open_secs: f32, base_close_secs: f32, speed: f32) -> Self {
         Self {
             progress: 0.0,
             opening: false,
-            open_secs,
-            close_secs,
+            base_open_secs,
+            base_close_secs,
+            speed,
         }
+    }
+
+    /// Changes the speed without disturbing a running morph.
+    #[allow(dead_code)] // TEMP: used once settings are applied live.
+    pub fn set_speed(&mut self, speed: f32) {
+        self.speed = speed;
     }
 
     pub fn open(&mut self) {
@@ -165,10 +178,10 @@ impl Morph {
 
     pub fn tick(&mut self, dt: f32) -> bool {
         if self.opening {
-            self.progress = (self.progress + dt / self.open_secs).min(1.0);
+            self.progress = (self.progress + dt * self.speed / self.base_open_secs).min(1.0);
             self.progress < 1.0
         } else {
-            self.progress = (self.progress - dt / self.close_secs).max(0.0);
+            self.progress = (self.progress - dt * self.speed / self.base_close_secs).max(0.0);
             self.progress > 0.0
         }
     }
@@ -239,7 +252,7 @@ mod tests {
 
     #[test]
     fn animation_reaches_target() {
-        let mut anim = AnimationState::new(0.0);
+        let mut anim = AnimationState::new(0.0, 300.0);
         anim.set_target(1.0);
         for _ in 0..200 {
             anim.tick(1.0 / 60.0);
@@ -249,7 +262,7 @@ mod tests {
 
     #[test]
     fn animation_reversal_no_jump() {
-        let mut anim = AnimationState::new(0.0);
+        let mut anim = AnimationState::new(0.0, 300.0);
         anim.set_target(1.0);
         for _ in 0..5 {
             anim.tick(1.0 / 60.0);
@@ -268,7 +281,7 @@ mod tests {
 
     #[test]
     fn morph_runs_open_and_closed() {
-        let mut m = Morph::new();
+        let mut m = Morph::new(1.0);
         assert!(m.is_closed());
         m.open();
         while m.tick(1.0 / 60.0) {}
@@ -276,6 +289,39 @@ mod tests {
         m.close();
         while m.tick(1.0 / 60.0) {}
         assert!(m.is_closed());
+    }
+
+    #[test]
+    fn morph_speed_two_finishes_in_half_time() {
+        let mut m = Morph::new(2.0);
+        m.open();
+        m.tick(OPEN_SECS / 2.0 + 1e-4);
+        assert_eq!(m.progress(), 1.0);
+    }
+
+    #[test]
+    fn set_speed_keeps_progress() {
+        let mut m = Morph::new(1.0);
+        m.open();
+        m.tick(OPEN_SECS / 4.0);
+        let before = m.progress();
+        m.set_speed(2.0);
+        assert_eq!(m.progress(), before);
+        m.tick(OPEN_SECS / 4.0);
+        assert!((m.progress() - (before + 0.5)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn magnification_uses_hover_settings() {
+        let hover = HoverSettings {
+            magnification: 2.0,
+            ..HoverSettings::default()
+        };
+        let mut mag = MagnificationState::new();
+        for _ in 0..200 {
+            mag.update(Some(100.0), &[100.0], 1.0 / 60.0, &hover);
+        }
+        assert!((mag.scale(0) - 3.0).abs() < 0.01);
     }
 
     #[test]
@@ -312,14 +358,14 @@ mod tests {
     fn magnification_settles_quickly_without_overshoot() {
         let mut mag = MagnificationState::new();
         let centers = vec![100.0];
-        let target = 1.0 + MAX_MAG;
+        let target = 1.0 + HoverSettings::default().magnification;
         let mut peak: f32 = 0.0;
         let mut frames_to_95 = None;
         for frame in 1..=120 {
-            mag.update(Some(100.0), &centers, 1.0 / 60.0);
+            mag.update(Some(100.0), &centers, 1.0 / 60.0, &HoverSettings::default());
             let s = mag.scale(0);
             peak = peak.max(s);
-            if frames_to_95.is_none() && s - 1.0 >= 0.95 * MAX_MAG {
+            if frames_to_95.is_none() && s - 1.0 >= 0.95 * HoverSettings::default().magnification {
                 frames_to_95 = Some(frame);
             }
         }
@@ -334,18 +380,18 @@ mod tests {
         let mut mag = MagnificationState::new();
         let centers = vec![100.0];
         for _ in 0..60 {
-            mag.update(Some(100.0), &centers, 1.0 / 30.0);
+            mag.update(Some(100.0), &centers, 1.0 / 30.0, &HoverSettings::default());
         }
-        assert!((mag.scale(0) - (1.0 + MAX_MAG)).abs() < 0.01);
+        assert!((mag.scale(0) - (1.0 + HoverSettings::default().magnification)).abs() < 0.01);
     }
 
     #[test]
     fn magnification_state_scales_near_cursor() {
         let mut mag = MagnificationState::new();
         let centers = vec![100.0, 200.0, 300.0];
-        mag.update(Some(200.0), &centers, 1.0 / 60.0);
+        mag.update(Some(200.0), &centers, 1.0 / 60.0, &HoverSettings::default());
         for _ in 0..200 {
-            mag.update(Some(200.0), &centers, 1.0 / 60.0);
+            mag.update(Some(200.0), &centers, 1.0 / 60.0, &HoverSettings::default());
         }
         assert!(mag.scale(1) > mag.scale(0));
         assert!(mag.scale(1) > mag.scale(2));

@@ -3,7 +3,7 @@ use crate::bar_strip::{bar_strip, compute_layout, StripLayout, STRIP_WIDTH};
 use crate::note::{NoteColor, PALETTE};
 use crate::note_panel::{post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
-use crate::settings::BarSettings;
+use crate::settings::{BarSettings, HoverSettings};
 use crate::store::NoteStore;
 
 use iced::widget::{container, mouse_area, opaque, pin, stack, text_editor, Space};
@@ -139,11 +139,11 @@ impl App {
                 cursor_y: None,
                 active_note: None,
                 editor_content: None,
-                morph: Morph::new(),
+                morph: Morph::new(1.0),
                 anchor_y: 0.0,
                 pending_delete: None,
                 expanded: false,
-                expand_animation: AnimationState::new(0.0),
+                expand_animation: AnimationState::new(0.0, 300.0),
                 color_picker_open: false,
                 note_hovered: false,
                 drag: None,
@@ -162,7 +162,7 @@ impl App {
                 note_drag_pos: None,
                 hover_bar: None,
                 peek_note: None,
-                peek: Morph::peek(),
+                peek: Morph::peek(1.0),
             },
             window::oldest().then(|id| match id {
                 Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
@@ -275,7 +275,12 @@ impl App {
                 self.last_tick = Some(now);
 
                 let centers = self.magnification_centers();
-                let mag_active = self.magnification.update(self.cursor_y, &centers, dt);
+                let mag_active = self.magnification.update(
+                    self.cursor_y,
+                    &centers,
+                    dt,
+                    &HoverSettings::default(),
+                );
                 let morph_active = self.morph.tick(dt) | self.peek.tick(dt);
                 if self.peek.is_closed() {
                     self.peek_note = None;
@@ -562,7 +567,7 @@ impl App {
         self.color_picker_open = false;
         self.confirm_delete = None;
         self.expanded = false;
-        self.expand_animation = AnimationState::new(0.0);
+        self.expand_animation = AnimationState::new(0.0, 300.0);
         if let Some(id) = self.pending_delete.take() {
             self.store.delete_note(id);
             let _ = self.store.save();
@@ -695,7 +700,7 @@ impl App {
     fn hide_peek(&mut self) {
         self.hover_bar = None;
         self.peek_note = None;
-        self.peek = Morph::peek();
+        self.peek = Morph::peek(1.0);
     }
 
     fn note_frame(&self) -> Option<MorphFrame> {
