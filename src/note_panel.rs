@@ -8,7 +8,8 @@ use iced::advanced::widget::{Id, Operation};
 use iced::Rectangle;
 
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, text, text_editor, text_input, Space,
+    button, column, container, mouse_area, responsive, row, scrollable, text, text_editor,
+    text_input, Space,
 };
 use iced::{
     font, gradient, Background, Border, Color, Element, Fill, Font, Length, Padding, Shadow, Size,
@@ -70,11 +71,11 @@ impl<T> Operation<T> for RevealLastLine {
         }
     }
 }
-/// Approximate heights of everything above/below the body, used to size the
-/// editor so it fills the note without forcing a scrollbar.
-const CHROME_HEIGHT: f32 = 72.0;
-const PICKER_HEIGHT: f32 = 148.0;
-const CONFIRM_HEIGHT: f32 = 46.0;
+/// The body editor's vertical padding; its layout adds this on top of its
+/// minimum height.
+const EDITOR_PADDING_TOP: f32 = 6.0;
+const EDITOR_PADDING_BOTTOM: f32 = 18.0;
+const EDITOR_PADDING_Y: f32 = EDITOR_PADDING_TOP + EDITOR_PADDING_BOTTOM;
 
 const INK: [f32; 3] = [0.13, 0.12, 0.10];
 const RADIUS: f32 = 1.0;
@@ -131,6 +132,12 @@ fn icon_button<'a>(label: &'a str, message: Message, alpha: f32) -> Element<'a, 
             ..Default::default()
         })
         .into()
+}
+
+/// Minimum editor height that makes it, padding included, exactly fill a
+/// body `available` px tall: short text then needs no scrollbar.
+fn editor_min_height(available: f32) -> f32 {
+    (available - EDITOR_PADDING_Y).max(0.0)
 }
 
 pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
@@ -242,71 +249,72 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         });
 
         // The editor grows with its text inside a scrollable, so a scrollbar
-        // appears (and stays) only when the text no longer fits. Its minimum
-        // height roughly fills the visible body so clicks below short text
-        // still land in the editor.
-        let chrome = CHROME_HEIGHT
-            + if color_picker_open {
-                PICKER_HEIGHT
-            } else {
-                0.0
-            }
-            + if confirm_delete { CONFIRM_HEIGHT } else { 0.0 };
-        let editor = text_editor(content)
-            .id(BODY_EDITOR_ID)
-            .placeholder("Write something…")
-            .on_action(Message::NoteEdited)
-            .min_height((size.height - chrome).max(0.0))
-            .size(14)
-            .padding(Padding::new(6.0).left(18).right(18).bottom(18))
-            .style(move |_theme: &Theme, _status| text_editor::Style {
-                background: Color::TRANSPARENT.into(),
-                border: Border::default(),
-                placeholder: ink(0.35 * a),
-                value: ink(0.9 * a),
-                selection: ink(0.18 * a),
-            });
-        let body = scrollable(pass_wheel(editor))
-            .id(BODY_SCROLL_ID)
-            .height(Fill)
-            .direction(scrollable::Direction::Vertical(
-                scrollable::Scrollbar::new()
-                    .width(6)
-                    .scroller_width(6)
-                    .margin(5),
-            ))
-            .style(move |_theme: &Theme, status| {
-                let active = matches!(
-                    status,
-                    scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
-                );
-                let rail = scrollable::Rail {
-                    background: Some(ink(0.06 * a).into()),
-                    border: Border {
-                        radius: 3.0.into(),
-                        ..Default::default()
-                    },
-                    scroller: scrollable::Scroller {
-                        background: ink(if active { 0.45 } else { 0.28 } * a).into(),
+        // appears only once the text no longer fits. Its minimum height
+        // fills exactly the space the body gets (measured, not estimated),
+        // so clicks below short text still land in the editor.
+        let body = responsive(move |available| {
+            let editor = text_editor(content)
+                .id(BODY_EDITOR_ID)
+                .placeholder("Write something…")
+                .on_action(Message::NoteEdited)
+                .min_height(editor_min_height(available.height))
+                .size(14)
+                .padding(
+                    Padding::new(EDITOR_PADDING_TOP)
+                        .left(18)
+                        .right(18)
+                        .bottom(EDITOR_PADDING_BOTTOM),
+                )
+                .style(move |_theme: &Theme, _status| text_editor::Style {
+                    background: Color::TRANSPARENT.into(),
+                    border: Border::default(),
+                    placeholder: ink(0.35 * a),
+                    value: ink(0.9 * a),
+                    selection: ink(0.18 * a),
+                });
+            scrollable(pass_wheel(editor))
+                .id(BODY_SCROLL_ID)
+                .height(Fill)
+                .direction(scrollable::Direction::Vertical(
+                    scrollable::Scrollbar::new()
+                        .width(6)
+                        .scroller_width(6)
+                        .margin(5),
+                ))
+                .style(move |_theme: &Theme, status| {
+                    let active = matches!(
+                        status,
+                        scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
+                    );
+                    let rail = scrollable::Rail {
+                        background: Some(ink(0.06 * a).into()),
                         border: Border {
                             radius: 3.0.into(),
                             ..Default::default()
                         },
-                    },
-                };
-                scrollable::Style {
-                    container: container::Style::default(),
-                    vertical_rail: rail,
-                    horizontal_rail: rail,
-                    gap: None,
-                    auto_scroll: scrollable::AutoScroll {
-                        background: ink(0.1 * a).into(),
-                        border: Border::default(),
-                        shadow: Shadow::default(),
-                        icon: ink(a),
-                    },
-                }
-            });
+                        scroller: scrollable::Scroller {
+                            background: ink(if active { 0.45 } else { 0.28 } * a).into(),
+                            border: Border {
+                                radius: 3.0.into(),
+                                ..Default::default()
+                            },
+                        },
+                    };
+                    scrollable::Style {
+                        container: container::Style::default(),
+                        vertical_rail: rail,
+                        horizontal_rail: rail,
+                        gap: None,
+                        auto_scroll: scrollable::AutoScroll {
+                            background: ink(0.1 * a).into(),
+                            border: Border::default(),
+                            shadow: Shadow::default(),
+                            icon: ink(a),
+                        },
+                    }
+                })
+                .into()
+        });
 
         // Divider: a faint inked hairline with a short soft shadow fading
         // below it, as if the header sheet rests slightly on the body.
@@ -404,6 +412,15 @@ mod tests {
     use super::*;
     use iced::advanced::widget::operation::scrollable::RelativeOffset;
     use iced::{Point, Size};
+
+    #[test]
+    fn editor_fills_body_without_overflow() {
+        for available in [0.0, 10.0, 264.8, 600.0] {
+            let total = editor_min_height(available) + EDITOR_PADDING_Y;
+            assert!(total <= available.max(EDITOR_PADDING_Y), "{available}");
+        }
+        assert_eq!(editor_min_height(264.8) + EDITOR_PADDING_Y, 264.8);
+    }
 
     #[derive(Default)]
     struct FakeScrollable {
