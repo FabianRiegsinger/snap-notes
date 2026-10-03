@@ -1,9 +1,7 @@
 use crate::app::Message;
 use crate::note::Note;
 
-use iced::widget::{
-    button, column, container, row, scrollable, text, text_editor, Space,
-};
+use iced::widget::{button, column, container, row, scrollable, text, text_editor, Space};
 use iced::{Color, Element, Fill, Length, Padding, Theme};
 
 pub fn note_panel<'a>(
@@ -19,22 +17,24 @@ pub fn note_panel<'a>(
         return Space::new().width(0).height(0).into();
     }
 
-    let color_indicator = container(Space::new().width(16).height(16))
-        .style(move |_theme: &Theme| container::Style {
-            background: Some(
-                Color::from_rgba(
-                    note.color.rgba[0],
-                    note.color.rgba[1],
-                    note.color.rgba[2],
-                    1.0,
-                )
-                .into(),
-            ),
-            border: iced::Border {
-                radius: 8.0.into(),
+    let color_indicator =
+        container(Space::new().width(16).height(16)).style(move |_theme: &Theme| {
+            container::Style {
+                background: Some(
+                    Color::from_rgba(
+                        note.color.rgba[0],
+                        note.color.rgba[1],
+                        note.color.rgba[2],
+                        1.0,
+                    )
+                    .into(),
+                ),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
+            }
         });
 
     let color_btn = button(color_indicator)
@@ -116,9 +116,7 @@ pub fn note_panel<'a>(
                         .on_press(Message::ConfirmDelete(true))
                         .padding(Padding::new(4.0).left(12).right(12))
                         .style(|_theme: &Theme, _status| button::Style {
-                            background: Some(
-                                Color::from_rgba(0.8, 0.2, 0.2, 0.9).into(),
-                            ),
+                            background: Some(Color::from_rgba(0.8, 0.2, 0.2, 0.9).into(),),
                             text_color: Color::WHITE,
                             border: iced::Border {
                                 radius: 4.0.into(),
@@ -131,9 +129,7 @@ pub fn note_panel<'a>(
                         .on_press(Message::ConfirmDelete(false))
                         .padding(Padding::new(4.0).left(12).right(12))
                         .style(|_theme: &Theme, _status| button::Style {
-                            background: Some(
-                                Color::from_rgba(0.4, 0.4, 0.4, 0.9).into(),
-                            ),
+                            background: Some(Color::from_rgba(0.4, 0.4, 0.4, 0.9).into(),),
                             text_color: Color::WHITE,
                             border: iced::Border {
                                 radius: 4.0.into(),

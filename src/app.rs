@@ -307,8 +307,7 @@ impl App {
         let save = iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveTick);
 
         if self.animating {
-            let tick =
-                iced::time::every(Duration::from_millis(16)).map(Message::Tick);
+            let tick = iced::time::every(Duration::from_millis(16)).map(Message::Tick);
             Subscription::batch([tick, save])
         } else {
             save

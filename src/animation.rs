@@ -2,20 +2,6 @@ pub fn gaussian_scale(distance: f32, max_mag: f32, spread: f32) -> f32 {
     1.0 + max_mag * (-distance * distance / (spread * spread)).exp()
 }
 
-pub fn ease_out(t: f32) -> f32 {
-    let inv = 1.0 - t;
-    1.0 - inv * inv * inv
-}
-
-pub fn ease_in_out(t: f32) -> f32 {
-    if t < 0.5 {
-        4.0 * t * t * t
-    } else {
-        let p = -2.0 * t + 2.0;
-        1.0 - p * p * p / 2.0
-    }
-}
-
 const STIFFNESS: f32 = 300.0;
 const DAMPING: f32 = 34.64; // 2.0 * sqrt(300.0) ≈ 34.64 (critically damped)
 const SETTLE_THRESHOLD: f32 = 0.001;
@@ -78,12 +64,7 @@ impl MagnificationState {
         self.scales.truncate(count);
     }
 
-    pub fn update(
-        &mut self,
-        cursor_y: Option<f32>,
-        bar_centers: &[f32],
-        dt: f32,
-    ) -> bool {
+    pub fn update(&mut self, cursor_y: Option<f32>, bar_centers: &[f32], dt: f32) -> bool {
         self.sync_count(bar_centers.len());
         let mut animating = false;
         for (i, center) in bar_centers.iter().enumerate() {
@@ -118,12 +99,6 @@ mod tests {
     fn gaussian_far_away_is_one() {
         let s = gaussian_scale(500.0, 4.0, 50.0);
         assert!((s - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn ease_out_boundaries() {
-        assert!((ease_out(0.0)).abs() < 0.001);
-        assert!((ease_out(1.0) - 1.0).abs() < 0.001);
     }
 
     #[test]

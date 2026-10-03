@@ -1,7 +1,6 @@
 #[cfg(target_os = "windows")]
 pub fn enforce_single_instance() {
-    let instance =
-        single_instance::SingleInstance::new("work-notes-a1b2c3d4").unwrap();
+    let instance = single_instance::SingleInstance::new("work-notes-a1b2c3d4").unwrap();
     if !instance.is_single() {
         std::process::exit(0);
     }

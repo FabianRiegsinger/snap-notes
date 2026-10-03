@@ -25,7 +25,7 @@ impl NoteColor {
         }
     }
 
-    pub fn to_hex(&self) -> String {
+    pub fn to_hex(self) -> String {
         let r = (self.rgba[0] * 255.0).round() as u8;
         let g = (self.rgba[1] * 255.0).round() as u8;
         let b = (self.rgba[2] * 255.0).round() as u8;
@@ -52,18 +52,18 @@ impl<'de> Deserialize<'de> for NoteColor {
 }
 
 pub const PALETTE: [NoteColor; 12] = [
-    NoteColor::new(1.0, 0.420, 0.420),       // Coral #FF6B6B
-    NoteColor::new(1.0, 0.627, 0.478),       // Peach #FFA07A
-    NoteColor::new(1.0, 0.851, 0.239),       // Amber #FFD93D
-    NoteColor::new(0.420, 0.796, 0.467),     // Mint #6BCB77
-    NoteColor::new(0.306, 0.804, 0.769),     // Teal #4ECDC4
-    NoteColor::new(0.271, 0.718, 0.820),     // Sky #45B7D1
-    NoteColor::new(0.486, 0.514, 0.992),     // Periwinkle #7C83FD
-    NoteColor::new(0.725, 0.514, 1.0),       // Lavender #B983FF
-    NoteColor::new(0.969, 0.561, 0.702),     // Rose #F78FB3
-    NoteColor::new(0.467, 0.533, 0.600),     // Slate #778899
-    NoteColor::new(0.871, 0.722, 0.529),     // Sand #DEB887
-    NoteColor::new(0.529, 0.682, 0.451),     // Sage #87AE73
+    NoteColor::new(1.0, 0.420, 0.420),   // Coral #FF6B6B
+    NoteColor::new(1.0, 0.627, 0.478),   // Peach #FFA07A
+    NoteColor::new(1.0, 0.851, 0.239),   // Amber #FFD93D
+    NoteColor::new(0.420, 0.796, 0.467), // Mint #6BCB77
+    NoteColor::new(0.306, 0.804, 0.769), // Teal #4ECDC4
+    NoteColor::new(0.271, 0.718, 0.820), // Sky #45B7D1
+    NoteColor::new(0.486, 0.514, 0.992), // Periwinkle #7C83FD
+    NoteColor::new(0.725, 0.514, 1.0),   // Lavender #B983FF
+    NoteColor::new(0.969, 0.561, 0.702), // Rose #F78FB3
+    NoteColor::new(0.467, 0.533, 0.600), // Slate #778899
+    NoteColor::new(0.871, 0.722, 0.529), // Sand #DEB887
+    NoteColor::new(0.529, 0.682, 0.451), // Sage #87AE73
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

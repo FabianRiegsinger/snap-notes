@@ -6,9 +6,9 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
 use iced::advanced::widget::Tree;
 use iced::advanced::{self, Clipboard, Shell};
+use iced::alignment;
 use iced::event::Event;
 use iced::mouse;
-use iced::alignment;
 use iced::{Color, Element, Length, Pixels, Point, Rectangle, Size, Theme};
 
 const BAR_REST_WIDTH: f32 = 6.0;
@@ -73,7 +73,10 @@ impl<'a> BarStrip<'a> {
             .map(|b| b.y + b.height + BAR_GAP * 2.0)
             .unwrap_or(layout_bounds.y);
         let x = layout_bounds.x + layout_bounds.width - ADD_BUTTON_SIZE;
-        Rectangle::new(Point::new(x, y), Size::new(ADD_BUTTON_SIZE, ADD_BUTTON_SIZE))
+        Rectangle::new(
+            Point::new(x, y),
+            Size::new(ADD_BUTTON_SIZE, ADD_BUTTON_SIZE),
+        )
     }
 }
 
@@ -114,9 +117,10 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         let bounds = layout.bounds();
         let bars = self.bar_bounds(bounds);
         let dragging_index = self.drag.as_ref().map(|d| d.bar_index);
-        let drag_active = self.drag.as_ref().map_or(false, |d| {
-            (d.current_y - d.origin_y).abs() > 5.0
-        });
+        let drag_active = self
+            .drag
+            .as_ref()
+            .is_some_and(|d| (d.current_y - d.origin_y).abs() > 5.0);
 
         for (i, bar_rect) in bars.iter().enumerate() {
             if let Some(note) = self.notes.get(i) {
@@ -246,10 +250,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     renderer::Renderer::fill_quad(
                         renderer,
                         renderer::Quad {
-                            bounds: Rectangle::new(
-                                Point::new(x, ghost_y),
-                                Size::new(w, h),
-                            ),
+                            bounds: Rectangle::new(Point::new(x, ghost_y), Size::new(w, h)),
                             border: iced::Border {
                                 radius: CORNER_RADIUS.into(),
                                 ..Default::default()
@@ -269,7 +270,8 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     let indicator_y = if target < bars.len() {
                         bars[target].y - BAR_GAP / 2.0
                     } else {
-                        bars.last().map_or(bounds.y, |b| b.y + b.height + BAR_GAP / 2.0)
+                        bars.last()
+                            .map_or(bounds.y, |b| b.y + b.height + BAR_GAP / 2.0)
                     };
                     renderer::Renderer::fill_quad(
                         renderer,
@@ -335,14 +337,14 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     shell.publish(Message::DragEnd);
                 }
             }
-            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                if bounds.contains(cursor.position().unwrap_or_default()) {
-                    let dy = match delta {
-                        mouse::ScrollDelta::Lines { y, .. } => *y * 30.0,
-                        mouse::ScrollDelta::Pixels { y, .. } => *y,
-                    };
-                    shell.publish(Message::StripScroll(dy));
-                }
+            Event::Mouse(mouse::Event::WheelScrolled { delta })
+                if bounds.contains(cursor.position().unwrap_or_default()) =>
+            {
+                let dy = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => *y * 30.0,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y,
+                };
+                shell.publish(Message::StripScroll(dy));
             }
             _ => {}
         }
@@ -356,7 +358,11 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         _viewport: &Rectangle,
         _renderer: &iced::Renderer,
     ) -> mouse::Interaction {
-        if self.drag.as_ref().map_or(false, |d| (d.current_y - d.origin_y).abs() > 5.0) {
+        if self
+            .drag
+            .as_ref()
+            .is_some_and(|d| (d.current_y - d.origin_y).abs() > 5.0)
+        {
             return mouse::Interaction::Grabbing;
         }
         if let Some(pos) = cursor.position() {
