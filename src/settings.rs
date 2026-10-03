@@ -229,15 +229,15 @@ impl SettingKey {
         match self {
             SettingKey::BarWidth => 3.0..=12.0,
             SettingKey::BarHeight => 16.0..=60.0,
-            SettingKey::BarGap => 4.0..=24.0,
-            SettingKey::Magnification => 1.0..=6.0,
-            SettingKey::Spread => 20.0..=120.0,
-            SettingKey::PeekDelay => 0.3..=3.0,
+            SettingKey::BarGap => 0.0..=24.0,
+            SettingKey::Magnification => 0.0..=5.0,
+            SettingKey::Spread => 20.0..=150.0,
+            SettingKey::PeekDelay => 0.0..=3.0,
             SettingKey::NoteSize => 240.0..=440.0,
             SettingKey::ExpandedSize => 400.0..=800.0,
             SettingKey::PaperTint => -0.3..=0.3,
             SettingKey::IdleControlAlpha => 0.0..=1.0,
-            SettingKey::Speed => 0.5..=2.0,
+            SettingKey::Speed => 0.25..=3.0,
             SettingKey::Stiffness => 150.0..=600.0,
             SettingKey::HeightFraction => 0.5..=1.0,
         }
@@ -304,7 +304,7 @@ impl SettingKey {
             SettingKey::PaperTint => "Paper tint",
             SettingKey::IdleControlAlpha => "Idle control opacity",
             SettingKey::Speed => "Animation speed",
-            SettingKey::Stiffness => "Spring stiffness",
+            SettingKey::Stiffness => "Expand snappiness",
             SettingKey::HeightFraction => "Strip height",
         }
     }
@@ -315,13 +315,26 @@ impl SettingKey {
             | SettingKey::BarHeight
             | SettingKey::BarGap
             | SettingKey::NoteSize
-            | SettingKey::ExpandedSize => format!("{v:.0} px"),
-            SettingKey::Magnification | SettingKey::Speed => format!("{v:.1}×"),
+            | SettingKey::ExpandedSize
+            | SettingKey::Spread => format!("{v:.0} px"),
+            // Stored as the extra size on top of the bar's own (scale 1 + v).
+            SettingKey::Magnification => format!("{:.1}×", 1.0 + v),
+            SettingKey::Speed => format!("{v:.2}×"),
             SettingKey::PeekDelay => format!("{v:.1} s"),
-            SettingKey::PaperTint | SettingKey::IdleControlAlpha | SettingKey::HeightFraction => {
+            SettingKey::PaperTint => {
+                let percent = (v.abs() * 100.0).round();
+                if percent == 0.0 {
+                    "same as bar".to_string()
+                } else if v < 0.0 {
+                    format!("{percent:.0} % lighter")
+                } else {
+                    format!("{percent:.0} % darker")
+                }
+            }
+            SettingKey::IdleControlAlpha | SettingKey::HeightFraction => {
                 format!("{:.0} %", v * 100.0)
             }
-            SettingKey::Spread | SettingKey::Stiffness => format!("{v:.0}"),
+            SettingKey::Stiffness => format!("{v:.0}"),
         }
     }
 }
@@ -856,6 +869,33 @@ mod tests {
         s.toggle(SettingToggle::MenuBarIcon);
         let back = Settings::from_json(&serde_json::to_string(&s).unwrap());
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn ranges_allow_off_and_immediate() {
+        let mut s = Settings::default();
+        for key in [
+            SettingKey::PeekDelay,
+            SettingKey::Magnification,
+            SettingKey::BarGap,
+        ] {
+            s.set(key, 0.0);
+            assert_eq!(s.get(key), 0.0, "{key:?}");
+        }
+        assert_eq!(SettingKey::Spread.range(), 20.0..=150.0);
+        assert_eq!(SettingKey::Speed.range(), 0.25..=3.0);
+    }
+
+    #[test]
+    fn formats_read_naturally() {
+        assert_eq!(SettingKey::Magnification.format(4.0), "5.0×");
+        assert_eq!(SettingKey::Magnification.format(0.0), "1.0×");
+        assert_eq!(SettingKey::Spread.format(60.0), "60 px");
+        assert_eq!(SettingKey::PaperTint.format(-0.12), "12 % lighter");
+        assert_eq!(SettingKey::PaperTint.format(0.1), "10 % darker");
+        assert_eq!(SettingKey::PaperTint.format(0.0), "same as bar");
+        assert_eq!(SettingKey::PeekDelay.format(0.0), "0.0 s");
+        assert_eq!(SettingKey::Stiffness.label(), "Expand snappiness");
     }
 
     #[test]
