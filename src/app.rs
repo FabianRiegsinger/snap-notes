@@ -1,8 +1,9 @@
 use crate::animation::{lerp, morph_frame, AnimationState, MagnificationState, Morph, MorphFrame};
-use crate::bar_strip::{bar_strip, compute_layout, StripLayout, BAR_GAP, STRIP_WIDTH};
+use crate::bar_strip::{bar_strip, compute_layout, StripLayout, STRIP_WIDTH};
 use crate::note::{NoteColor, PALETTE};
 use crate::note_panel::{post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
+use crate::settings::BarSettings;
 use crate::store::NoteStore;
 
 use iced::widget::{container, mouse_area, opaque, pin, stack, text_editor, Space};
@@ -28,12 +29,19 @@ const PEEK_DELAY: Duration = Duration::from_secs(1);
 const PEEK_POLL: Duration = Duration::from_millis(100);
 /// Share of the monitor height the docked window occupies (centered).
 const HEIGHT_FRACTION: f32 = 0.9;
+// TEMP: replaced by the user's settings in a later commit.
+const BAR_SETTINGS: BarSettings = BarSettings {
+    width: 6.0,
+    height: 30.0,
+    gap: 12.0,
+};
 
 #[derive(Debug, Clone)]
 pub enum Message {
     StripHover(Option<f32>),
     BarClicked(usize),
     AddNote,
+    ToggleSettings,
     NoteEdited(text_editor::Action),
     TitleEdited(String),
     NoteHovered(bool),
@@ -178,6 +186,7 @@ impl App {
                 }
             }
             Message::BarClicked(index) => return self.open_note(index),
+            Message::ToggleSettings => {}
             Message::AddNote => {
                 self.store.add_note(&PALETTE);
                 self.store.mark_dirty();
@@ -437,6 +446,7 @@ impl App {
             self.peek_note
                 .and_then(|id| self.store.notes().iter().position(|n| n.id == id))
                 .map(|index| (index, self.peek.progress())),
+            &BAR_SETTINGS,
         ))
         .width(Fill)
         .height(Fill)
@@ -606,8 +616,8 @@ impl App {
     /// stack or the open note. Everywhere else clicks go to the apps behind.
     fn is_interactive(&self, position: Point) -> bool {
         let strip = self.strip_layout();
-        let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y) - BAR_GAP;
-        let bottom = strip.add_hit_area.y + strip.add_hit_area.height;
+        let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y) - BAR_SETTINGS.gap;
+        let bottom = strip.settings_hit_area.y + strip.settings_hit_area.height;
         let over_strip = position.x >= self.window_size.width - STRIP_WIDTH
             && (top..=bottom).contains(&position.y);
         let over_note = self
@@ -709,6 +719,7 @@ impl App {
             |i| self.magnification.scale(i),
             bounds,
             self.scroll_offset,
+            &BAR_SETTINGS,
         )
     }
 
@@ -750,13 +761,13 @@ impl App {
         )
     }
 
-    /// Bar centers plus the add button's, which magnifies along with them.
+    /// Bar centers plus the add and settings buttons', which magnify along with them.
     fn magnification_centers(&self) -> Vec<f32> {
         let strip = self.strip_layout();
         strip
             .bars
             .iter()
-            .chain([&strip.add_button])
+            .chain([&strip.add_button, &strip.settings_button])
             .map(|r| r.y + r.height / 2.0)
             .collect()
     }

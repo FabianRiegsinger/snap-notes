@@ -2,6 +2,7 @@ use crate::animation::MagnificationState;
 use crate::app::{DragState, Message};
 use crate::note::Note;
 use crate::peek::draw_peek;
+use crate::settings::BarSettings;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
@@ -12,9 +13,6 @@ use iced::event::Event;
 use iced::mouse;
 use iced::{Color, Element, Length, Pixels, Point, Rectangle, Size, Theme};
 
-pub const BAR_REST_WIDTH: f32 = 6.0;
-pub const BAR_REST_HEIGHT: f32 = 30.0;
-pub const BAR_GAP: f32 = 12.0;
 pub const STRIP_WIDTH: f32 = 64.0;
 /// Horizontal space between the screen edge and the bars.
 pub const EDGE_MARGIN: f32 = 10.0;
@@ -32,30 +30,44 @@ pub struct StripLayout {
     pub add_button: Rectangle,
     /// Generous click target for the add button: the full strip width around it.
     pub add_hit_area: Rectangle,
+    /// Settings slot below the add button, drawn and magnified like it.
+    pub settings_button: Rectangle,
+    pub settings_hit_area: Rectangle,
     pub max_scroll: f32,
 }
 
-/// Lays out the bars plus the add button as one stack, centered vertically in
-/// `bounds`. Centering on the *current* (magnified) height keeps the hovered
-/// bar roughly in place while its neighbours grow. If the stack is taller than
-/// the bounds, it is top-aligned and scrolled by `scroll_offset`.
+/// Size of a slot (add or settings button) at magnification `scale`: it
+/// widens like a bar but its height grows less, so it stays compact.
+fn slot_size(bars: &BarSettings, scale: f32) -> Size {
+    Size::new(
+        bars.width * scale,
+        bars.height * scale.min(ADD_MAX_HEIGHT_SCALE),
+    )
+}
+
+/// Lays out the bars plus the add and settings slots as one stack, centered
+/// vertically in `bounds`. Centering on the *current* (magnified) height keeps
+/// the hovered bar roughly in place while its neighbours grow. If the stack is
+/// taller than the bounds, it is top-aligned and scrolled by `scroll_offset`.
 ///
-/// `scale(count)` is the add button's magnification.
+/// `scale(count)` is the add button's magnification, `scale(count + 1)` the
+/// settings button's.
 pub fn compute_layout(
     count: usize,
     scale: impl Fn(usize) -> f32,
     bounds: Rectangle,
     scroll_offset: f32,
+    bars_settings: &BarSettings,
 ) -> StripLayout {
-    let heights: Vec<f32> = (0..count).map(|i| BAR_REST_HEIGHT * scale(i)).collect();
-    let bars_height: f32 = heights.iter().sum::<f32>() + BAR_GAP * count.saturating_sub(1) as f32;
+    let gap = bars_settings.gap;
+    let heights: Vec<f32> = (0..count)
+        .map(|i| bars_settings.height * scale(i))
+        .collect();
+    let bars_height: f32 = heights.iter().sum::<f32>() + gap * count.saturating_sub(1) as f32;
     let add_gap = if count > 0 { ADD_BUTTON_GAP } else { 0.0 };
-    let add_scale = scale(count);
-    let add_size = Size::new(
-        BAR_REST_WIDTH * add_scale,
-        BAR_REST_HEIGHT * add_scale.min(ADD_MAX_HEIGHT_SCALE),
-    );
-    let content_height = bars_height + add_gap + add_size.height;
+    let add_size = slot_size(bars_settings, scale(count));
+    let gear_size = slot_size(bars_settings, scale(count + 1));
+    let content_height = bars_height + add_gap + add_size.height + gap + gear_size.height;
 
     let available = bounds.height - 2.0 * EDGE_PADDING;
     let (mut y, max_scroll) = if content_height <= available {
@@ -71,24 +83,38 @@ pub fn compute_layout(
     let right = bounds.x + bounds.width - EDGE_MARGIN;
     let mut bars = Vec::with_capacity(count);
     for (i, h) in heights.iter().enumerate() {
-        let w = BAR_REST_WIDTH * scale(i);
+        let w = bars_settings.width * scale(i);
         bars.push(Rectangle::new(Point::new(right - w, y), Size::new(w, *h)));
-        y += h + BAR_GAP;
+        y += h + gap;
     }
     if count > 0 {
-        y += add_gap - BAR_GAP;
+        y += add_gap - gap;
     }
 
     let add_button = Rectangle::new(Point::new(right - add_size.width, y), add_size);
+    let gear_y = y + add_size.height + gap;
+    let settings_button = Rectangle::new(Point::new(right - gear_size.width, gear_y), gear_size);
+    // The two hit areas meet halfway between the slots.
+    let split = gear_y - gap / 2.0;
+    let add_top = y - add_gap / 2.0;
     let add_hit_area = Rectangle::new(
-        Point::new(bounds.x, y - add_gap / 2.0),
-        Size::new(bounds.width, add_size.height + add_gap / 2.0 + EDGE_PADDING),
+        Point::new(bounds.x, add_top),
+        Size::new(bounds.width, split - add_top),
+    );
+    let settings_hit_area = Rectangle::new(
+        Point::new(bounds.x, split),
+        Size::new(
+            bounds.width,
+            gear_y + gear_size.height + EDGE_PADDING - split,
+        ),
     );
 
     StripLayout {
         bars,
         add_button,
         add_hit_area,
+        settings_button,
+        settings_hit_area,
         max_scroll,
     }
 }
@@ -100,6 +126,7 @@ pub struct BarStrip<'a> {
     scroll_offset: f32,
     /// Bar index being peeked and the peek's progress (0..=1).
     peek: Option<(usize, f32)>,
+    bars: &'a BarSettings,
 }
 
 impl<'a> BarStrip<'a> {
@@ -109,6 +136,7 @@ impl<'a> BarStrip<'a> {
         drag: &'a Option<DragState>,
         scroll_offset: f32,
         peek: Option<(usize, f32)>,
+        bars: &'a BarSettings,
     ) -> Self {
         Self {
             notes,
@@ -116,6 +144,7 @@ impl<'a> BarStrip<'a> {
             drag,
             scroll_offset,
             peek,
+            bars,
         }
     }
 
@@ -125,7 +154,13 @@ impl<'a> BarStrip<'a> {
             |i| self.magnification.scale(i),
             bounds,
             self.scroll_offset,
+            self.bars,
         )
+    }
+
+    /// How far a slot at magnification `scale` has revealed its glyph (0..=1).
+    fn reveal(scale: f32) -> f32 {
+        ((scale - 1.0) / (ADD_PLUS_SCALE - 1.0)).clamp(0.0, 1.0)
     }
 
     fn insertion_index(&self, cursor_y: f32, bars: &[Rectangle]) -> usize {
@@ -258,33 +293,24 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             }
         }
 
-        // Add button: an "empty slot" bar. At rest it is a hollow outline
-        // the size of a note bar; magnified it fills in and shows a "+".
-        let btn = strip.add_button;
-        let hovered = cursor.is_over(strip.add_hit_area) && self.drag.is_none();
-        let reveal = ((self.magnification.scale(self.notes.len()) - 1.0) / (ADD_PLUS_SCALE - 1.0))
-            .clamp(0.0, 1.0);
-        let fill_alpha = if hovered { 0.9 } else { 0.15 + 0.5 * reveal };
-        let shade = if hovered { 0.3 } else { 0.45 };
-        renderer::Renderer::fill_quad(
+        // Add and settings buttons: "empty slot" bars. At rest they are
+        // hollow outlines the size of a note bar; magnified they fill in and
+        // show their glyph.
+        let idle = self.drag.is_none();
+        let count = self.notes.len();
+        let add_reveal = Self::reveal(self.magnification.scale(count));
+        let add = strip.add_button;
+        draw_slot(
             renderer,
-            renderer::Quad {
-                bounds: btn,
-                border: iced::Border {
-                    radius: CORNER_RADIUS.into(),
-                    width: 1.5 * (1.0 - reveal),
-                    color: Color::from_rgba(0.45, 0.46, 0.5, 0.75),
-                },
-                shadow: Default::default(),
-                snap: true,
-            },
-            Color::from_rgba(shade, shade + 0.01, shade + 0.05, fill_alpha),
+            add,
+            idle && cursor.is_over(strip.add_hit_area),
+            add_reveal,
         );
-        if reveal > 0.0 {
+        if add_reveal > 0.0 {
             let thickness = 2.0;
-            let len = (btn.width.min(btn.height) * 0.5).max(thickness);
-            let cx = btn.x + btn.width / 2.0;
-            let cy = btn.y + btn.height / 2.0;
+            let len = (add.width.min(add.height) * 0.5).max(thickness);
+            let cx = add.x + add.width / 2.0;
+            let cy = add.y + add.height / 2.0;
             for size in [Size::new(len, thickness), Size::new(thickness, len)] {
                 renderer::Renderer::fill_quad(
                     renderer,
@@ -300,17 +326,47 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                         shadow: Default::default(),
                         snap: true,
                     },
-                    Color::from_rgba(1.0, 1.0, 1.0, 0.95 * reveal),
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.95 * add_reveal),
                 );
             }
+        }
+
+        let gear_reveal = Self::reveal(self.magnification.scale(count + 1));
+        let gear = strip.settings_button;
+        draw_slot(
+            renderer,
+            gear,
+            idle && cursor.is_over(strip.settings_hit_area),
+            gear_reveal,
+        );
+        if gear_reveal > 0.0 {
+            use iced::advanced::text::Renderer as TextRenderer;
+            let size = gear.width.min(gear.height) * 0.6;
+            TextRenderer::fill_text(
+                renderer,
+                iced::advanced::Text {
+                    content: "⚙".to_string(),
+                    bounds: gear.size(),
+                    size: Pixels(size),
+                    line_height: iced::widget::text::LineHeight::default(),
+                    font: iced::Font::default(),
+                    align_x: alignment::Horizontal::Center.into(),
+                    align_y: alignment::Vertical::Center,
+                    shaping: iced::widget::text::Shaping::Advanced,
+                    wrapping: iced::widget::text::Wrapping::None,
+                },
+                gear.center(),
+                Color::from_rgba(1.0, 1.0, 1.0, 0.95 * gear_reveal),
+                gear,
+            );
         }
 
         if let Some(drag) = &self.drag {
             if drag_active {
                 if let Some(note) = self.notes.get(drag.bar_index) {
                     let scale = self.magnification.scale(drag.bar_index);
-                    let w = BAR_REST_WIDTH * scale;
-                    let h = BAR_REST_HEIGHT * scale;
+                    let w = self.bars.width * scale;
+                    let h = self.bars.height * scale;
                     let x = bounds.x + bounds.width - w;
                     let ghost_y = drag.current_y - h / 2.0;
                     renderer::Renderer::fill_quad(
@@ -334,10 +390,10 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
 
                     let target = self.insertion_index(drag.current_y, bars);
                     let indicator_y = if target < bars.len() {
-                        bars[target].y - BAR_GAP / 2.0
+                        bars[target].y - self.bars.gap / 2.0
                     } else {
                         bars.last()
-                            .map_or(bounds.y, |b| b.y + b.height + BAR_GAP / 2.0)
+                            .map_or(bounds.y, |b| b.y + b.height + self.bars.gap / 2.0)
                     };
                     renderer::Renderer::fill_quad(
                         renderer,
@@ -394,6 +450,9 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     if strip.add_hit_area.contains(pos) {
                         shell.publish(Message::AddNote);
                         shell.capture_event();
+                    } else if strip.settings_hit_area.contains(pos) {
+                        shell.publish(Message::ToggleSettings);
+                        shell.capture_event();
                     }
                 }
             }
@@ -432,7 +491,10 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         }
         if let Some(pos) = cursor.position() {
             let strip = self.layout_in(layout.bounds());
-            if strip.bars.iter().any(|bar| bar.contains(pos)) || strip.add_hit_area.contains(pos) {
+            if strip.bars.iter().any(|bar| bar.contains(pos))
+                || strip.add_hit_area.contains(pos)
+                || strip.settings_hit_area.contains(pos)
+            {
                 return mouse::Interaction::Pointer;
             }
         }
@@ -452,8 +514,30 @@ pub fn bar_strip<'a>(
     drag: &'a Option<DragState>,
     scroll_offset: f32,
     peek: Option<(usize, f32)>,
+    bars: &'a BarSettings,
 ) -> Element<'a, Message> {
-    BarStrip::new(notes, magnification, drag, scroll_offset, peek).into()
+    BarStrip::new(notes, magnification, drag, scroll_offset, peek, bars).into()
+}
+
+/// Draws an add/settings slot: a hollow outline that fills in as `reveal`
+/// grows, darker while hovered.
+fn draw_slot(renderer: &mut iced::Renderer, rect: Rectangle, hovered: bool, reveal: f32) {
+    let fill_alpha = if hovered { 0.9 } else { 0.15 + 0.5 * reveal };
+    let shade = if hovered { 0.3 } else { 0.45 };
+    renderer::Renderer::fill_quad(
+        renderer,
+        renderer::Quad {
+            bounds: rect,
+            border: iced::Border {
+                radius: CORNER_RADIUS.into(),
+                width: 1.5 * (1.0 - reveal),
+                color: Color::from_rgba(0.45, 0.46, 0.5, 0.75),
+            },
+            shadow: Default::default(),
+            snap: true,
+        },
+        Color::from_rgba(shade, shade + 0.01, shade + 0.05, fill_alpha),
+    );
 }
 
 #[cfg(test)]
@@ -464,16 +548,30 @@ mod tests {
         Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, height))
     }
 
+    fn layout(count: usize, scale: impl Fn(usize) -> f32, height: f32, scroll: f32) -> StripLayout {
+        compute_layout(
+            count,
+            scale,
+            bounds(height),
+            scroll,
+            &BarSettings::default(),
+        )
+    }
+
     fn stack_center(l: &StripLayout) -> f32 {
         let top = l.bars.first().map_or(l.add_button.y, |b| b.y);
-        let bottom = l.add_button.y + l.add_button.height;
+        let bottom = l.settings_button.y + l.settings_button.height;
         (top + bottom) / 2.0
+    }
+
+    fn center(r: &Rectangle) -> Point {
+        Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0)
     }
 
     #[test]
     fn stack_is_vertically_centered_for_any_count() {
         for count in [0, 1, 3, 8] {
-            let l = compute_layout(count, |_| 1.0, bounds(900.0), 0.0);
+            let l = layout(count, |_| 1.0, 900.0, 0.0);
             assert!((stack_center(&l) - 450.0).abs() < 0.01, "count {count}");
             assert_eq!(l.max_scroll, 0.0);
         }
@@ -481,48 +579,82 @@ mod tests {
 
     #[test]
     fn bars_are_spaced_by_gap() {
-        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0);
+        let l = layout(3, |_| 1.0, 900.0, 0.0);
         let gap = l.bars[1].y - (l.bars[0].y + l.bars[0].height);
-        assert!((gap - BAR_GAP).abs() < 0.01);
+        assert!((gap - BarSettings::default().gap).abs() < 0.01);
+    }
+
+    #[test]
+    fn bar_settings_drive_sizes() {
+        let bars = BarSettings {
+            width: 10.0,
+            height: 50.0,
+            gap: 20.0,
+        };
+        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &bars);
+        assert_eq!(l.bars[0].size(), Size::new(10.0, 50.0));
+        let gap = l.bars[1].y - (l.bars[0].y + l.bars[0].height);
+        assert!((gap - 20.0).abs() < 0.01);
     }
 
     #[test]
     fn overflowing_stack_scrolls_and_clamps() {
-        let l = compute_layout(40, |_| 1.0, bounds(400.0), 0.0);
+        let l = layout(40, |_| 1.0, 400.0, 0.0);
         assert!(l.max_scroll > 0.0);
         assert!((l.bars[0].y - EDGE_PADDING).abs() < 0.01);
-        let scrolled = compute_layout(40, |_| 1.0, bounds(400.0), 1.0e6);
-        let last = scrolled.add_button.y + scrolled.add_button.height;
+        let scrolled = layout(40, |_| 1.0, 400.0, 1.0e6);
+        let last = scrolled.settings_button.y + scrolled.settings_button.height;
         assert!((last - (400.0 - EDGE_PADDING)).abs() < 0.01);
     }
 
     #[test]
     fn bars_keep_margin_from_screen_edge() {
-        let l = compute_layout(3, |_| 5.0, bounds(900.0), 0.0);
-        for bar in l.bars.iter().chain([&l.add_button]) {
+        let l = layout(3, |_| 5.0, 900.0, 0.0);
+        for bar in l.bars.iter().chain([&l.add_button, &l.settings_button]) {
             assert!((STRIP_WIDTH - (bar.x + bar.width) - EDGE_MARGIN).abs() < 0.01);
         }
     }
 
     #[test]
     fn add_button_is_bar_shaped_at_rest() {
-        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0);
+        let l = layout(3, |_| 1.0, 900.0, 0.0);
         assert_eq!(l.add_button.size(), l.bars[0].size());
     }
 
     #[test]
     fn magnified_add_button_widens_but_stays_compact() {
-        let l = compute_layout(3, |i| if i == 3 { 5.0 } else { 1.0 }, bounds(900.0), 0.0);
-        assert!((l.add_button.width - BAR_REST_WIDTH * 5.0).abs() < 0.01);
-        assert!((l.add_button.height - BAR_REST_HEIGHT * ADD_MAX_HEIGHT_SCALE).abs() < 0.01);
+        let d = BarSettings::default();
+        let l = layout(3, |i| if i == 3 { 5.0 } else { 1.0 }, 900.0, 0.0);
+        assert!((l.add_button.width - d.width * 5.0).abs() < 0.01);
+        assert!((l.add_button.height - d.height * ADD_MAX_HEIGHT_SCALE).abs() < 0.01);
     }
 
     #[test]
     fn add_hit_area_spans_strip_width() {
-        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0);
+        let l = layout(3, |_| 1.0, 900.0, 0.0);
         assert_eq!(l.add_hit_area.width, STRIP_WIDTH);
         assert!(l
             .add_hit_area
             .contains(Point::new(2.0, l.add_button.y + 2.0)));
+    }
+
+    #[test]
+    fn gear_slot_below_add_button_for_any_count() {
+        for count in [0, 1, 5] {
+            let l = layout(count, |_| 1.0, 900.0, 0.0);
+            let gear = center(&l.settings_button);
+            assert!(l.settings_button.y >= l.add_button.y + l.add_button.height);
+            assert!(l.settings_hit_area.contains(gear), "count {count}");
+            assert!(!l.add_hit_area.contains(gear), "count {count}");
+            assert!(l.add_hit_area.contains(center(&l.add_button)));
+        }
+    }
+
+    #[test]
+    fn magnified_gear_uses_its_own_scale() {
+        let d = BarSettings::default();
+        let l = layout(2, |i| if i == 3 { 4.0 } else { 1.0 }, 900.0, 0.0);
+        assert!((l.settings_button.width - d.width * 4.0).abs() < 0.01);
+        assert_eq!(l.add_button.size(), l.bars[0].size());
     }
 }
