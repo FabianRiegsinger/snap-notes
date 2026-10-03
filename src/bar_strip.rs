@@ -36,6 +36,15 @@ pub struct StripLayout {
     pub max_scroll: f32,
 }
 
+/// The vertically centered `fraction` of `bounds` the bars are laid out in.
+pub fn band(bounds: Rectangle, fraction: f32) -> Rectangle {
+    let height = bounds.height * fraction;
+    Rectangle::new(
+        Point::new(bounds.x, bounds.y + (bounds.height - height) / 2.0),
+        Size::new(bounds.width, height),
+    )
+}
+
 /// Size of a slot (add or settings button) at magnification `scale`: it
 /// widens like a bar but its height grows less, so it stays compact.
 fn slot_size(bars: &BarSettings, scale: f32) -> Size {
@@ -127,6 +136,8 @@ pub struct BarStrip<'a> {
     /// Bar index being peeked and the peek's progress (0..=1).
     peek: Option<(usize, f32)>,
     bars: &'a BarSettings,
+    /// Share of the widget height the bars may use (centered).
+    height_fraction: f32,
 }
 
 impl<'a> BarStrip<'a> {
@@ -137,6 +148,7 @@ impl<'a> BarStrip<'a> {
         scroll_offset: f32,
         peek: Option<(usize, f32)>,
         bars: &'a BarSettings,
+        height_fraction: f32,
     ) -> Self {
         Self {
             notes,
@@ -145,6 +157,7 @@ impl<'a> BarStrip<'a> {
             scroll_offset,
             peek,
             bars,
+            height_fraction,
         }
     }
 
@@ -152,7 +165,7 @@ impl<'a> BarStrip<'a> {
         compute_layout(
             self.notes.len(),
             |i| self.magnification.scale(i),
-            bounds,
+            band(bounds, self.height_fraction),
             self.scroll_offset,
             self.bars,
         )
@@ -515,8 +528,18 @@ pub fn bar_strip<'a>(
     scroll_offset: f32,
     peek: Option<(usize, f32)>,
     bars: &'a BarSettings,
+    height_fraction: f32,
 ) -> Element<'a, Message> {
-    BarStrip::new(notes, magnification, drag, scroll_offset, peek, bars).into()
+    BarStrip::new(
+        notes,
+        magnification,
+        drag,
+        scroll_offset,
+        peek,
+        bars,
+        height_fraction,
+    )
+    .into()
 }
 
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
@@ -636,6 +659,20 @@ mod tests {
         assert!(l
             .add_hit_area
             .contains(Point::new(2.0, l.add_button.y + 2.0)));
+    }
+
+    #[test]
+    fn band_is_centered_share_of_bounds() {
+        let b = band(
+            Rectangle::new(Point::new(5.0, 100.0), Size::new(64.0, 1000.0)),
+            0.5,
+        );
+        assert_eq!(
+            b,
+            Rectangle::new(Point::new(5.0, 350.0), Size::new(64.0, 500.0))
+        );
+        let full = bounds(800.0);
+        assert_eq!(band(full, 1.0), full);
     }
 
     #[test]

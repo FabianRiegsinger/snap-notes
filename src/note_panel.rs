@@ -76,17 +76,16 @@ const CHROME_HEIGHT: f32 = 72.0;
 const PICKER_HEIGHT: f32 = 148.0;
 const CONFIRM_HEIGHT: f32 = 46.0;
 
-/// How much lighter than its bar a note's paper is.
-pub(crate) const PAPER_LIGHTEN: f32 = -0.12;
-
 const INK: [f32; 3] = [0.13, 0.12, 0.10];
 const RADIUS: f32 = 1.0;
-/// Header controls stay faint until the note is hovered, like plain paper.
-const IDLE_CONTROL_ALPHA: f32 = 0.3;
 
 pub struct PostIt<'a> {
     pub note: &'a Note,
     pub palette: &'a [NoteColor],
+    /// How much lighter (negative) or darker than its bar the paper is.
+    pub paper_tint: f32,
+    /// Header controls stay this faint until the note is hovered.
+    pub idle_control_alpha: f32,
     pub content: &'a text_editor::Content,
     pub size: Size,
     pub morph_progress: f32,
@@ -138,6 +137,8 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     let PostIt {
         note,
         palette,
+        paper_tint,
+        idle_control_alpha,
         content,
         size,
         morph_progress,
@@ -151,11 +152,11 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     let controls = if hovered || dragging || color_picker_open || confirm_delete {
         a
     } else {
-        a * IDLE_CONTROL_ALPHA
+        a * idle_control_alpha
     };
 
     // Starts as the bar color so the morph has no seam where it meets the bar.
-    let paper = shade(note, PAPER_LIGHTEN * morph_progress, 1.0);
+    let paper = shade(note, paper_tint * morph_progress, 1.0);
     let shadow_alpha = 0.28 * morph_progress;
 
     let inner: Element<'_, Message> = if a < 0.01 {

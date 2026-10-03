@@ -1,9 +1,9 @@
 use crate::animation::{lerp, morph_frame, AnimationState, MagnificationState, Morph, MorphFrame};
-use crate::bar_strip::{bar_strip, compute_layout, StripLayout, STRIP_WIDTH};
-use crate::note::{NoteColor, PALETTE};
+use crate::bar_strip::{band, bar_strip, compute_layout, StripLayout, STRIP_WIDTH};
+use crate::note::NoteColor;
 use crate::note_panel::{post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
-use crate::settings::{BarSettings, HoverSettings};
+use crate::settings::{Settings, SettingsStore};
 use crate::store::NoteStore;
 
 use iced::widget::{container, mouse_area, opaque, pin, stack, text_editor, Space};
@@ -15,26 +15,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const NOTE_SIZE: f32 = 320.0;
-const NOTE_EXPANDED_SIZE: f32 = 560.0;
 pub(crate) const NOTE_GAP: f32 = 18.0;
 pub(crate) const NOTE_MARGIN: f32 = 24.0;
-/// Window width while a note is open: room for the expanded note and its shadow.
-pub const OPEN_WIDTH: f32 = STRIP_WIDTH + NOTE_GAP + NOTE_EXPANDED_SIZE + NOTE_MARGIN;
 /// While mouse passthrough is on, how often the OS cursor is polled to notice
 /// it entering the strip or the note again.
 const CURSOR_POLL: Duration = Duration::from_millis(50);
-/// How long the cursor rests on a bar before it widens into a peek.
-const PEEK_DELAY: Duration = Duration::from_secs(1);
 const PEEK_POLL: Duration = Duration::from_millis(100);
-/// Share of the monitor height the docked window occupies (centered).
-const HEIGHT_FRACTION: f32 = 0.9;
-// TEMP: replaced by the user's settings in a later commit.
-const BAR_SETTINGS: BarSettings = BarSettings {
-    width: 6.0,
-    height: 30.0,
-    gap: 12.0,
-};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -76,6 +62,7 @@ pub enum Message {
 
 pub struct App {
     store: NoteStore,
+    settings: SettingsStore,
     magnification: MagnificationState,
     cursor_y: Option<f32>,
     active_note: Option<Uuid>,
@@ -117,33 +104,41 @@ pub struct DragState {
     pub current_y: f32,
 }
 
-fn data_path() -> PathBuf {
+/// Notes and settings live next to the executable (portable app).
+fn data_dir() -> PathBuf {
     std::env::current_exe()
         .unwrap_or_else(|_| PathBuf::from("."))
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("notes.json")
+        .to_path_buf()
 }
 
 impl App {
     pub fn boot() -> (Self, Task<Message>) {
-        let mut store = NoteStore::load(data_path());
+        let settings = SettingsStore::load(data_dir().join("settings.json"));
+        let s = settings.settings();
+        let mut store = NoteStore::load(data_dir().join("notes.json"));
         if store.notes().is_empty() {
-            store.seed_templates(&PALETTE);
+            store.seed_templates(&s.palette);
             let _ = store.save();
         }
+        let morph = Morph::new(s.motion.speed);
+        let peek = Morph::peek(s.motion.speed);
+        let expand_animation = AnimationState::new(0.0, s.motion.stiffness);
+        let window_size = Size::new(Self::docked_width(s, false), 600.0);
         (
             Self {
                 store,
+                settings,
                 magnification: MagnificationState::new(),
                 cursor_y: None,
                 active_note: None,
                 editor_content: None,
-                morph: Morph::new(1.0),
+                morph,
                 anchor_y: 0.0,
                 pending_delete: None,
                 expanded: false,
-                expand_animation: AnimationState::new(0.0, 300.0),
+                expand_animation,
                 color_picker_open: false,
                 note_hovered: false,
                 drag: None,
@@ -154,7 +149,7 @@ impl App {
                 visible: true,
                 window_id: None,
                 monitor: None,
-                window_size: Size::new(Self::docked_width(false), 600.0),
+                window_size,
                 passthrough: false,
                 mouse_down: false,
                 last_cursor: None,
@@ -162,7 +157,7 @@ impl App {
                 note_drag_pos: None,
                 hover_bar: None,
                 peek_note: None,
-                peek: Morph::peek(1.0),
+                peek,
             },
             window::oldest().then(|id| match id {
                 Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
@@ -188,7 +183,7 @@ impl App {
             Message::BarClicked(index) => return self.open_note(index),
             Message::ToggleSettings => {}
             Message::AddNote => {
-                self.store.add_note(&PALETTE);
+                self.store.add_note(&self.settings.settings().palette);
                 self.store.mark_dirty();
                 let last = self.store.notes().len() - 1;
                 self.scroll_offset = self.strip_layout().max_scroll;
@@ -279,7 +274,7 @@ impl App {
                     self.cursor_y,
                     &centers,
                     dt,
-                    &HoverSettings::default(),
+                    &self.settings.settings().hover,
                 );
                 let morph_active = self.morph.tick(dt) | self.peek.tick(dt);
                 if self.peek.is_closed() {
@@ -299,6 +294,10 @@ impl App {
                 if self.store.should_save() {
                     let _ = self.store.save();
                     self.store.did_save();
+                }
+                if self.settings.should_save() {
+                    let _ = self.settings.save();
+                    self.settings.did_save();
                 }
             }
             Message::ToggleColorPicker => {
@@ -327,7 +326,10 @@ impl App {
             Message::PeekTick(now) => {
                 self.update_hover();
                 if let Some((id, since)) = self.hover_bar {
-                    if !self.peek.is_opening() && now.duration_since(since) >= PEEK_DELAY {
+                    if !self.peek.is_opening()
+                        && now.duration_since(since).as_secs_f32()
+                            >= self.settings.settings().hover.peek_delay_secs
+                    {
                         self.peek_note = Some(id);
                         self.peek.open();
                         self.animating = true;
@@ -384,6 +386,7 @@ impl App {
             }
             Message::Quit => {
                 let _ = self.store.save();
+                let _ = self.settings.save();
                 std::process::exit(0);
             }
             Message::WindowReady(id, monitor) => {
@@ -451,7 +454,8 @@ impl App {
             self.peek_note
                 .and_then(|id| self.store.notes().iter().position(|n| n.id == id))
                 .map(|index| (index, self.peek.progress())),
-            &BAR_SETTINGS,
+            &self.settings.settings().bars,
+            self.strip_fraction(),
         ))
         .width(Fill)
         .height(Fill)
@@ -474,7 +478,9 @@ impl App {
                     );
                     let note_view = post_it(PostIt {
                         note,
-                        palette: &PALETTE,
+                        palette: &self.settings.settings().palette,
+                        paper_tint: self.settings.settings().notes.paper_tint,
+                        idle_control_alpha: self.settings.settings().notes.idle_control_alpha,
                         content,
                         size: rect.size(),
                         morph_progress: self.morph.progress(),
@@ -567,7 +573,7 @@ impl App {
         self.color_picker_open = false;
         self.confirm_delete = None;
         self.expanded = false;
-        self.expand_animation = AnimationState::new(0.0, 300.0);
+        self.expand_animation = AnimationState::new(0.0, self.settings.settings().motion.stiffness);
         if let Some(id) = self.pending_delete.take() {
             self.store.delete_note(id);
             let _ = self.store.save();
@@ -580,9 +586,9 @@ impl App {
     /// Window width for the current state. With passthrough the window always
     /// has room for an open note, so opening and closing never resize it (a
     /// resize is a separate move + resize and flickers for a frame).
-    fn docked_width(note_open: bool) -> f32 {
+    fn docked_width(settings: &Settings, note_open: bool) -> f32 {
         if SUPPORTS_PASSTHROUGH || note_open {
-            OPEN_WIDTH
+            settings.open_width()
         } else {
             STRIP_WIDTH
         }
@@ -602,8 +608,8 @@ impl App {
             monitor
         } else {
             Size::new(
-                Self::docked_width(self.active_note.is_some()),
-                (monitor.height * HEIGHT_FRACTION).round(),
+                Self::docked_width(self.settings.settings(), self.active_note.is_some()),
+                (monitor.height * self.settings.settings().window.height_fraction).round(),
             )
         };
         if size == self.window_size {
@@ -621,7 +627,8 @@ impl App {
     /// stack or the open note. Everywhere else clicks go to the apps behind.
     fn is_interactive(&self, position: Point) -> bool {
         let strip = self.strip_layout();
-        let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y) - BAR_SETTINGS.gap;
+        let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y)
+            - self.settings.settings().bars.gap;
         let bottom = strip.settings_hit_area.y + strip.settings_hit_area.height;
         let over_strip = position.x >= self.window_size.width - STRIP_WIDTH
             && (top..=bottom).contains(&position.y);
@@ -700,7 +707,7 @@ impl App {
     fn hide_peek(&mut self) {
         self.hover_bar = None;
         self.peek_note = None;
-        self.peek = Morph::peek(1.0);
+        self.peek = Morph::peek(self.settings.settings().motion.speed);
     }
 
     fn note_frame(&self) -> Option<MorphFrame> {
@@ -722,17 +729,44 @@ impl App {
         compute_layout(
             self.store.notes().len(),
             |i| self.magnification.scale(i),
-            bounds,
+            band(bounds, self.strip_fraction()),
             self.scroll_offset,
-            &BAR_SETTINGS,
+            &self.settings.settings().bars,
         )
+    }
+
+    /// Share of the window height the strip uses. Without passthrough the
+    /// window itself is already sized to the configured fraction.
+    fn strip_fraction(&self) -> f32 {
+        if SUPPORTS_PASSTHROUGH {
+            self.settings.settings().window.height_fraction
+        } else {
+            1.0
+        }
+    }
+
+    /// Applies changed settings to running state: animation speeds, scroll
+    /// bounds and the docked window size.
+    #[allow(dead_code)] // TEMP: called by the settings panel in the next commit.
+    fn apply_settings(&mut self) -> Task<Message> {
+        let s = self.settings.settings();
+        let (speed, stiffness) = (s.motion.speed, s.motion.stiffness);
+        self.morph.set_speed(speed);
+        self.peek.set_speed(speed);
+        let target = if self.expanded { 1.0 } else { 0.0 };
+        self.expand_animation = AnimationState::new(self.expand_animation.value(), stiffness);
+        self.expand_animation.set_target(target);
+        self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
+        self.animating = true;
+        self.dock_window()
     }
 
     fn note_target_rect(&self) -> Rectangle {
         let expand = self.expand_animation.value();
-        let max_height = (self.window_size.height - 2.0 * NOTE_MARGIN).max(NOTE_SIZE / 2.0);
-        let width = lerp(NOTE_SIZE, NOTE_EXPANDED_SIZE, expand);
-        let height = lerp(NOTE_SIZE, NOTE_EXPANDED_SIZE, expand).min(max_height);
+        let notes = &self.settings.settings().notes;
+        let max_height = (self.window_size.height - 2.0 * NOTE_MARGIN).max(notes.size / 2.0);
+        let width = lerp(notes.size, notes.expanded_size, expand);
+        let height = width.min(max_height);
         let saved = self.note_drag_pos.or_else(|| {
             let id = self.active_note?;
             let note = self.store.notes().iter().find(|n| n.id == id)?;

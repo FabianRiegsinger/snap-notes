@@ -146,7 +146,6 @@ impl Morph {
     }
 
     /// Changes the speed without disturbing a running morph.
-    #[allow(dead_code)] // TEMP: used once settings are applied live.
     pub fn set_speed(&mut self, speed: f32) {
         self.speed = speed;
     }
