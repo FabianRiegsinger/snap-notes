@@ -32,9 +32,12 @@ impl NoteColor {
         format!("#{:02X}{:02X}{:02X}", r, g, b)
     }
 
-    pub fn random() -> Self {
-        let mut rng = rand::rng();
-        *PALETTE.choose(&mut rng).unwrap()
+    /// A random color from `palette`, or the first default color if it is empty.
+    pub fn random_from(palette: &[NoteColor]) -> Self {
+        palette
+            .choose(&mut rand::rng())
+            .copied()
+            .unwrap_or(PALETTE[0])
     }
 }
 
@@ -156,10 +159,10 @@ mod tests {
     }
 
     #[test]
-    fn random_color_is_from_palette() {
+    fn random_from_picks_from_given_palette() {
+        let palette = [PALETTE[0], PALETTE[5]];
         for _ in 0..50 {
-            let c = NoteColor::random();
-            assert!(PALETTE.iter().any(|p| p.to_hex() == c.to_hex()));
+            assert!(palette.contains(&NoteColor::random_from(&palette)));
         }
     }
 }

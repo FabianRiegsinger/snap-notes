@@ -1,6 +1,6 @@
 use crate::animation::{lerp, morph_frame, AnimationState, MagnificationState, Morph, MorphFrame};
 use crate::bar_strip::{bar_strip, compute_layout, StripLayout, BAR_GAP, STRIP_WIDTH};
-use crate::note::NoteColor;
+use crate::note::{NoteColor, PALETTE};
 use crate::note_panel::{post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
 use crate::store::NoteStore;
@@ -121,7 +121,7 @@ impl App {
     pub fn boot() -> (Self, Task<Message>) {
         let mut store = NoteStore::load(data_path());
         if store.notes().is_empty() {
-            store.seed_templates();
+            store.seed_templates(&PALETTE);
             let _ = store.save();
         }
         (
@@ -179,7 +179,7 @@ impl App {
             }
             Message::BarClicked(index) => return self.open_note(index),
             Message::AddNote => {
-                self.store.add_note();
+                self.store.add_note(&PALETTE);
                 self.store.mark_dirty();
                 let last = self.store.notes().len() - 1;
                 self.scroll_offset = self.strip_layout().max_scroll;
@@ -459,6 +459,7 @@ impl App {
                     );
                     let note_view = post_it(PostIt {
                         note,
+                        palette: &PALETTE,
                         content,
                         size: rect.size(),
                         morph_progress: self.morph.progress(),

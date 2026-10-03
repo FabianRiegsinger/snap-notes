@@ -1,11 +1,11 @@
 use crate::app::Message;
-use crate::note::{NoteColor, PALETTE};
+use crate::note::NoteColor;
 
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{Color, Element, Theme};
 
-pub fn color_picker(current: &NoteColor) -> Element<'_, Message> {
-    let rows: Vec<Element<'_, Message>> = PALETTE
+pub fn color_picker<'a>(current: &NoteColor, palette: &'a [NoteColor]) -> Element<'a, Message> {
+    let rows: Vec<Element<'a, Message>> = palette
         .chunks(5)
         .map(|chunk| {
             let btns: Vec<Element<'_, Message>> = chunk

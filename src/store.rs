@@ -1,4 +1,4 @@
-use crate::note::{Note, NoteColor, PALETTE};
+use crate::note::{Note, NoteColor};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -54,25 +54,37 @@ impl NoteStore {
         self.notes.iter_mut().find(|n| n.id == id)
     }
 
-    pub fn add_note(&mut self) -> Uuid {
+    pub fn add_note(&mut self, palette: &[NoteColor]) -> Uuid {
         let order = self.notes.len();
-        let mut note = Note::new(NoteColor::random());
+        let mut note = Note::new(NoteColor::random_from(palette));
         note.order = order;
         let id = note.id;
         self.notes.push(note);
         id
     }
 
-    pub fn seed_templates(&mut self) {
+    pub fn seed_templates(&mut self, palette: &[NoteColor]) {
         use rand::seq::IndexedRandom;
         if !self.notes.is_empty() {
             return;
         }
-        for (order, color) in PALETTE.choose_multiple(&mut rand::rng(), 3).enumerate() {
+        for (order, color) in palette.choose_multiple(&mut rand::rng(), 3).enumerate() {
             let mut note = Note::new(*color);
             note.order = order;
             self.notes.push(note);
         }
+    }
+
+    /// Gives every note colored `old` the color `new`. Returns whether any
+    /// note changed; the caller marks the store dirty.
+    #[allow(dead_code)] // TEMP: used by the settings panel in a later commit.
+    pub fn recolor(&mut self, old: NoteColor, new: NoteColor) -> bool {
+        let mut changed = false;
+        for note in self.notes.iter_mut().filter(|n| n.color == old) {
+            note.color = new;
+            changed = true;
+        }
+        changed
     }
 
     pub fn delete_note(&mut self, id: Uuid) {
@@ -112,6 +124,7 @@ impl NoteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::note::PALETTE;
     use std::path::PathBuf;
 
     #[test]
@@ -125,7 +138,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes.json");
         let mut store = NoteStore::load(path.clone());
-        let id = store.add_note();
+        let id = store.add_note(&PALETTE);
         store.note_mut(id).unwrap().content = "Hello".into();
         store.save().unwrap();
         let loaded = NoteStore::load(path);
@@ -137,9 +150,9 @@ mod tests {
     fn reorder_moves_note() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = NoteStore::load(dir.path().join("n.json"));
-        let a = store.add_note();
-        let b = store.add_note();
-        let _c = store.add_note();
+        let a = store.add_note(&PALETTE);
+        let b = store.add_note(&PALETTE);
+        let _c = store.add_note(&PALETTE);
         store.reorder(0, 2);
         assert_eq!(store.notes()[2].id, a);
         assert_eq!(store.notes()[0].id, b);
@@ -149,7 +162,7 @@ mod tests {
     fn seed_templates_fills_empty_store_with_three_distinct_blank_notes() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = NoteStore::load(dir.path().join("n.json"));
-        store.seed_templates();
+        store.seed_templates(&PALETTE);
         let notes = store.notes();
         assert_eq!(notes.len(), 3);
         assert!(notes.iter().all(|n| n.content.is_empty()));
@@ -167,17 +180,32 @@ mod tests {
     fn seed_templates_leaves_existing_notes_alone() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = NoteStore::load(dir.path().join("n.json"));
-        let id = store.add_note();
-        store.seed_templates();
+        let id = store.add_note(&PALETTE);
+        store.seed_templates(&PALETTE);
         assert_eq!(store.notes().len(), 1);
         assert_eq!(store.notes()[0].id, id);
+    }
+
+    #[test]
+    fn recolor_changes_only_matching_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = NoteStore::load(dir.path().join("n.json"));
+        let (a, b, c) = (PALETTE[0], PALETTE[1], PALETTE[2]);
+        for color in [a, a, b] {
+            let id = store.add_note(&PALETTE);
+            store.note_mut(id).unwrap().color = color;
+        }
+        assert!(store.recolor(a, c));
+        let colors: Vec<_> = store.notes().iter().map(|n| n.color).collect();
+        assert_eq!(colors, vec![c, c, b]);
+        assert!(!store.recolor(a, c));
     }
 
     #[test]
     fn debounce_timing() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = NoteStore::load(dir.path().join("n.json"));
-        store.add_note();
+        store.add_note(&PALETTE);
         store.mark_dirty();
         assert!(!store.should_save());
     }

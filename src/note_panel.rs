@@ -1,6 +1,6 @@
 use crate::app::Message;
 use crate::color_picker::color_picker;
-use crate::note::Note;
+use crate::note::{Note, NoteColor};
 use crate::pass_wheel::pass_wheel;
 
 use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, Scrollable};
@@ -86,6 +86,7 @@ const IDLE_CONTROL_ALPHA: f32 = 0.3;
 
 pub struct PostIt<'a> {
     pub note: &'a Note,
+    pub palette: &'a [NoteColor],
     pub content: &'a text_editor::Content,
     pub size: Size,
     pub morph_progress: f32,
@@ -136,6 +137,7 @@ fn icon_button<'a>(label: &'a str, message: Message, alpha: f32) -> Element<'a, 
 pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     let PostIt {
         note,
+        palette,
         content,
         size,
         morph_progress,
@@ -330,7 +332,8 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         let mut col = column![grip, header, divider];
         if color_picker_open {
             col = col.push(
-                container(color_picker(&note.color)).padding(Padding::ZERO.left(14).bottom(6)),
+                container(color_picker(&note.color, palette))
+                    .padding(Padding::ZERO.left(14).bottom(6)),
             );
         }
         col = col.push(body);
