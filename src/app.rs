@@ -1,5 +1,5 @@
 use crate::animation::{lerp, morph_frame, AnimationState, MagnificationState, Morph, MorphFrame};
-use crate::bar_strip::{band, compute_layout, BarStrip, StripLayout, STRIP_WIDTH};
+use crate::bar_strip::{band, compute_layout, peek_target, BarStrip, StripLayout, STRIP_WIDTH};
 use crate::note::NoteColor;
 use crate::note_panel::{post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
@@ -215,6 +215,9 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::StripHover(None) if self.cursor_on_peek() => {
+                // Moving from the bar onto its open peek keeps it open.
+            }
             Message::StripHover(y) => {
                 if self.cursor_y != y {
                     self.cursor_y = y;
@@ -595,6 +598,13 @@ impl App {
                 if let Some(offset) = self.note_drag {
                     self.note_drag_pos = Some(position - offset);
                 }
+                // Leaving the open peek (not toward the strip) closes it.
+                let in_strip = position.x >= self.window_size.width - STRIP_WIDTH;
+                if self.cursor_y.is_some() && !in_strip && !self.cursor_on_peek() {
+                    self.cursor_y = None;
+                    self.animating = true;
+                    self.update_hover();
+                }
                 return self.update_passthrough(Some(position));
             }
             Message::CursorLeftWindow => {
@@ -858,7 +868,11 @@ impl App {
         let over_panel = |frame: Option<MorphFrame>| {
             frame.is_some_and(|frame| frame.rect.expand(8.0).contains(position))
         };
-        over_strip || over_panel(self.note_frame()) || over_panel(self.settings_frame())
+        let over_peek = self.peek_rect().is_some_and(|rect| rect.contains(position));
+        over_strip
+            || over_peek
+            || over_panel(self.note_frame())
+            || over_panel(self.settings_frame())
     }
 
     fn update_passthrough(&mut self, cursor: Option<Point>) -> Task<Message> {
@@ -925,6 +939,28 @@ impl App {
             _ => self.peek.close(),
         }
         self.animating = true;
+    }
+
+    fn cursor_on_peek(&self) -> bool {
+        match (self.last_cursor, self.peek_rect()) {
+            (Some(cursor), Some(rect)) => rect.contains(cursor),
+            _ => false,
+        }
+    }
+
+    /// The open peek's full area, while a peek is open or opening.
+    fn peek_rect(&self) -> Option<Rectangle> {
+        if !self.peek.is_opening() {
+            return None;
+        }
+        let id = self.peek_note?;
+        let index = self.store.notes().iter().position(|n| n.id == id)?;
+        let bar = *self.strip_layout().bars.get(index)?;
+        let strip = Rectangle::new(
+            Point::new(self.window_size.width - STRIP_WIDTH, 0.0),
+            Size::new(STRIP_WIDTH, self.window_size.height),
+        );
+        Some(peek_target(bar, strip, &self.store.notes()[index]))
     }
 
     fn hide_peek(&mut self) {
@@ -1098,6 +1134,41 @@ mod tests {
             now += Duration::from_millis(16);
             let _ = app.update(Message::Tick(now));
         }
+    }
+
+    /// An app with one note whose peek is open (peek delay 0).
+    fn app_with_open_peek(dir: &tempfile::TempDir) -> App {
+        let mut app = app_in(dir);
+        app.store.add_note(&crate::note::PALETTE);
+        app.settings
+            .settings_mut()
+            .set(crate::settings::SettingKey::PeekDelay, 0.0);
+        app.window_size = Size::new(1200.0, 900.0);
+        let bar = app.strip_layout().bars[0];
+        let _ = app.update(Message::CursorMoved(bar.center()));
+        let _ = app.update(Message::StripHover(Some(bar.center().y)));
+        let _ = app.update(Message::PeekTick(Instant::now() + Duration::from_secs(1)));
+        assert!(app.peek_note.is_some() && app.peek.is_opening());
+        app
+    }
+
+    #[test]
+    fn hovering_the_peek_keeps_it_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        let peek = app.peek_rect().expect("open peek has a rect");
+        // Left of the strip, still on the peek.
+        let on_peek = Point::new(peek.x + 10.0, peek.center().y);
+        assert!(on_peek.x < app.window_size.width - STRIP_WIDTH);
+        let _ = app.update(Message::CursorMoved(on_peek));
+        let _ = app.update(Message::StripHover(None));
+        assert!(app.peek.is_opening(), "peek closed while hovered");
+        assert!(app.is_interactive(on_peek));
+
+        let outside = Point::new(peek.x - 20.0, peek.center().y);
+        let _ = app.update(Message::CursorMoved(outside));
+        let _ = app.update(Message::StripHover(None));
+        assert!(!app.peek.is_opening(), "peek stayed open after leaving it");
     }
 
     #[test]

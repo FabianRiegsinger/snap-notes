@@ -1,7 +1,7 @@
 use crate::animation::MagnificationState;
 use crate::app::{DragState, Message};
 use crate::note::Note;
-use crate::peek::draw_peek;
+use crate::peek::{draw_peek, peek_layout, peek_text};
 use crate::settings::BarSettings;
 
 use iced::advanced::layout::{self, Layout};
@@ -439,6 +439,19 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(pos) = cursor.position() {
                     let strip = self.layout_in(bounds);
+                    // Clicking the open peek opens its note.
+                    if let Some((i, _)) = self.peek {
+                        let target = strip
+                            .bars
+                            .get(i)
+                            .zip(self.notes.get(i))
+                            .map(|(bar, note)| peek_target(*bar, bounds, note));
+                        if target.is_some_and(|rect| rect.contains(pos)) {
+                            shell.publish(Message::BarClicked(i));
+                            shell.capture_event();
+                            return;
+                        }
+                    }
                     for (i, bar_rect) in strip.bars.iter().enumerate() {
                         if bar_rect.contains(pos) {
                             shell.publish(Message::DragStart(i, pos.y));
@@ -528,6 +541,12 @@ fn settings_glyph(slot: Rectangle) -> Vec<Rectangle> {
         ));
     }
     quads
+}
+
+/// Where the fully open peek of the note on `bar` sits: the area that
+/// keeps it open while hovered and opens the note when clicked.
+pub fn peek_target(bar: Rectangle, bounds: Rectangle, note: &Note) -> Rectangle {
+    peek_layout(bar, bounds, 1.0, &peek_text(note)).rect
 }
 
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
@@ -673,6 +692,16 @@ mod tests {
             assert!(slot.contains(q.position()));
             assert!(slot.contains(Point::new(q.x + q.width, q.y + q.height)));
         }
+    }
+
+    #[test]
+    fn peek_target_finds_open_peek() {
+        let bar = Rectangle::new(Point::new(48.0, 400.0), Size::new(6.0, 30.0));
+        let strip = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
+        let note = crate::note::Note::new(crate::note::PALETTE[0]);
+        let rect = peek_target(bar, strip, &note);
+        assert!(rect.width > STRIP_WIDTH);
+        assert!(rect.contains(Point::new(bar.x - 100.0, bar.center().y)));
     }
 
     #[test]
