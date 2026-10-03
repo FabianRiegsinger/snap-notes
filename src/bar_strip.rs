@@ -353,25 +353,21 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             gear_reveal,
         );
         if gear_reveal > 0.0 {
-            use iced::advanced::text::Renderer as TextRenderer;
-            let size = gear.width.min(gear.height) * 0.6;
-            TextRenderer::fill_text(
-                renderer,
-                iced::advanced::Text {
-                    content: "⚙".to_string(),
-                    bounds: gear.size(),
-                    size: Pixels(size),
-                    line_height: iced::widget::text::LineHeight::default(),
-                    font: iced::Font::default(),
-                    align_x: alignment::Horizontal::Center.into(),
-                    align_y: alignment::Vertical::Center,
-                    shaping: iced::widget::text::Shaping::Advanced,
-                    wrapping: iced::widget::text::Wrapping::None,
-                },
-                gear.center(),
-                Color::from_rgba(1.0, 1.0, 1.0, 0.95 * gear_reveal),
-                gear,
-            );
+            for quad in settings_glyph(gear) {
+                renderer::Renderer::fill_quad(
+                    renderer,
+                    renderer::Quad {
+                        bounds: quad,
+                        border: iced::Border {
+                            radius: 1.0.into(),
+                            ..Default::default()
+                        },
+                        shadow: Default::default(),
+                        snap: true,
+                    },
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.95 * gear_reveal),
+                );
+            }
         }
 
         if let Some(drag) = &self.drag {
@@ -542,6 +538,29 @@ pub fn bar_strip<'a>(
     .into()
 }
 
+/// A "sliders" settings icon inside `slot`: three tracks, each with a knob
+/// at a different position. Drawn from quads so it needs no icon font.
+fn settings_glyph(slot: Rectangle) -> Vec<Rectangle> {
+    let track = 1.5_f32.min(slot.height * 0.05);
+    let knob = (slot.width.min(slot.height) * 0.22).max(track);
+    let width = slot.width * 0.6;
+    let left = slot.x + (slot.width - width) / 2.0;
+    let mut quads = Vec::with_capacity(6);
+    for (row, at) in [(0.3, 0.3), (0.5, 0.7), (0.7, 0.45)] {
+        let cy = slot.y + slot.height * row;
+        quads.push(Rectangle::new(
+            Point::new(left, cy - track / 2.0),
+            Size::new(width, track),
+        ));
+        let kx = (left + width * at - knob / 2.0).clamp(left, left + width - knob);
+        quads.push(Rectangle::new(
+            Point::new(kx, cy - knob / 2.0),
+            Size::new(knob, knob),
+        ));
+    }
+    quads
+}
+
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
 /// grows, darker while hovered.
 fn draw_slot(renderer: &mut iced::Renderer, rect: Rectangle, hovered: bool, reveal: f32) {
@@ -673,6 +692,18 @@ mod tests {
         );
         let full = bounds(800.0);
         assert_eq!(band(full, 1.0), full);
+    }
+
+    #[test]
+    fn settings_glyph_fits_its_slot() {
+        let slot = Rectangle::new(Point::new(10.0, 20.0), Size::new(24.0, 36.0));
+        let quads = settings_glyph(slot);
+        assert!(!quads.is_empty());
+        for q in &quads {
+            assert!(q.width > 0.0 && q.height > 0.0);
+            assert!(slot.contains(q.position()));
+            assert!(slot.contains(Point::new(q.x + q.width, q.y + q.height)));
+        }
     }
 
     #[test]

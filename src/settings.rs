@@ -158,6 +158,7 @@ pub enum SettingToggle {
 }
 
 impl SettingToggle {
+    #[cfg(any(windows, target_os = "macos"))]
     pub const ALL: [SettingToggle; 2] = [SettingToggle::MenuBarIcon, SettingToggle::DockIcon];
 
     fn other(self) -> SettingToggle {
@@ -420,7 +421,21 @@ impl Settings {
     }
 
     pub fn get(&self, key: SettingKey) -> f32 {
-        *self.clone().field(key)
+        match key {
+            SettingKey::BarWidth => self.bars.width,
+            SettingKey::BarHeight => self.bars.height,
+            SettingKey::BarGap => self.bars.gap,
+            SettingKey::Magnification => self.hover.magnification,
+            SettingKey::Spread => self.hover.spread,
+            SettingKey::PeekDelay => self.hover.peek_delay_secs,
+            SettingKey::NoteSize => self.notes.size,
+            SettingKey::ExpandedSize => self.notes.expanded_size,
+            SettingKey::PaperTint => self.notes.paper_tint,
+            SettingKey::IdleControlAlpha => self.notes.idle_control_alpha,
+            SettingKey::Speed => self.motion.speed,
+            SettingKey::Stiffness => self.motion.stiffness,
+            SettingKey::HeightFraction => self.window.height_fraction,
+        }
     }
 
     /// Sets `key` clamped to its range. The expanded note never gets
@@ -519,6 +534,11 @@ impl SettingsStore {
 
     pub fn should_save(&self) -> bool {
         self.dirty && self.last_mark.is_some_and(|t| t.elapsed() >= DEBOUNCE)
+    }
+
+    #[cfg(test)]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
     }
 
     pub fn did_save(&mut self) {

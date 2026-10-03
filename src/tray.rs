@@ -5,6 +5,7 @@
 use crate::app::Message;
 
 /// Ids of the menu items, in menu order.
+#[cfg(any(windows, target_os = "macos", test))]
 pub const MENU_IDS: [&str; 4] = ["toggle", "new", "settings", "quit"];
 
 /// The app message a menu item id stands for.
@@ -20,6 +21,7 @@ pub fn message_for(id: &str) -> Option<Message> {
 
 /// A monochrome note glyph as RGBA: a sheet outline with three text lines in
 /// `color` on transparent.
+#[cfg(any(windows, target_os = "macos", test))]
 pub fn icon_rgba(size: u32, color: [u8; 3]) -> Vec<u8> {
     let s = size as f32 / 36.0;
     let inside = |x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32| {
@@ -128,12 +130,23 @@ mod native {
         });
     }
 
-    /// Ids of the menu items clicked since the last poll.
-    pub fn poll() -> Vec<String> {
-        MenuEvent::receiver()
-            .try_iter()
-            .map(|event| event.id.as_ref().to_string())
-            .collect()
+    /// Ids of clicked menu items, pushed as they happen so the app can
+    /// sleep while idle instead of polling.
+    pub fn menu_events() -> iced::Subscription<String> {
+        iced::Subscription::run(menu_event_stream)
+    }
+
+    fn menu_event_stream() -> impl iced::futures::Stream<Item = String> {
+        iced::stream::channel(16, async |sender| {
+            let sender = std::sync::Mutex::new(sender);
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                if let Ok(mut sender) = sender.lock() {
+                    let _ = sender.try_send(event.id.as_ref().to_string());
+                }
+            }));
+            // The handler feeds the channel; keep the stream alive.
+            std::future::pending::<()>().await;
+        })
     }
 }
 
@@ -147,12 +160,12 @@ mod native {
 
     pub fn set_notes_shown(_window: &dyn iced::window::Window, _shown: bool) {}
 
-    pub fn poll() -> Vec<String> {
-        Vec::new()
+    pub fn menu_events() -> iced::Subscription<String> {
+        iced::Subscription::none()
     }
 }
 
-pub use native::{create, poll, set_notes_shown, set_visible};
+pub use native::{create, menu_events, set_notes_shown, set_visible};
 
 #[cfg(test)]
 mod tests {

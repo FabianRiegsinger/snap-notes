@@ -3,9 +3,13 @@
 
 use crate::app::Message;
 use crate::color_picker::swatch;
-use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, PRESETS};
+#[cfg(any(windows, target_os = "macos", test))]
+use crate::settings::SettingToggle;
+use crate::settings::{SettingKey, Settings, SettingsGroup, PRESETS};
 
-use iced::widget::{button, column, container, row, scrollable, slider, text, toggler, Space};
+#[cfg(any(windows, target_os = "macos"))]
+use iced::widget::toggler;
+use iced::widget::{button, column, container, row, scrollable, slider, text, Space};
 use iced::{
     Background, Border, Color, Element, Fill, Length, Padding, Shadow, Size, Theme, Vector,
 };
@@ -26,6 +30,8 @@ pub struct SettingsView<'a> {
     /// The menu bar / tray icon exists. Without it the Dock icon is the
     /// only way back into the app, so it can't be turned off.
     pub tray_ok: bool,
+    /// The Dock icon is shown regardless of the setting (no tray icon).
+    pub dock_forced: bool,
 }
 
 fn white(alpha: f32) -> Color {
@@ -78,6 +84,7 @@ fn slider_row<'a>(settings: &Settings, key: SettingKey, a: f32) -> Element<'a, M
 }
 
 /// Whether the user may flip `toggle` right now.
+#[cfg(any(windows, target_os = "macos", test))]
 pub fn toggle_enabled(settings: &Settings, toggle: SettingToggle, tray_ok: bool) -> bool {
     let dock_is_lifeline = toggle == SettingToggle::DockIcon && settings.is_on(toggle) && !tray_ok;
     settings.can_toggle(toggle) && !dock_is_lifeline
@@ -100,10 +107,16 @@ fn toggle_label(toggle: SettingToggle) -> &'static str {
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-fn app_section<'a>(settings: &Settings, tray_ok: bool, a: f32) -> Element<'a, Message> {
+fn app_section<'a>(
+    settings: &Settings,
+    tray_ok: bool,
+    dock_forced: bool,
+    a: f32,
+) -> Element<'a, Message> {
     let mut col = column![group_header(SettingsGroup::App, a)].spacing(10);
     for t in SettingToggle::ALL {
-        let mut switch = toggler(settings.is_on(t))
+        let forced = t == SettingToggle::DockIcon && dock_forced;
+        let mut switch = toggler(settings.is_on(t) || forced)
             .label(toggle_label(t))
             .text_size(12)
             .style(move |theme: &Theme, status| {
@@ -113,7 +126,7 @@ fn app_section<'a>(settings: &Settings, tray_ok: bool, a: f32) -> Element<'a, Me
                     ..style
                 }
             });
-        if toggle_enabled(settings, t, tray_ok) {
+        if toggle_enabled(settings, t, tray_ok) && !forced {
             switch = switch.on_toggle(move |_| Message::SettingToggled(t));
         }
         col = col.push(switch);
@@ -165,6 +178,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         content_alpha: a,
         selected_slot,
         tray_ok,
+        dock_forced,
     } = v;
     let mix = |i: usize| SLOT[i] + (CARD[i] - SLOT[i]) * t;
     let card = Color::from_rgb(mix(0), mix(1), mix(2));
@@ -182,10 +196,10 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         let mut body = column![].spacing(18).padding(Padding::ZERO.right(14));
         #[cfg(any(windows, target_os = "macos"))]
         {
-            body = body.push(app_section(settings, tray_ok, a));
+            body = body.push(app_section(settings, tray_ok, dock_forced, a));
         }
         #[cfg(not(any(windows, target_os = "macos")))]
-        let _ = tray_ok;
+        let _ = (tray_ok, dock_forced);
         for group in SettingsGroup::SLIDERS {
             let mut section = column![group_header(group, a)].spacing(10);
             for key in SettingKey::ALL.into_iter().filter(|k| k.group() == group) {
