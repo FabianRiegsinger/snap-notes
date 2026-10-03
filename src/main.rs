@@ -7,6 +7,7 @@ mod note_panel;
 mod pass_wheel;
 mod peek;
 mod platform;
+mod resize;
 mod settings;
 mod settings_panel;
 mod store;

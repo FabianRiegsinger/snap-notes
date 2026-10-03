@@ -100,6 +100,10 @@ pub struct Note {
     /// relative to the screen-covering window). `None` opens it by the dock.
     #[serde(default)]
     pub position: Option<[f32; 2]>,
+    /// Size the user resized the open note to (logical pixels). `None`
+    /// opens it at the default size from the settings.
+    #[serde(default)]
+    pub size: Option<[f32; 2]>,
     pub order: usize,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -114,6 +118,7 @@ impl Note {
             title: String::new(),
             content: String::new(),
             position: None,
+            size: None,
             order: 0,
             created_at: now,
             updated_at: now,
@@ -152,11 +157,20 @@ mod tests {
     }
 
     #[test]
+    fn note_size_roundtrips() {
+        let mut note = Note::new(PALETTE[0]);
+        note.size = Some([480.0, 360.0]);
+        let back: Note = serde_json::from_str(&serde_json::to_string(&note).unwrap()).unwrap();
+        assert_eq!(back.size, Some([480.0, 360.0]));
+    }
+
+    #[test]
     fn note_without_title_deserializes() {
         let json = r##"{"id":"6f1c2c1e-6c1a-4a8e-9a43-2a1f0e0f9b11","color":"#FF6B6B","content":"hi","order":0,"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}"##;
         let note: Note = serde_json::from_str(json).unwrap();
         assert_eq!(note.title, "");
         assert_eq!(note.position, None);
+        assert_eq!(note.size, None);
         assert_eq!(note.content, "hi");
     }
 

@@ -21,10 +21,6 @@ pub struct AnimationState {
 }
 
 impl AnimationState {
-    pub fn new(value: f32, stiffness: f32) -> Self {
-        Self::with_stiffness(value, stiffness)
-    }
-
     pub fn with_stiffness(value: f32, stiffness: f32) -> Self {
         Self {
             current: value,
@@ -33,12 +29,6 @@ impl AnimationState {
             stiffness,
             damping: 2.0 * stiffness.sqrt(),
         }
-    }
-
-    /// Changes the spring without disturbing its value or momentum.
-    pub fn set_stiffness(&mut self, stiffness: f32) {
-        self.stiffness = stiffness;
-        self.damping = 2.0 * stiffness.sqrt();
     }
 
     pub fn set_target(&mut self, target: f32) {
@@ -257,7 +247,7 @@ mod tests {
 
     #[test]
     fn animation_reaches_target() {
-        let mut anim = AnimationState::new(0.0, 300.0);
+        let mut anim = AnimationState::with_stiffness(0.0, 300.0);
         anim.set_target(1.0);
         for _ in 0..200 {
             anim.tick(1.0 / 60.0);
@@ -267,7 +257,7 @@ mod tests {
 
     #[test]
     fn animation_reversal_no_jump() {
-        let mut anim = AnimationState::new(0.0, 300.0);
+        let mut anim = AnimationState::with_stiffness(0.0, 300.0);
         anim.set_target(1.0);
         for _ in 0..5 {
             anim.tick(1.0 / 60.0);
@@ -294,19 +284,6 @@ mod tests {
         m.close();
         while m.tick(1.0 / 60.0) {}
         assert!(m.is_closed());
-    }
-
-    #[test]
-    fn set_stiffness_keeps_value_and_velocity() {
-        let mut anim = AnimationState::new(0.0, 300.0);
-        anim.set_target(1.0);
-        anim.tick(1.0 / 60.0);
-        let (value, velocity) = (anim.value(), anim.velocity);
-        anim.set_stiffness(300.0);
-        assert_eq!((anim.value(), anim.velocity), (value, velocity));
-        anim.set_stiffness(600.0);
-        assert_eq!((anim.value(), anim.velocity), (value, velocity));
-        assert_eq!(anim.stiffness, 600.0);
     }
 
     #[test]
