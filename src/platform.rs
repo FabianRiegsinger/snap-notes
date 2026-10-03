@@ -48,6 +48,15 @@ pub fn disable_native_shadow(_window: &dyn iced::window::Window) {}
 /// because switching the policy can push it behind other apps.
 #[cfg(target_os = "macos")]
 pub fn set_dock_icon_visible(window: &dyn iced::window::Window, visible: bool) {
+    set_dock_policy(visible);
+    with_ns_window(window, |ns_window| ns_window.orderFrontRegardless());
+}
+
+/// Switches the app between a regular app and an accessory app (no Dock
+/// icon). Needs no window, so it can run at startup; off the main thread
+/// it does nothing.
+#[cfg(target_os = "macos")]
+pub fn set_dock_policy(visible: bool) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
@@ -60,8 +69,12 @@ pub fn set_dock_icon_visible(window: &dyn iced::window::Window, visible: bool) {
         NSApplicationActivationPolicy::Accessory
     };
     NSApplication::sharedApplication(mtm).setActivationPolicy(policy);
-    with_ns_window(window, |ns_window| ns_window.orderFrontRegardless());
 }
+
+/// The taskbar button belongs to the window, so there is nothing to do
+/// before it exists.
+#[cfg(not(target_os = "macos"))]
+pub fn set_dock_policy(_visible: bool) {}
 
 /// Shows or hides the window's taskbar button. A tool window has none; the
 /// window is hidden around the style change so the taskbar notices it.

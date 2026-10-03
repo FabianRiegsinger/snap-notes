@@ -128,12 +128,23 @@ mod native {
         });
     }
 
-    /// Ids of the menu items clicked since the last poll.
-    pub fn poll() -> Vec<String> {
-        MenuEvent::receiver()
-            .try_iter()
-            .map(|event| event.id.as_ref().to_string())
-            .collect()
+    /// Ids of clicked menu items, pushed as they happen so the app can
+    /// sleep while idle instead of polling.
+    pub fn menu_events() -> iced::Subscription<String> {
+        iced::Subscription::run(menu_event_stream)
+    }
+
+    fn menu_event_stream() -> impl iced::futures::Stream<Item = String> {
+        iced::stream::channel(16, async |sender| {
+            let sender = std::sync::Mutex::new(sender);
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                if let Ok(mut sender) = sender.lock() {
+                    let _ = sender.try_send(event.id.as_ref().to_string());
+                }
+            }));
+            // The handler feeds the channel; keep the stream alive.
+            std::future::pending::<()>().await;
+        })
     }
 }
 
@@ -147,12 +158,12 @@ mod native {
 
     pub fn set_notes_shown(_window: &dyn iced::window::Window, _shown: bool) {}
 
-    pub fn poll() -> Vec<String> {
-        Vec::new()
+    pub fn menu_events() -> iced::Subscription<String> {
+        iced::Subscription::none()
     }
 }
 
-pub use native::{create, poll, set_notes_shown, set_visible};
+pub use native::{create, menu_events, set_notes_shown, set_visible};
 
 #[cfg(test)]
 mod tests {

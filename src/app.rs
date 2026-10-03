@@ -25,8 +25,6 @@ const CURSOR_POLL: Duration = Duration::from_millis(50);
 const PEEK_POLL: Duration = Duration::from_millis(100);
 /// How long focus changes caused by switching the Dock icon are ignored.
 const FOCUS_GRACE: Duration = Duration::from_millis(500);
-/// How often clicks in the tray menu are collected.
-const TRAY_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -62,7 +60,6 @@ pub enum Message {
     ToggleVisibility,
     /// The tray icon was created (or failed to be).
     TrayReady(bool),
-    TrayPoll,
     TrayMenu(String),
     Quit,
     WindowReady(window::Id, Option<Size>),
@@ -147,6 +144,10 @@ fn data_dir() -> PathBuf {
 impl App {
     pub fn boot() -> (Self, Task<Message>) {
         let settings = SettingsStore::load(data_dir().join("settings.json"));
+        // Hide the Dock icon as early as possible so it barely flashes.
+        if !settings.settings().app.show_dock_icon {
+            platform::set_dock_policy(false);
+        }
         let mut store = NoteStore::load(data_dir().join("notes.json"));
         if store.notes().is_empty() {
             store.seed_templates(&settings.settings().palette);
@@ -526,13 +527,6 @@ impl App {
                     return self.apply_app_visibility();
                 }
             }
-            Message::TrayPoll => {
-                let tasks: Vec<_> = tray::poll()
-                    .into_iter()
-                    .map(|id| self.update(Message::TrayMenu(id)))
-                    .collect();
-                return Task::batch(tasks);
-            }
             Message::TrayMenu(id) => {
                 let Some(message) = tray::message_for(&id) else {
                     return Task::none();
@@ -741,7 +735,7 @@ impl App {
             subs.push(iced::time::every(CURSOR_POLL).map(|_| Message::PollCursor));
         }
         if self.tray_ok {
-            subs.push(iced::time::every(TRAY_POLL).map(|_| Message::TrayPoll));
+            subs.push(tray::menu_events().map(Message::TrayMenu));
         }
         if self.hover_bar.is_some() && !self.peek.is_opening() {
             subs.push(iced::time::every(PEEK_POLL).map(Message::PeekTick));
