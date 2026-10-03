@@ -3,7 +3,7 @@ use crate::bar_strip::{band, bar_strip, compute_layout, StripLayout, STRIP_WIDTH
 use crate::note::NoteColor;
 use crate::note_panel::{post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
-use crate::settings::{SettingKey, Settings, SettingsGroup, SettingsStore};
+use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore};
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::NoteStore;
 
@@ -31,6 +31,7 @@ pub enum Message {
     ToggleSettings,
     CloseSettings,
     SettingChanged(SettingKey, f32),
+    SettingToggled(SettingToggle),
     ResetGroup(SettingsGroup),
     /// Palette slot whose preset grid is open (`None` closes it).
     PaletteSlotSelected(Option<usize>),
@@ -222,6 +223,9 @@ impl App {
             Message::SettingChanged(key, value) => {
                 self.settings.settings_mut().set(key, value);
                 return self.apply_settings();
+            }
+            Message::SettingToggled(toggle) => {
+                self.settings.settings_mut().toggle(toggle);
             }
             Message::ResetGroup(group) => {
                 if group == SettingsGroup::Palette {
@@ -599,6 +603,7 @@ impl App {
                     morph_progress: self.settings_morph.progress(),
                     content_alpha: frame.content_alpha,
                     selected_slot: self.palette_slot,
+                    tray_ok: false,
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
             }

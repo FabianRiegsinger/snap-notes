@@ -3,9 +3,9 @@
 
 use crate::app::Message;
 use crate::color_picker::swatch;
-use crate::settings::{SettingKey, Settings, SettingsGroup, PRESETS};
+use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, PRESETS};
 
-use iced::widget::{button, column, container, row, scrollable, slider, text, Space};
+use iced::widget::{button, column, container, row, scrollable, slider, text, toggler, Space};
 use iced::{
     Background, Border, Color, Element, Fill, Length, Padding, Shadow, Size, Theme, Vector,
 };
@@ -23,6 +23,9 @@ pub struct SettingsView<'a> {
     pub morph_progress: f32,
     pub content_alpha: f32,
     pub selected_slot: Option<usize>,
+    /// The menu bar / tray icon exists. Without it the Dock icon is the
+    /// only way back into the app, so it can't be turned off.
+    pub tray_ok: bool,
 }
 
 fn white(alpha: f32) -> Color {
@@ -74,6 +77,50 @@ fn slider_row<'a>(settings: &Settings, key: SettingKey, a: f32) -> Element<'a, M
     .into()
 }
 
+/// Whether the user may flip `toggle` right now.
+pub fn toggle_enabled(settings: &Settings, toggle: SettingToggle, tray_ok: bool) -> bool {
+    let dock_is_lifeline = toggle == SettingToggle::DockIcon && settings.is_on(toggle) && !tray_ok;
+    settings.can_toggle(toggle) && !dock_is_lifeline
+}
+
+#[cfg(target_os = "macos")]
+fn toggle_label(toggle: SettingToggle) -> &'static str {
+    match toggle {
+        SettingToggle::MenuBarIcon => "Show menu bar icon",
+        SettingToggle::DockIcon => "Show Dock icon",
+    }
+}
+
+#[cfg(windows)]
+fn toggle_label(toggle: SettingToggle) -> &'static str {
+    match toggle {
+        SettingToggle::MenuBarIcon => "Show tray icon",
+        SettingToggle::DockIcon => "Show taskbar button",
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn app_section<'a>(settings: &Settings, tray_ok: bool, a: f32) -> Element<'a, Message> {
+    let mut col = column![group_header(SettingsGroup::App, a)].spacing(10);
+    for t in SettingToggle::ALL {
+        let mut switch = toggler(settings.is_on(t))
+            .label(toggle_label(t))
+            .text_size(12)
+            .style(move |theme: &Theme, status| {
+                let style = toggler::default(theme, status);
+                toggler::Style {
+                    text_color: Some(white(0.75 * a)),
+                    ..style
+                }
+            });
+        if toggle_enabled(settings, t, tray_ok) {
+            switch = switch.on_toggle(move |_| Message::SettingToggled(t));
+        }
+        col = col.push(switch);
+    }
+    col.into()
+}
+
 fn palette_section<'a>(
     settings: &Settings,
     selected: Option<usize>,
@@ -117,6 +164,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         morph_progress: t,
         content_alpha: a,
         selected_slot,
+        tray_ok,
     } = v;
     let mix = |i: usize| SLOT[i] + (CARD[i] - SLOT[i]) * t;
     let card = Color::from_rgb(mix(0), mix(1), mix(2));
@@ -132,6 +180,12 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         .align_y(iced::Alignment::Center);
 
         let mut body = column![].spacing(18).padding(Padding::ZERO.right(14));
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            body = body.push(app_section(settings, tray_ok, a));
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let _ = tray_ok;
         for group in SettingsGroup::SLIDERS {
             let mut section = column![group_header(group, a)].spacing(10);
             for key in SettingKey::ALL.into_iter().filter(|k| k.group() == group) {
@@ -165,4 +219,25 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
             ..Default::default()
         })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dock_toggle_locked_without_tray() {
+        let s = Settings::default();
+        assert!(!toggle_enabled(&s, SettingToggle::DockIcon, false));
+        assert!(toggle_enabled(&s, SettingToggle::MenuBarIcon, false));
+        assert!(toggle_enabled(&s, SettingToggle::DockIcon, true));
+    }
+
+    #[test]
+    fn last_icon_toggle_disabled() {
+        let mut s = Settings::default();
+        s.toggle(SettingToggle::DockIcon);
+        assert!(!toggle_enabled(&s, SettingToggle::MenuBarIcon, true));
+        assert!(toggle_enabled(&s, SettingToggle::DockIcon, true));
+    }
 }

@@ -151,14 +151,12 @@ pub enum SettingsGroup {
     App,
 }
 
-#[allow(dead_code)] // TEMP: used by the settings panel in the next commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingToggle {
     MenuBarIcon,
     DockIcon,
 }
 
-#[allow(dead_code)] // TEMP: used by the settings panel in the next commit.
 impl SettingToggle {
     pub const ALL: [SettingToggle; 2] = [SettingToggle::MenuBarIcon, SettingToggle::DockIcon];
 
@@ -377,7 +375,6 @@ impl Settings {
         settings
     }
 
-    #[allow(dead_code)] // TEMP: used by the settings panel in the next commit.
     pub fn is_on(&self, toggle: SettingToggle) -> bool {
         match toggle {
             SettingToggle::MenuBarIcon => self.app.show_menu_bar_icon,
@@ -385,14 +382,12 @@ impl Settings {
         }
     }
 
-    #[allow(dead_code)] // TEMP: used by the settings panel in the next commit.
     /// Whether `toggle` may flip: turning it off is refused while the other
     /// icon is already hidden.
     pub fn can_toggle(&self, toggle: SettingToggle) -> bool {
         !self.is_on(toggle) || self.is_on(toggle.other())
     }
 
-    #[allow(dead_code)] // TEMP: used by the settings panel in the next commit.
     /// Flips `toggle` if allowed. Returns whether anything changed.
     pub fn toggle(&mut self, toggle: SettingToggle) -> bool {
         if !self.can_toggle(toggle) {
