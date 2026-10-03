@@ -10,6 +10,8 @@ mod platform;
 mod settings;
 mod settings_panel;
 mod store;
+#[allow(dead_code, unused_imports)] // TEMP: wired into the app in the next commit.
+mod tray;
 
 use app::App;
 use iced::window;
