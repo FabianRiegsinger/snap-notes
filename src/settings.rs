@@ -3,6 +3,7 @@
 use crate::app::{NOTE_GAP, NOTE_MARGIN};
 use crate::bar_strip::STRIP_WIDTH;
 use crate::note::{NoteColor, PALETTE};
+use crate::resize::MAX_NOTE_WIDTH;
 
 use serde::Serialize;
 use std::fs;
@@ -50,7 +51,6 @@ impl Default for HoverSettings {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NoteSettings {
     pub size: f32,
-    pub expanded_size: f32,
     /// How much lighter (negative) or darker than its bar a note's paper is.
     pub paper_tint: f32,
     /// Header controls stay this faint until the note is hovered.
@@ -61,7 +61,6 @@ impl Default for NoteSettings {
     fn default() -> Self {
         Self {
             size: 320.0,
-            expanded_size: 560.0,
             paper_tint: -0.12,
             idle_control_alpha: 0.3,
         }
@@ -72,15 +71,11 @@ impl Default for NoteSettings {
 pub struct MotionSettings {
     /// Divides the open/close/peek durations: 2 is twice as fast.
     pub speed: f32,
-    pub stiffness: f32,
 }
 
 impl Default for MotionSettings {
     fn default() -> Self {
-        Self {
-            speed: 1.0,
-            stiffness: 300.0,
-        }
+        Self { speed: 1.0 }
     }
 }
 
@@ -200,16 +195,14 @@ pub enum SettingKey {
     Spread,
     PeekDelay,
     NoteSize,
-    ExpandedSize,
     PaperTint,
     IdleControlAlpha,
     Speed,
-    Stiffness,
     HeightFraction,
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 13] = [
+    pub const ALL: [SettingKey; 11] = [
         SettingKey::BarWidth,
         SettingKey::BarHeight,
         SettingKey::BarGap,
@@ -217,11 +210,9 @@ impl SettingKey {
         SettingKey::Spread,
         SettingKey::PeekDelay,
         SettingKey::NoteSize,
-        SettingKey::ExpandedSize,
         SettingKey::PaperTint,
         SettingKey::IdleControlAlpha,
         SettingKey::Speed,
-        SettingKey::Stiffness,
         SettingKey::HeightFraction,
     ];
 
@@ -234,11 +225,9 @@ impl SettingKey {
             SettingKey::Spread => 20.0..=150.0,
             SettingKey::PeekDelay => 0.0..=3.0,
             SettingKey::NoteSize => 240.0..=440.0,
-            SettingKey::ExpandedSize => 400.0..=800.0,
             SettingKey::PaperTint => -0.3..=0.3,
             SettingKey::IdleControlAlpha => 0.0..=1.0,
             SettingKey::Speed => 0.25..=3.0,
-            SettingKey::Stiffness => 150.0..=600.0,
             SettingKey::HeightFraction => 0.5..=1.0,
         }
     }
@@ -253,11 +242,9 @@ impl SettingKey {
             SettingKey::Spread => ("hover", "spread"),
             SettingKey::PeekDelay => ("hover", "peek_delay_secs"),
             SettingKey::NoteSize => ("notes", "size"),
-            SettingKey::ExpandedSize => ("notes", "expanded_size"),
             SettingKey::PaperTint => ("notes", "paper_tint"),
             SettingKey::IdleControlAlpha => ("notes", "idle_control_alpha"),
             SettingKey::Speed => ("motion", "speed"),
-            SettingKey::Stiffness => ("motion", "stiffness"),
             SettingKey::HeightFraction => ("window", "height_fraction"),
         }
     }
@@ -282,11 +269,10 @@ impl SettingKey {
             SettingKey::Magnification | SettingKey::Spread | SettingKey::PeekDelay => {
                 SettingsGroup::Hover
             }
-            SettingKey::NoteSize
-            | SettingKey::ExpandedSize
-            | SettingKey::PaperTint
-            | SettingKey::IdleControlAlpha => SettingsGroup::Notes,
-            SettingKey::Speed | SettingKey::Stiffness => SettingsGroup::Motion,
+            SettingKey::NoteSize | SettingKey::PaperTint | SettingKey::IdleControlAlpha => {
+                SettingsGroup::Notes
+            }
+            SettingKey::Speed => SettingsGroup::Motion,
             SettingKey::HeightFraction => SettingsGroup::Window,
         }
     }
@@ -299,12 +285,10 @@ impl SettingKey {
             SettingKey::Magnification => "Magnification",
             SettingKey::Spread => "Spread",
             SettingKey::PeekDelay => "Peek delay",
-            SettingKey::NoteSize => "Size",
-            SettingKey::ExpandedSize => "Expanded size",
+            SettingKey::NoteSize => "Default size",
             SettingKey::PaperTint => "Paper tint",
             SettingKey::IdleControlAlpha => "Idle control opacity",
             SettingKey::Speed => "Animation speed",
-            SettingKey::Stiffness => "Expand snappiness",
             SettingKey::HeightFraction => "Strip height",
         }
     }
@@ -315,7 +299,6 @@ impl SettingKey {
             | SettingKey::BarHeight
             | SettingKey::BarGap
             | SettingKey::NoteSize
-            | SettingKey::ExpandedSize
             | SettingKey::Spread => format!("{v:.0} px"),
             // Stored as the extra size on top of the bar's own (scale 1 + v).
             SettingKey::Magnification => format!("{:.1}×", 1.0 + v),
@@ -334,7 +317,6 @@ impl SettingKey {
             SettingKey::IdleControlAlpha | SettingKey::HeightFraction => {
                 format!("{:.0} %", v * 100.0)
             }
-            SettingKey::Stiffness => format!("{v:.0}"),
         }
     }
 }
@@ -348,8 +330,6 @@ impl Settings {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
             return settings;
         };
-        // `ALL` lists `NoteSize` before `ExpandedSize`, so the size rule in
-        // `set` sees the stored size first.
         for key in SettingKey::ALL {
             let (group, field) = key.json_path();
             if let Some(v) = value
@@ -424,11 +404,9 @@ impl Settings {
             SettingKey::Spread => &mut self.hover.spread,
             SettingKey::PeekDelay => &mut self.hover.peek_delay_secs,
             SettingKey::NoteSize => &mut self.notes.size,
-            SettingKey::ExpandedSize => &mut self.notes.expanded_size,
             SettingKey::PaperTint => &mut self.notes.paper_tint,
             SettingKey::IdleControlAlpha => &mut self.notes.idle_control_alpha,
             SettingKey::Speed => &mut self.motion.speed,
-            SettingKey::Stiffness => &mut self.motion.stiffness,
             SettingKey::HeightFraction => &mut self.window.height_fraction,
         }
     }
@@ -442,23 +420,19 @@ impl Settings {
             SettingKey::Spread => self.hover.spread,
             SettingKey::PeekDelay => self.hover.peek_delay_secs,
             SettingKey::NoteSize => self.notes.size,
-            SettingKey::ExpandedSize => self.notes.expanded_size,
             SettingKey::PaperTint => self.notes.paper_tint,
             SettingKey::IdleControlAlpha => self.notes.idle_control_alpha,
             SettingKey::Speed => self.motion.speed,
-            SettingKey::Stiffness => self.motion.stiffness,
             SettingKey::HeightFraction => self.window.height_fraction,
         }
     }
 
-    /// Sets `key` clamped to its range. The expanded note never gets
-    /// smaller than the regular one: raising the size raises it too.
+    /// Sets `key` clamped to its range; a non-finite value resets it.
     pub fn set(&mut self, key: SettingKey, value: f32) {
         let default = Settings::default().get(key);
         let range = key.range();
         let value = if value.is_finite() { value } else { default };
         *self.field(key) = value.clamp(*range.start(), *range.end());
-        self.notes.expanded_size = self.notes.expanded_size.max(self.notes.size);
     }
 
     pub fn reset(&mut self, group: SettingsGroup) {
@@ -499,9 +473,9 @@ impl Settings {
         changes
     }
 
-    /// Window width that fits the strip plus a fully expanded note.
+    /// Window width that fits the strip plus the widest note.
     pub fn open_width(&self) -> f32 {
-        STRIP_WIDTH + NOTE_GAP + self.notes.expanded_size + NOTE_MARGIN
+        STRIP_WIDTH + NOTE_GAP + MAX_NOTE_WIDTH + NOTE_MARGIN
     }
 }
 
@@ -643,15 +617,10 @@ mod tests {
             (4.0, 60.0, 1.0)
         );
         assert_eq!(
-            (
-                s.notes.size,
-                s.notes.expanded_size,
-                s.notes.paper_tint,
-                s.notes.idle_control_alpha
-            ),
-            (320.0, 560.0, -0.12, 0.3)
+            (s.notes.size, s.notes.paper_tint, s.notes.idle_control_alpha),
+            (320.0, -0.12, 0.3)
         );
-        assert_eq!((s.motion.speed, s.motion.stiffness), (1.0, 300.0));
+        assert_eq!(s.motion.speed, 1.0);
         assert_eq!(s.window.height_fraction, 0.9);
         assert_eq!(s.palette, PALETTE.to_vec());
     }
@@ -697,12 +666,10 @@ mod tests {
     }
 
     #[test]
-    fn set_keeps_expanded_at_least_size() {
-        let mut s = Settings::default();
-        s.set(SettingKey::NoteSize, 440.0);
-        assert!(s.notes.expanded_size >= 440.0);
-        s.set(SettingKey::ExpandedSize, 400.0);
-        assert_eq!(s.notes.expanded_size, 440.0);
+    fn old_expanded_size_is_ignored() {
+        let s = Settings::from_json(r#"{"notes":{"size":300,"expanded_size":700}}"#);
+        assert_eq!(s.notes.size, 300.0);
+        assert!(!SettingKey::ALL.iter().any(|k| k.label() == "Expanded size"));
     }
 
     #[test]
@@ -895,7 +862,6 @@ mod tests {
         assert_eq!(SettingKey::PaperTint.format(0.1), "10 % darker");
         assert_eq!(SettingKey::PaperTint.format(0.0), "same as bar");
         assert_eq!(SettingKey::PeekDelay.format(0.0), "0.0 s");
-        assert_eq!(SettingKey::Stiffness.label(), "Expand snappiness");
     }
 
     #[test]
@@ -905,10 +871,11 @@ mod tests {
     }
 
     #[test]
-    fn open_width_follows_expanded_size() {
+    fn open_width_fits_the_widest_note() {
         let mut s = Settings::default();
-        let base = s.open_width();
-        s.set(SettingKey::ExpandedSize, 700.0);
-        assert_eq!(s.open_width(), base + 140.0);
+        let width = STRIP_WIDTH + NOTE_GAP + MAX_NOTE_WIDTH + NOTE_MARGIN;
+        assert_eq!(s.open_width(), width);
+        s.set(SettingKey::NoteSize, 440.0);
+        assert_eq!(s.open_width(), width);
     }
 }

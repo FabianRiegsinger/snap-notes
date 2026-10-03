@@ -93,7 +93,6 @@ pub struct PostIt<'a> {
     pub morph_progress: f32,
     pub content_alpha: f32,
     pub confirm_delete: bool,
-    pub expanded: bool,
     pub color_picker_open: bool,
     pub hovered: bool,
     pub dragging: bool,
@@ -152,7 +151,6 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         morph_progress,
         content_alpha: a,
         confirm_delete,
-        expanded,
         color_picker_open,
         hovered,
         dragging,
@@ -203,17 +201,10 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 ..Default::default()
             });
 
-        let (expand_icon, expand_msg) = if expanded {
-            ("⤡", Message::ShrinkNote)
-        } else {
-            ("⤢", Message::ExpandNote)
-        };
-
         let header = container(
             row![
                 title,
                 color_btn,
-                icon_button(expand_icon, expand_msg, controls),
                 icon_button("🗑", Message::DeleteRequested, controls),
                 icon_button("✕", Message::ClosePanel, controls),
             ]

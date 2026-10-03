@@ -1,10 +1,11 @@
-use crate::animation::{lerp, morph_frame, AnimationState, MagnificationState, Morph, MorphFrame};
+use crate::animation::{morph_frame, MagnificationState, Morph, MorphFrame};
 use crate::bar_strip::{
     band, compute_layout, peek_target, BarStrip, StripLayout, SETTINGS_SLOT, STRIP_WIDTH,
 };
 use crate::note::NoteColor;
 use crate::note_panel::{post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
+use crate::resize::{resize_frame, resized, Edges, MIN_SIZE};
 use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore};
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::NoteStore;
@@ -48,13 +49,13 @@ pub enum Message {
     NoteHovered(bool),
     NoteDragStart,
     NoteResetPosition,
+    /// A press on the open note's border starts resizing it.
+    ResizeStart(Edges),
     ClosePanel,
     DeleteRequested,
     ConfirmDelete(bool),
     ToggleColorPicker,
     ColorChosen(NoteColor),
-    ExpandNote,
-    ShrinkNote,
     DragStart(usize, f32),
     DragMove(f32),
     DragEnd,
@@ -88,8 +89,6 @@ pub struct App {
     morph: Morph,
     anchor_y: f32,
     pending_delete: Option<Uuid>,
-    expanded: bool,
-    expand_animation: AnimationState,
     color_picker_open: bool,
     note_hovered: bool,
     drag: Option<DragState>,
@@ -107,6 +106,8 @@ pub struct App {
     last_cursor: Option<Point>,
     /// Grab offset (cursor minus note top-left) while the open note is dragged.
     note_drag: Option<Vector>,
+    /// The open note's border is being dragged.
+    note_resize: Option<NoteResize>,
     note_drag_pos: Option<Point>,
     /// Bar under the cursor and since when, for the hover peek delay.
     hover_bar: Option<(Uuid, Instant)>,
@@ -127,6 +128,15 @@ pub struct App {
     /// Switching the Dock / taskbar icon briefly takes focus away from the
     /// window; until then losing focus doesn't close the note or settings.
     keep_open_until: Option<Instant>,
+}
+
+/// A resize of the open note in progress.
+struct NoteResize {
+    edges: Edges,
+    /// Note rect and cursor position when the resize started.
+    start: Rectangle,
+    grab: Point,
+    rect: Rectangle,
 }
 
 #[derive(Debug, Clone)]
@@ -172,7 +182,6 @@ impl App {
         let morph = Morph::new(s.motion.speed);
         let peek = Morph::peek(s.motion.speed);
         let settings_morph = Morph::new(s.motion.speed);
-        let expand_animation = AnimationState::new(0.0, s.motion.stiffness);
         let window_size = Size::new(Self::docked_width(s, false), 600.0);
         Self {
             store,
@@ -184,8 +193,6 @@ impl App {
             morph,
             anchor_y: 0.0,
             pending_delete: None,
-            expanded: false,
-            expand_animation,
             color_picker_open: false,
             note_hovered: false,
             drag: None,
@@ -201,6 +208,7 @@ impl App {
             mouse_down: false,
             last_cursor: None,
             note_drag: None,
+            note_resize: None,
             note_drag_pos: None,
             hover_bar: None,
             peek_note: None,
@@ -318,6 +326,17 @@ impl App {
                     self.note_drag_pos = Some(top_left);
                 }
             }
+            Message::ResizeStart(edges) => {
+                if let (Some(grab), Some(_)) = (self.last_cursor, self.active_note) {
+                    let start = self.note_target_rect();
+                    self.note_resize = Some(NoteResize {
+                        edges,
+                        start,
+                        grab,
+                        rect: start,
+                    });
+                }
+            }
             Message::NoteResetPosition => {
                 if let Some(id) = self.active_note {
                     if let Some(note) = self.store.note_mut(id) {
@@ -405,8 +424,7 @@ impl App {
                     self.settings_open = false;
                     self.palette_slot = None;
                 }
-                let expand_active = self.expand_animation.tick(dt);
-                self.animating = mag_active || morph_active || expand_active;
+                self.animating = mag_active || morph_active;
                 if !self.animating {
                     self.last_tick = None;
                 }
@@ -441,16 +459,6 @@ impl App {
                     self.store.mark_dirty();
                     self.color_picker_open = false;
                 }
-            }
-            Message::ExpandNote => {
-                self.expanded = true;
-                self.expand_animation.set_target(1.0);
-                self.animating = true;
-            }
-            Message::ShrinkNote => {
-                self.expanded = false;
-                self.expand_animation.set_target(0.0);
-                self.animating = true;
             }
             Message::PeekTick(now) => {
                 self.update_hover();
@@ -600,6 +608,10 @@ impl App {
                 if let Some(offset) = self.note_drag {
                     self.note_drag_pos = Some(position - offset);
                 }
+                let room = self.note_room();
+                if let Some(resize) = &mut self.note_resize {
+                    resize.rect = resized(resize.start, resize.edges, position - resize.grab, room);
+                }
                 // Leaving the open peek (not toward the strip) closes it.
                 let in_strip = position.x >= self.window_size.width - STRIP_WIDTH;
                 if self.cursor_y.is_some() && !in_strip && !self.cursor_on_peek() {
@@ -617,6 +629,9 @@ impl App {
                 self.mouse_down = down;
                 if !down && self.note_drag.is_some() {
                     self.finish_note_drag();
+                }
+                if !down {
+                    self.finish_note_resize();
                 }
             }
             Message::WindowUnfocused
@@ -687,7 +702,6 @@ impl App {
                         morph_progress: self.morph.progress(),
                         content_alpha: frame.content_alpha,
                         confirm_delete: self.confirm_delete.is_some(),
-                        expanded: self.expanded,
                         color_picker_open: self.color_picker_open,
                         hovered: self.note_hovered,
                         dragging: self.note_drag.is_some(),
@@ -695,6 +709,7 @@ impl App {
                     let note_view = mouse_area(note_view)
                         .on_enter(Message::NoteHovered(true))
                         .on_exit(Message::NoteHovered(false));
+                    let note_view = resize_frame(note_view);
                     layers.push(pin(opaque(note_view)).x(rect.x).y(rect.y).into());
                 }
             }
@@ -801,8 +816,7 @@ impl App {
         self.editor_content = None;
         self.color_picker_open = false;
         self.confirm_delete = None;
-        self.expanded = false;
-        self.expand_animation = AnimationState::new(0.0, self.settings.settings().motion.stiffness);
+        self.note_resize = None;
         if let Some(id) = self.pending_delete.take() {
             self.store.delete_note(id);
             let _ = self.store.save();
@@ -902,6 +916,32 @@ impl App {
     }
 
     /// Stores where the note was dropped, so it opens there next time.
+    /// Saves the resized note's size, and its position since resizing
+    /// from the left or top edge moves it.
+    fn finish_note_resize(&mut self) {
+        let Some(resize) = self.note_resize.take() else {
+            return;
+        };
+        let rect = resize.rect;
+        if let Some(note) = self.active_note.and_then(|id| self.store.note_mut(id)) {
+            note.size = Some([rect.width, rect.height]);
+            note.position = Some([rect.x, rect.y]);
+            note.updated_at = chrono::Utc::now();
+            self.store.mark_dirty();
+        }
+    }
+
+    /// The area a note may occupy: the window minus its margins.
+    fn note_room(&self) -> Rectangle {
+        Rectangle::new(
+            Point::new(NOTE_MARGIN, NOTE_MARGIN),
+            Size::new(
+                self.window_size.width - 2.0 * NOTE_MARGIN,
+                self.window_size.height - 2.0 * NOTE_MARGIN,
+            ),
+        )
+    }
+
     fn finish_note_drag(&mut self) {
         let rect = self.note_target_rect();
         self.note_drag = None;
@@ -1050,27 +1090,30 @@ impl App {
     /// bounds and the docked window size.
     fn apply_settings(&mut self) -> Task<Message> {
         let s = self.settings.settings();
-        let (speed, stiffness) = (s.motion.speed, s.motion.stiffness);
+        let speed = s.motion.speed;
         self.morph.set_speed(speed);
         self.peek.set_speed(speed);
         self.settings_morph.set_speed(speed);
-        self.expand_animation.set_stiffness(stiffness);
         self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
         self.animating = true;
         self.dock_window()
     }
 
     fn note_target_rect(&self) -> Rectangle {
-        let expand = self.expand_animation.value();
-        let notes = &self.settings.settings().notes;
-        let max_height = (self.window_size.height - 2.0 * NOTE_MARGIN).max(notes.size / 2.0);
-        let width = lerp(notes.size, notes.expanded_size, expand);
-        let height = width.min(max_height);
-        let saved = self.note_drag_pos.or_else(|| {
-            let id = self.active_note?;
-            let note = self.store.notes().iter().find(|n| n.id == id)?;
-            note.position.map(|[x, y]| Point::new(x, y))
-        });
+        if let Some(resize) = &self.note_resize {
+            return resize.rect;
+        }
+        let note = self
+            .active_note
+            .and_then(|id| self.store.notes().iter().find(|n| n.id == id));
+        let default = self.settings.settings().notes.size;
+        let [width, height] = note.and_then(|n| n.size).unwrap_or([default, default]);
+        let room = self.note_room();
+        let width = width.min(room.width.max(MIN_SIZE.width));
+        let height = height.min(room.height.max(MIN_SIZE.height));
+        let saved = self
+            .note_drag_pos
+            .or_else(|| note?.position.map(|[x, y]| Point::new(x, y)));
         if let Some(top_left) = saved {
             let max_x = (self.window_size.width - width - NOTE_MARGIN).max(NOTE_MARGIN);
             let max_y = (self.window_size.height - height - NOTE_MARGIN).max(NOTE_MARGIN);
@@ -1174,6 +1217,46 @@ mod tests {
         let _ = app.update(Message::CursorMoved(outside));
         let _ = app.update(Message::StripHover(None));
         assert!(!app.peek.is_opening(), "peek stayed open after leaving it");
+    }
+
+    /// An app with one open note, fully unfolded.
+    fn app_with_open_note(dir: &tempfile::TempDir) -> App {
+        let mut app = app_in(dir);
+        app.store.add_note(&crate::note::PALETTE);
+        app.window_size = Size::new(1400.0, 900.0);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        app
+    }
+
+    #[test]
+    fn resizing_saves_size_and_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let start = app.note_target_rect();
+        let grab = Point::new(start.x + start.width - 2.0, start.center_y());
+        let _ = app.update(Message::CursorMoved(grab));
+        let edges = crate::resize::edges_at(start, grab).expect("on the right edge");
+        let _ = app.update(Message::ResizeStart(edges));
+        // Stays inside the window margins, which the docked note is 58 px from.
+        let _ = app.update(Message::CursorMoved(grab + Vector::new(40.0, 25.0)));
+        assert_eq!(app.note_target_rect().width, start.width + 40.0);
+        let _ = app.update(Message::MouseButton(false));
+        let note = &app.store.notes()[0];
+        assert_eq!(note.size, Some([start.width + 40.0, start.height]));
+        assert_eq!(note.position, Some([start.x, start.y]));
+    }
+
+    #[test]
+    fn note_opens_at_its_saved_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let id = app.store.add_note(&crate::note::PALETTE);
+        app.store.note_mut(id).unwrap().size = Some([500.0, 410.0]);
+        app.window_size = Size::new(1400.0, 900.0);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        assert_eq!(app.note_target_rect().size(), Size::new(500.0, 410.0));
     }
 
     #[test]
