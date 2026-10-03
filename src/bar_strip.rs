@@ -1,7 +1,7 @@
 use crate::animation::MagnificationState;
 use crate::app::{DragState, Message};
 use crate::note::Note;
-use crate::peek::draw_peek;
+use crate::peek::{draw_peek, peek_layout, peek_text};
 use crate::settings::BarSettings;
 
 use iced::advanced::layout::{self, Layout};
@@ -129,38 +129,20 @@ pub fn compute_layout(
 }
 
 pub struct BarStrip<'a> {
-    notes: &'a [Note],
-    magnification: &'a MagnificationState,
-    drag: &'a Option<DragState>,
-    scroll_offset: f32,
+    pub notes: &'a [Note],
+    pub magnification: &'a MagnificationState,
+    pub drag: &'a Option<DragState>,
+    pub scroll_offset: f32,
     /// Bar index being peeked and the peek's progress (0..=1).
-    peek: Option<(usize, f32)>,
-    bars: &'a BarSettings,
+    pub peek: Option<(usize, f32)>,
+    pub bars: &'a BarSettings,
     /// Share of the widget height the bars may use (centered).
-    height_fraction: f32,
+    pub height_fraction: f32,
+    /// Paper tint of an open note, which the hover peek imitates.
+    pub paper_tint: f32,
 }
 
 impl<'a> BarStrip<'a> {
-    pub fn new(
-        notes: &'a [Note],
-        magnification: &'a MagnificationState,
-        drag: &'a Option<DragState>,
-        scroll_offset: f32,
-        peek: Option<(usize, f32)>,
-        bars: &'a BarSettings,
-        height_fraction: f32,
-    ) -> Self {
-        Self {
-            notes,
-            magnification,
-            drag,
-            scroll_offset,
-            peek,
-            bars,
-            height_fraction,
-        }
-    }
-
     fn layout_in(&self, bounds: Rectangle) -> StripLayout {
         compute_layout(
             self.notes.len(),
@@ -228,7 +210,15 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             if let Some((peek_index, progress)) = self.peek {
                 if peek_index == i && progress > 0.0 {
                     if let Some(note) = self.notes.get(i) {
-                        draw_peek(renderer, note, *bar_rect, CORNER_RADIUS, progress);
+                        draw_peek(
+                            renderer,
+                            note,
+                            *bar_rect,
+                            bounds,
+                            CORNER_RADIUS,
+                            progress,
+                            self.paper_tint,
+                        );
                     }
                     continue;
                 }
@@ -449,6 +439,19 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(pos) = cursor.position() {
                     let strip = self.layout_in(bounds);
+                    // Clicking the open peek opens its note.
+                    if let Some((i, _)) = self.peek {
+                        let target = strip
+                            .bars
+                            .get(i)
+                            .zip(self.notes.get(i))
+                            .map(|(bar, note)| peek_target(*bar, bounds, note));
+                        if target.is_some_and(|rect| rect.contains(pos)) {
+                            shell.publish(Message::BarClicked(i));
+                            shell.capture_event();
+                            return;
+                        }
+                    }
                     for (i, bar_rect) in strip.bars.iter().enumerate() {
                         if bar_rect.contains(pos) {
                             shell.publish(Message::DragStart(i, pos.y));
@@ -517,27 +520,6 @@ impl<'a> From<BarStrip<'a>> for Element<'a, Message> {
     }
 }
 
-pub fn bar_strip<'a>(
-    notes: &'a [Note],
-    magnification: &'a MagnificationState,
-    drag: &'a Option<DragState>,
-    scroll_offset: f32,
-    peek: Option<(usize, f32)>,
-    bars: &'a BarSettings,
-    height_fraction: f32,
-) -> Element<'a, Message> {
-    BarStrip::new(
-        notes,
-        magnification,
-        drag,
-        scroll_offset,
-        peek,
-        bars,
-        height_fraction,
-    )
-    .into()
-}
-
 /// A "sliders" settings icon inside `slot`: three tracks, each with a knob
 /// at a different position. Drawn from quads so it needs no icon font.
 fn settings_glyph(slot: Rectangle) -> Vec<Rectangle> {
@@ -559,6 +541,12 @@ fn settings_glyph(slot: Rectangle) -> Vec<Rectangle> {
         ));
     }
     quads
+}
+
+/// Where the fully open peek of the note on `bar` sits: the area that
+/// keeps it open while hovered and opens the note when clicked.
+pub fn peek_target(bar: Rectangle, bounds: Rectangle, note: &Note) -> Rectangle {
+    peek_layout(bar, bounds, 1.0, &peek_text(note)).rect
 }
 
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
@@ -704,6 +692,16 @@ mod tests {
             assert!(slot.contains(q.position()));
             assert!(slot.contains(Point::new(q.x + q.width, q.y + q.height)));
         }
+    }
+
+    #[test]
+    fn peek_target_finds_open_peek() {
+        let bar = Rectangle::new(Point::new(48.0, 400.0), Size::new(6.0, 30.0));
+        let strip = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
+        let note = crate::note::Note::new(crate::note::PALETTE[0]);
+        let rect = peek_target(bar, strip, &note);
+        assert!(rect.width > STRIP_WIDTH);
+        assert!(rect.contains(Point::new(bar.x - 100.0, bar.center().y)));
     }
 
     #[test]
