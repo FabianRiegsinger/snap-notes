@@ -1,11 +1,15 @@
-use crate::animation::{lerp, morph_frame, AnimationState, MagnificationState, Morph};
-use crate::bar_strip::{bar_strip, compute_layout, StripLayout, STRIP_WIDTH};
+use crate::animation::{lerp, morph_frame, AnimationState, MagnificationState, Morph, MorphFrame};
+use crate::bar_strip::{bar_strip, compute_layout, StripLayout, BAR_GAP, STRIP_WIDTH};
 use crate::note::NoteColor;
 use crate::note_panel::{post_it, PostIt};
+use crate::platform::{self, SUPPORTS_PASSTHROUGH};
 use crate::store::NoteStore;
 
 use iced::widget::{container, mouse_area, opaque, pin, stack, text_editor, Space};
-use iced::{keyboard, window, Element, Fill, Point, Rectangle, Size, Subscription, Task};
+use iced::{
+    event, keyboard, mouse, window, Element, Fill, Point, Rectangle, Size, Subscription, Task,
+    Vector,
+};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -15,7 +19,10 @@ const NOTE_EXPANDED_SIZE: f32 = 560.0;
 const NOTE_GAP: f32 = 18.0;
 const NOTE_MARGIN: f32 = 24.0;
 /// Window width while a note is open: room for the expanded note and its shadow.
-const OPEN_WIDTH: f32 = STRIP_WIDTH + NOTE_GAP + NOTE_EXPANDED_SIZE + NOTE_MARGIN;
+pub const OPEN_WIDTH: f32 = STRIP_WIDTH + NOTE_GAP + NOTE_EXPANDED_SIZE + NOTE_MARGIN;
+/// While mouse passthrough is on, how often the OS cursor is polled to notice
+/// it entering the strip or the note again.
+const CURSOR_POLL: Duration = Duration::from_millis(50);
 /// Share of the monitor height the docked window occupies (centered).
 const HEIGHT_FRACTION: f32 = 0.9;
 
@@ -27,6 +34,8 @@ pub enum Message {
     NoteEdited(text_editor::Action),
     TitleEdited(String),
     NoteHovered(bool),
+    NoteDragStart,
+    NoteResetPosition,
     ClosePanel,
     DeleteRequested,
     ConfirmDelete(bool),
@@ -34,7 +43,7 @@ pub enum Message {
     ColorChosen(NoteColor),
     ExpandNote,
     ShrinkNote,
-    DragStart(usize),
+    DragStart(usize, f32),
     DragMove(f32),
     DragEnd,
     StripScroll(f32),
@@ -45,6 +54,12 @@ pub enum Message {
     WindowReady(window::Id, Option<Size>),
     WindowResized(Size),
     Key(keyboard::Event),
+    CursorMoved(Point),
+    CursorLeftWindow,
+    MouseButton(bool),
+    WindowUnfocused,
+    PollCursor,
+    CursorPolled(Option<Point>),
 }
 
 pub struct App {
@@ -69,6 +84,13 @@ pub struct App {
     window_id: Option<window::Id>,
     monitor: Option<Size>,
     window_size: Size,
+    /// Clicks fall through the window to the apps behind it.
+    passthrough: bool,
+    mouse_down: bool,
+    last_cursor: Option<Point>,
+    /// Grab offset (cursor minus note top-left) while the open note is dragged.
+    note_drag: Option<Vector>,
+    note_drag_pos: Option<Point>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +137,12 @@ impl App {
                 visible: true,
                 window_id: None,
                 monitor: None,
-                window_size: Size::new(STRIP_WIDTH, 600.0),
+                window_size: Size::new(Self::docked_width(false), 600.0),
+                passthrough: false,
+                mouse_down: false,
+                last_cursor: None,
+                note_drag: None,
+                note_drag_pos: None,
             },
             window::oldest().then(|id| match id {
                 Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
@@ -148,6 +175,21 @@ impl App {
             Message::NoteHovered(hovered) => {
                 self.note_hovered = hovered;
             }
+            Message::NoteDragStart => {
+                if let (Some(cursor), Some(frame)) = (self.last_cursor, self.note_frame()) {
+                    let top_left = frame.rect.position();
+                    self.note_drag = Some(cursor - top_left);
+                    self.note_drag_pos = Some(top_left);
+                }
+            }
+            Message::NoteResetPosition => {
+                if let Some(id) = self.active_note {
+                    if let Some(note) = self.store.note_mut(id) {
+                        note.position = None;
+                    }
+                    self.store.mark_dirty();
+                }
+            }
             Message::TitleEdited(title) => {
                 if let Some(id) = self.active_note {
                     if let Some(note) = self.store.note_mut(id) {
@@ -169,6 +211,12 @@ impl App {
                                 note.updated_at = chrono::Utc::now();
                             }
                             self.store.mark_dirty();
+                        }
+                        // Keep the caret in view while writing at the end.
+                        if content.cursor().position.line + 1 >= content.line_count() {
+                            return iced::widget::operation::snap_to_end(
+                                crate::note_panel::BODY_SCROLL_ID,
+                            );
                         }
                     }
                 }
@@ -247,9 +295,9 @@ impl App {
                 self.expand_animation.set_target(0.0);
                 self.animating = true;
             }
-            Message::DragStart(index) => {
-                let centers = self.bar_centers();
-                let origin_y = centers.get(index).copied().unwrap_or(0.0);
+            Message::DragStart(index, origin_y) => {
+                // Origin is the press position, so a click without movement
+                // opens the note even when pressed far from the bar's center.
                 self.drag = Some(DragState {
                     bar_index: index,
                     origin_y,
@@ -301,7 +349,9 @@ impl App {
             Message::WindowReady(id, monitor) => {
                 self.window_id = Some(id);
                 self.monitor = monitor;
-                return self.set_window_width(STRIP_WIDTH);
+                let shadow = window::run(id, platform::disable_native_shadow).discard();
+                let dock = self.dock_window();
+                return Task::batch([shadow, dock, self.update_passthrough(None)]);
             }
             Message::WindowResized(size) => {
                 self.window_size = size;
@@ -317,6 +367,37 @@ impl App {
                 }
             }
             Message::Key(_) => {}
+            Message::CursorMoved(position) => {
+                self.last_cursor = Some(position);
+                if let Some(offset) = self.note_drag {
+                    self.note_drag_pos = Some(position - offset);
+                }
+                return self.update_passthrough(Some(position));
+            }
+            Message::CursorLeftWindow => {
+                self.last_cursor = None;
+                return self.update_passthrough(None);
+            }
+            Message::MouseButton(down) => {
+                self.mouse_down = down;
+                if !down && self.note_drag.is_some() {
+                    self.finish_note_drag();
+                }
+            }
+            Message::WindowUnfocused => {
+                // Clicking another app (through the passthrough area) closes the note.
+                return self.update(Message::ClosePanel);
+            }
+            Message::PollCursor => {
+                if let Some(id) = self.window_id {
+                    return window::run(id, platform::cursor_in_window).map(Message::CursorPolled);
+                }
+            }
+            Message::CursorPolled(position) => {
+                if self.passthrough && position.is_some_and(|p| self.is_interactive(p)) {
+                    return self.update_passthrough(position);
+                }
+            }
         }
         Task::none()
     }
@@ -337,8 +418,7 @@ impl App {
         if let (Some(id), Some(content)) = (self.active_note, &self.editor_content) {
             if let Some(index) = self.store.notes().iter().position(|n| n.id == id) {
                 let note = &self.store.notes()[index];
-                let source = self.strip_layout().bars[index];
-                let frame = morph_frame(source, self.note_target_rect(), self.morph.progress());
+                let frame = self.note_frame().expect("active note has a frame");
                 let rect = frame.rect;
 
                 if rect.width >= 1.0 && rect.height >= 1.0 {
@@ -358,6 +438,7 @@ impl App {
                         expanded: self.expanded,
                         color_picker_open: self.color_picker_open,
                         hovered: self.note_hovered,
+                        dragging: self.note_drag.is_some(),
                     });
                     let note_view = mouse_area(note_view)
                         .on_enter(Message::NoteHovered(true))
@@ -375,14 +456,28 @@ impl App {
         let save = iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveTick);
         let resized = window::resize_events().map(|(_id, size)| Message::WindowResized(size));
         let keys = keyboard::listen().map(Message::Key);
+        let pointer = event::listen_with(|event, _status, _id| match event {
+            iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                Some(Message::CursorMoved(position))
+            }
+            iced::Event::Mouse(mouse::Event::CursorLeft) => Some(Message::CursorLeftWindow),
+            iced::Event::Mouse(mouse::Event::ButtonPressed(_)) => Some(Message::MouseButton(true)),
+            iced::Event::Mouse(mouse::Event::ButtonReleased(_)) => {
+                Some(Message::MouseButton(false))
+            }
+            iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowUnfocused),
+            _ => None,
+        });
 
+        let mut subs = vec![save, resized, keys, pointer];
         if self.animating {
             // Frame-synced ticks keep the morph in step with the display.
-            let tick = window::frames().map(Message::Tick);
-            Subscription::batch([tick, save, resized, keys])
-        } else {
-            Subscription::batch([save, resized, keys])
+            subs.push(window::frames().map(Message::Tick));
         }
+        if self.passthrough {
+            subs.push(iced::time::every(CURSOR_POLL).map(|_| Message::PollCursor));
+        }
+        Subscription::batch(subs)
     }
 
     fn open_note(&mut self, index: usize) -> Task<Message> {
@@ -410,15 +505,13 @@ impl App {
             self.morph.open();
         }
         self.animating = true;
-
-        if self.window_size.width < OPEN_WIDTH {
-            self.set_window_width(OPEN_WIDTH)
-        } else {
-            Task::none()
-        }
+        self.dock_window()
     }
 
     fn finish_close(&mut self) -> Task<Message> {
+        if self.note_drag.is_some() {
+            self.finish_note_drag();
+        }
         self.active_note = None;
         self.note_hovered = false;
         self.editor_content = None;
@@ -432,23 +525,109 @@ impl App {
             self.store.did_save();
             self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
         }
-        self.set_window_width(STRIP_WIDTH)
+        self.dock_window()
     }
 
-    /// Docks the window to the right screen edge, vertically centered, at the
-    /// given width. The strip is centered inside, so it sits at the middle of
-    /// the right screen border.
-    fn set_window_width(&mut self, width: f32) -> Task<Message> {
+    /// Window width for the current state. With passthrough the window always
+    /// has room for an open note, so opening and closing never resize it (a
+    /// resize is a separate move + resize and flickers for a frame).
+    fn docked_width(note_open: bool) -> f32 {
+        if SUPPORTS_PASSTHROUGH || note_open {
+            OPEN_WIDTH
+        } else {
+            STRIP_WIDTH
+        }
+    }
+
+    /// Docks the window to the right screen edge, vertically centered. The
+    /// strip is centered inside, so it sits at the middle of the right screen
+    /// border. Does nothing if the window is already there.
+    fn dock_window(&mut self) -> Task<Message> {
         let (Some(id), Some(monitor)) = (self.window_id, self.monitor) else {
             return Task::none();
         };
-        let height = (monitor.height * HEIGHT_FRACTION).round();
-        let y = ((monitor.height - height) / 2.0).round();
-        self.window_size = Size::new(width, height);
+        // With passthrough the window covers the whole screen, so an open note
+        // can be dragged anywhere and the strip sits at the exact vertical
+        // center of the right edge.
+        let size = if SUPPORTS_PASSTHROUGH {
+            monitor
+        } else {
+            Size::new(
+                Self::docked_width(self.active_note.is_some()),
+                (monitor.height * HEIGHT_FRACTION).round(),
+            )
+        };
+        if size == self.window_size {
+            return Task::none();
+        }
+        let y = ((monitor.height - size.height) / 2.0).round();
+        self.window_size = size;
         Task::batch([
-            window::move_to(id, Point::new(monitor.width - width, y)),
-            window::resize(id, self.window_size),
+            window::move_to(id, Point::new(monitor.width - size.width, y)),
+            window::resize(id, size),
         ])
+    }
+
+    /// Whether the window should catch the mouse at `position`: over the bar
+    /// stack or the open note. Everywhere else clicks go to the apps behind.
+    fn is_interactive(&self, position: Point) -> bool {
+        let strip = self.strip_layout();
+        let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y) - BAR_GAP;
+        let bottom = strip.add_hit_area.y + strip.add_hit_area.height;
+        let over_strip = position.x >= self.window_size.width - STRIP_WIDTH
+            && (top..=bottom).contains(&position.y);
+        let over_note = self
+            .note_frame()
+            .is_some_and(|frame| frame.rect.expand(8.0).contains(position));
+        over_strip || over_note
+    }
+
+    fn update_passthrough(&mut self, cursor: Option<Point>) -> Task<Message> {
+        let Some(id) = self.window_id else {
+            return Task::none();
+        };
+        let want = SUPPORTS_PASSTHROUGH
+            && !self.mouse_down
+            && self.drag.is_none()
+            && cursor.is_none_or(|p| !self.is_interactive(p));
+        if want == self.passthrough {
+            return Task::none();
+        }
+        self.passthrough = want;
+        if want {
+            // No more cursor events will arrive, so drop the hover state now.
+            self.cursor_y = None;
+            self.note_hovered = false;
+            self.animating = true;
+            window::enable_mouse_passthrough(id)
+        } else {
+            window::disable_mouse_passthrough(id)
+        }
+    }
+
+    /// Stores where the note was dropped, so it opens there next time.
+    fn finish_note_drag(&mut self) {
+        let rect = self.note_target_rect();
+        self.note_drag = None;
+        self.note_drag_pos = None;
+        if let Some(id) = self.active_note {
+            if let Some(note) = self.store.note_mut(id) {
+                note.position = Some([rect.x, rect.y]);
+                note.updated_at = chrono::Utc::now();
+            }
+            self.store.mark_dirty();
+        }
+    }
+
+    fn note_frame(&self) -> Option<MorphFrame> {
+        let id = self.active_note?;
+        let index = self.store.notes().iter().position(|n| n.id == id)?;
+        let source = *self.strip_layout().bars.get(index)?;
+        Some(morph_frame(
+            source,
+            self.note_target_rect(),
+            self.morph.progress(),
+        ))
     }
 
     fn strip_layout(&self) -> StripLayout {
@@ -469,6 +648,23 @@ impl App {
         let max_height = (self.window_size.height - 2.0 * NOTE_MARGIN).max(NOTE_SIZE / 2.0);
         let width = lerp(NOTE_SIZE, NOTE_EXPANDED_SIZE, expand);
         let height = lerp(NOTE_SIZE, NOTE_EXPANDED_SIZE, expand).min(max_height);
+        let saved = self.note_drag_pos.or_else(|| {
+            let id = self.active_note?;
+            let note = self.store.notes().iter().find(|n| n.id == id)?;
+            note.position.map(|[x, y]| Point::new(x, y))
+        });
+        if let Some(top_left) = saved {
+            let max_x = (self.window_size.width - width - NOTE_MARGIN).max(NOTE_MARGIN);
+            let max_y = (self.window_size.height - height - NOTE_MARGIN).max(NOTE_MARGIN);
+            return Rectangle::new(
+                Point::new(
+                    top_left.x.clamp(NOTE_MARGIN, max_x),
+                    top_left.y.clamp(NOTE_MARGIN, max_y),
+                ),
+                Size::new(width, height),
+            );
+        }
+
         let right = self.window_size.width - STRIP_WIDTH - NOTE_GAP;
 
         let min_center = NOTE_MARGIN + height / 2.0;

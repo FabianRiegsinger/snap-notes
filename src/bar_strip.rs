@@ -15,9 +15,10 @@ pub const BAR_REST_WIDTH: f32 = 6.0;
 pub const BAR_REST_HEIGHT: f32 = 30.0;
 pub const BAR_GAP: f32 = 12.0;
 pub const STRIP_WIDTH: f32 = 64.0;
+/// Horizontal space between the screen edge and the bars.
+pub const EDGE_MARGIN: f32 = 10.0;
 const ADD_BUTTON_SIZE: f32 = 30.0;
 const ADD_BUTTON_GAP: f32 = 20.0;
-const ADD_BUTTON_RIGHT_MARGIN: f32 = 4.0;
 const EDGE_PADDING: f32 = 16.0;
 const CORNER_RADIUS: f32 = 3.0;
 
@@ -55,7 +56,7 @@ pub fn compute_layout(
         )
     };
 
-    let right = bounds.x + bounds.width;
+    let right = bounds.x + bounds.width - EDGE_MARGIN;
     let mut bars = Vec::with_capacity(count);
     for (i, h) in heights.iter().enumerate() {
         let w = BAR_REST_WIDTH * scale(i);
@@ -67,7 +68,7 @@ pub fn compute_layout(
     }
 
     let add_button = Rectangle::new(
-        Point::new(right - ADD_BUTTON_RIGHT_MARGIN - ADD_BUTTON_SIZE, y),
+        Point::new(right - ADD_BUTTON_SIZE, y),
         Size::new(ADD_BUTTON_SIZE, ADD_BUTTON_SIZE),
     );
     let add_hit_area = Rectangle::new(
@@ -373,7 +374,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     let strip = self.layout_in(bounds);
                     for (i, bar_rect) in strip.bars.iter().enumerate() {
                         if bar_rect.contains(pos) {
-                            shell.publish(Message::DragStart(i));
+                            shell.publish(Message::DragStart(i, pos.y));
                             shell.capture_event();
                             return;
                         }
@@ -480,6 +481,14 @@ mod tests {
         let scrolled = compute_layout(40, |_| 1.0, bounds(400.0), 1.0e6);
         let last = scrolled.add_button.y + scrolled.add_button.height;
         assert!((last - (400.0 - EDGE_PADDING)).abs() < 0.01);
+    }
+
+    #[test]
+    fn bars_keep_margin_from_screen_edge() {
+        let l = compute_layout(3, |_| 5.0, bounds(900.0), 0.0);
+        for bar in l.bars.iter().chain([&l.add_button]) {
+            assert!((STRIP_WIDTH - (bar.x + bar.width) - EDGE_MARGIN).abs() < 0.01);
+        }
     }
 
     #[test]

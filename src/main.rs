@@ -4,6 +4,7 @@ mod bar_strip;
 mod color_picker;
 mod note;
 mod note_panel;
+mod pass_wheel;
 mod platform;
 mod store;
 
@@ -20,7 +21,7 @@ fn main() -> iced::Result {
         .transparent(true)
         .decorations(false)
         .level(window::Level::AlwaysOnTop)
-        .window_size((bar_strip::STRIP_WIDTH, 600.0))
+        .window_size((app::OPEN_WIDTH, 600.0))
         .position(window::Position::SpecificWith(dock_right))
         .resizable(false)
         .theme(theme)

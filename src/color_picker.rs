@@ -6,7 +6,7 @@ use iced::{Color, Element, Theme};
 
 pub fn color_picker(current: &NoteColor) -> Element<'_, Message> {
     let rows: Vec<Element<'_, Message>> = PALETTE
-        .chunks(4)
+        .chunks(5)
         .map(|chunk| {
             let btns: Vec<Element<'_, Message>> = chunk
                 .iter()

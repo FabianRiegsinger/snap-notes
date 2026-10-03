@@ -4006,13 +4006,16 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "iced",
+ "objc2-app-kit 0.3.2",
  "rand",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "single-instance",
  "tempfile",
  "tray-item",
  "uuid",
+ "windows-sys 0.59.0",
  "winres",
 ]
 

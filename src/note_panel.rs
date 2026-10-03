@@ -1,10 +1,37 @@
 use crate::app::Message;
 use crate::color_picker::color_picker;
 use crate::note::Note;
+use crate::pass_wheel::pass_wheel;
 
-use iced::widget::{button, column, container, row, text, text_editor, text_input, Space};
-use iced::{font, Background, Border, Color, Element, Fill, Font, Length, Padding, Shadow, Size};
-use iced::{Theme, Vector};
+use iced::widget::{
+    button, column, container, mouse_area, row, scrollable, text, text_editor, text_input, Space,
+};
+use iced::{
+    font, gradient, Background, Border, Color, Element, Fill, Font, Length, Padding, Shadow, Size,
+};
+use iced::{mouse, Theme, Vector};
+
+/// Named explicitly: with the generic family, the bold face can fall back to a
+/// monospace font.
+#[cfg(target_os = "macos")]
+const TITLE_FAMILY: font::Family = font::Family::Name("Helvetica Neue");
+#[cfg(windows)]
+const TITLE_FAMILY: font::Family = font::Family::Name("Segoe UI");
+#[cfg(not(any(target_os = "macos", windows)))]
+const TITLE_FAMILY: font::Family = font::Family::SansSerif;
+const TITLE_FONT: Font = Font {
+    family: TITLE_FAMILY,
+    weight: font::Weight::Bold,
+    ..Font::DEFAULT
+};
+
+pub const BODY_SCROLL_ID: &str = "note-body-scroll";
+const BODY_EDITOR_ID: &str = "note-body-editor";
+/// Approximate heights of everything above/below the body, used to size the
+/// editor so it fills the note without forcing a scrollbar.
+const CHROME_HEIGHT: f32 = 72.0;
+const PICKER_HEIGHT: f32 = 148.0;
+const CONFIRM_HEIGHT: f32 = 46.0;
 
 const INK: [f32; 3] = [0.13, 0.12, 0.10];
 const RADIUS: f32 = 1.0;
@@ -21,6 +48,7 @@ pub struct PostIt<'a> {
     pub expanded: bool,
     pub color_picker_open: bool,
     pub hovered: bool,
+    pub dragging: bool,
 }
 
 fn ink(alpha: f32) -> Color {
@@ -70,14 +98,16 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         expanded,
         color_picker_open,
         hovered,
+        dragging,
     } = p;
-    let controls = if hovered || color_picker_open || confirm_delete {
+    let controls = if hovered || dragging || color_picker_open || confirm_delete {
         a
     } else {
         a * IDLE_CONTROL_ALPHA
     };
 
-    let paper = shade(note, -0.12, 1.0);
+    // Starts as the bar color so the morph has no seam where it meets the bar.
+    let paper = shade(note, -0.12 * morph_progress, 1.0);
     let shadow_alpha = 0.28 * morph_progress;
 
     let inner: Element<'_, Message> = if a < 0.01 {
@@ -87,10 +117,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             .on_input(Message::TitleEdited)
             .size(16)
             .padding(0)
-            .font(Font {
-                weight: font::Weight::Bold,
-                ..Font::default()
-            })
+            .font(TITLE_FONT)
             .style(move |_theme: &Theme, _status| text_input::Style {
                 background: Color::TRANSPARENT.into(),
                 border: Border::default(),
@@ -136,12 +163,51 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             .spacing(2)
             .align_y(iced::Alignment::Center),
         )
-        .padding(Padding::new(12.0).left(18).right(10).bottom(6));
+        .padding(Padding::new(2.0).left(18).right(10).bottom(6));
 
-        let body = text_editor(content)
+        // Grip along the top edge: drag to move the note, double-click to
+        // send it back next to the dock.
+        let pill = container(Space::new().width(36).height(4)).style(move |_theme: &Theme| {
+            container::Style {
+                background: Some(ink(0.3 * controls).into()),
+                border: Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        });
+        let grip = mouse_area(
+            container(pill)
+                .width(Fill)
+                .height(16)
+                .align_x(iced::Alignment::Center)
+                .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::NoteDragStart)
+        .on_double_click(Message::NoteResetPosition)
+        .interaction(if dragging {
+            mouse::Interaction::Grabbing
+        } else {
+            mouse::Interaction::Grab
+        });
+
+        // The editor grows with its text inside a scrollable, so a scrollbar
+        // appears (and stays) only when the text no longer fits. Its minimum
+        // height roughly fills the visible body so clicks below short text
+        // still land in the editor.
+        let chrome = CHROME_HEIGHT
+            + if color_picker_open {
+                PICKER_HEIGHT
+            } else {
+                0.0
+            }
+            + if confirm_delete { CONFIRM_HEIGHT } else { 0.0 };
+        let editor = text_editor(content)
+            .id(BODY_EDITOR_ID)
             .placeholder("Write something…")
             .on_action(Message::NoteEdited)
-            .height(Fill)
+            .min_height((size.height - chrome).max(0.0))
             .size(14)
             .padding(Padding::new(6.0).left(18).right(18).bottom(18))
             .style(move |_theme: &Theme, _status| text_editor::Style {
@@ -151,8 +217,71 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 value: ink(0.9 * a),
                 selection: ink(0.18 * a),
             });
+        let body = scrollable(pass_wheel(editor))
+            .id(BODY_SCROLL_ID)
+            .height(Fill)
+            .direction(scrollable::Direction::Vertical(
+                scrollable::Scrollbar::new()
+                    .width(6)
+                    .scroller_width(6)
+                    .margin(5),
+            ))
+            .style(move |_theme: &Theme, status| {
+                let active = matches!(
+                    status,
+                    scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
+                );
+                let rail = scrollable::Rail {
+                    background: Some(ink(0.06 * a).into()),
+                    border: Border {
+                        radius: 3.0.into(),
+                        ..Default::default()
+                    },
+                    scroller: scrollable::Scroller {
+                        background: ink(if active { 0.45 } else { 0.28 } * a).into(),
+                        border: Border {
+                            radius: 3.0.into(),
+                            ..Default::default()
+                        },
+                    },
+                };
+                scrollable::Style {
+                    container: container::Style::default(),
+                    vertical_rail: rail,
+                    horizontal_rail: rail,
+                    gap: None,
+                    auto_scroll: scrollable::AutoScroll {
+                        background: ink(0.1 * a).into(),
+                        border: Border::default(),
+                        shadow: Shadow::default(),
+                        icon: ink(a),
+                    },
+                }
+            });
 
-        let mut col = column![header];
+        // Divider: a faint inked hairline with a short soft shadow fading
+        // below it, as if the header sheet rests slightly on the body.
+        let hairline =
+            container(Space::new().width(Fill).height(1)).style(move |_theme: &Theme| {
+                container::Style {
+                    background: Some(ink(0.12 * a).into()),
+                    ..Default::default()
+                }
+            });
+        let fade = container(Space::new().width(Fill).height(6)).style(move |_theme: &Theme| {
+            container::Style {
+                background: Some(
+                    gradient::Linear::new(std::f32::consts::PI)
+                        .add_stop(0.0, ink(0.07 * a))
+                        .add_stop(1.0, ink(0.0))
+                        .into(),
+                ),
+                ..Default::default()
+            }
+        });
+        let divider = container(column![hairline, fade]).padding(Padding::ZERO.left(14).right(14));
+
+        let mut col = column![grip, header, divider];
         if color_picker_open {
             col = col.push(
                 container(color_picker(&note.color)).padding(Padding::ZERO.left(14).bottom(6)),
