@@ -13,14 +13,15 @@ rand = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 single-instance = "0.3"
-tray-item = "0.10"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 raw-window-handle = "0.6"
+tray-icon = "0.26"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSResponder", "NSView", "NSWindow"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

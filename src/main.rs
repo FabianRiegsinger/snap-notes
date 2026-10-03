@@ -10,6 +10,7 @@ mod platform;
 mod settings;
 mod settings_panel;
 mod store;
+mod tray;
 
 use app::App;
 use iced::window;
