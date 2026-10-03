@@ -6,6 +6,7 @@ use crate::platform::{self, SUPPORTS_PASSTHROUGH};
 use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore};
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::NoteStore;
+use crate::tray;
 
 use iced::widget::{container, mouse_area, opaque, pin, stack, text_editor, Space};
 use iced::{
@@ -22,6 +23,8 @@ pub(crate) const NOTE_MARGIN: f32 = 24.0;
 /// it entering the strip or the note again.
 const CURSOR_POLL: Duration = Duration::from_millis(50);
 const PEEK_POLL: Duration = Duration::from_millis(100);
+/// How often clicks in the tray menu are collected.
+const TRAY_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -55,6 +58,10 @@ pub enum Message {
     Tick(Instant),
     SaveTick,
     ToggleVisibility,
+    /// The tray icon was created (or failed to be).
+    TrayReady(bool),
+    TrayPoll,
+    TrayMenu(String),
     Quit,
     WindowReady(window::Id, Option<Size>),
     WindowResized(Size),
@@ -109,6 +116,8 @@ pub struct App {
     /// Gear center when the panel opened; the panel stays centered on it.
     settings_anchor_y: f32,
     palette_slot: Option<usize>,
+    /// The menu bar / tray icon exists.
+    tray_ok: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +186,7 @@ impl App {
                 settings_morph,
                 settings_anchor_y: 0.0,
                 palette_slot: None,
+                tray_ok: false,
             },
             window::oldest().then(|id| match id {
                 Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
@@ -226,6 +236,7 @@ impl App {
             }
             Message::SettingToggled(toggle) => {
                 self.settings.settings_mut().toggle(toggle);
+                return self.apply_app_visibility();
             }
             Message::ResetGroup(group) => {
                 if group == SettingsGroup::Palette {
@@ -235,6 +246,9 @@ impl App {
                     }
                 } else {
                     self.settings.settings_mut().reset(group);
+                }
+                if group == SettingsGroup::App {
+                    return self.apply_app_visibility();
                 }
                 return self.apply_settings();
             }
@@ -465,6 +479,46 @@ impl App {
             }
             Message::ToggleVisibility => {
                 self.visible = !self.visible;
+                let mut tasks = Vec::new();
+                if !self.visible {
+                    tasks.push(self.update(Message::CloseSettings));
+                    tasks.push(self.update(Message::ClosePanel));
+                    self.hide_peek();
+                }
+                if let Some(id) = self.window_id {
+                    let shown = self.visible;
+                    tasks.push(window::run(id, move |w| tray::set_notes_shown(w, shown)).discard());
+                }
+                tasks.push(self.update_passthrough(self.last_cursor));
+                return Task::batch(tasks);
+            }
+            Message::TrayReady(ok) => {
+                self.tray_ok = ok;
+                // Without a tray icon the Dock icon is the only way back in.
+                if !ok && !self.settings.settings().app.show_dock_icon {
+                    self.settings.settings_mut().app.show_dock_icon = true;
+                    return self.apply_app_visibility();
+                }
+            }
+            Message::TrayPoll => {
+                let tasks: Vec<_> = tray::poll()
+                    .into_iter()
+                    .map(|id| self.update(Message::TrayMenu(id)))
+                    .collect();
+                return Task::batch(tasks);
+            }
+            Message::TrayMenu(id) => {
+                let Some(message) = tray::message_for(&id) else {
+                    return Task::none();
+                };
+                let mut tasks = Vec::new();
+                // Adding a note or opening settings needs the notes on screen.
+                let needs_notes = matches!(message, Message::AddNote | Message::ToggleSettings);
+                if needs_notes && !self.visible {
+                    tasks.push(self.update(Message::ToggleVisibility));
+                }
+                tasks.push(self.update(message));
+                return Task::batch(tasks);
             }
             Message::Quit => {
                 let _ = self.store.save();
@@ -476,11 +530,22 @@ impl App {
                 self.monitor = monitor;
                 let shadow = window::run(id, platform::disable_native_shadow).discard();
                 let dock = self.dock_window();
-                return Task::batch([shadow, dock, self.update_passthrough(None)]);
+                let show_icon = self.settings.settings().app.show_menu_bar_icon;
+                let tray = window::run(id, move |w| tray::create(w, true, show_icon))
+                    .map(Message::TrayReady);
+                return Task::batch([
+                    shadow,
+                    dock,
+                    self.update_passthrough(None),
+                    tray,
+                    self.apply_app_visibility(),
+                ]);
             }
             Message::WindowResized(size) => {
                 self.window_size = size;
             }
+            // Hidden notes don't react to the keyboard.
+            Message::Key(_) if !self.visible => {}
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 use keyboard::key::Named;
                 match key.as_ref() {
@@ -536,6 +601,9 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        if !self.visible {
+            return Space::new().width(Fill).height(Fill).into();
+        }
         let strip = container(bar_strip(
             self.store.notes(),
             &self.magnification,
@@ -603,7 +671,7 @@ impl App {
                     morph_progress: self.settings_morph.progress(),
                     content_alpha: frame.content_alpha,
                     selected_slot: self.palette_slot,
-                    tray_ok: false,
+                    tray_ok: self.tray_ok,
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
             }
@@ -637,6 +705,9 @@ impl App {
         }
         if self.passthrough {
             subs.push(iced::time::every(CURSOR_POLL).map(|_| Message::PollCursor));
+        }
+        if self.tray_ok {
+            subs.push(iced::time::every(TRAY_POLL).map(|_| Message::TrayPoll));
         }
         if self.hover_bar.is_some() && !self.peek.is_opening() {
             subs.push(iced::time::every(PEEK_POLL).map(Message::PeekTick));
@@ -743,6 +814,9 @@ impl App {
     /// Whether the window should catch the mouse at `position`: over the bar
     /// stack, the open note or the settings. Everywhere else clicks go to the apps behind.
     fn is_interactive(&self, position: Point) -> bool {
+        if !self.visible {
+            return false;
+        }
         let strip = self.strip_layout();
         let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y)
             - self.settings.settings().bars.gap;
@@ -882,6 +956,21 @@ impl App {
         } else {
             1.0
         }
+    }
+
+    /// Shows or hides the menu bar icon and the Dock icon to match settings.
+    fn apply_app_visibility(&self) -> Task<Message> {
+        let Some(id) = self.window_id else {
+            return Task::none();
+        };
+        let app = self.settings.settings().app.clone();
+        Task::batch([
+            window::run(id, move |w| tray::set_visible(w, app.show_menu_bar_icon)).discard(),
+            window::run(id, move |w| {
+                platform::set_dock_icon_visible(w, app.show_dock_icon)
+            })
+            .discard(),
+        ])
     }
 
     /// Applies changed settings to running state: animation speeds, scroll

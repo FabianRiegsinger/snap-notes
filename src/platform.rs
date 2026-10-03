@@ -43,6 +43,66 @@ pub fn disable_native_shadow(window: &dyn iced::window::Window) {
 #[cfg(not(target_os = "macos"))]
 pub fn disable_native_shadow(_window: &dyn iced::window::Window) {}
 
+/// Shows or hides the app's Dock icon. Hiding makes it an accessory app
+/// (no Dock icon, no app menu); the window is brought back to the front
+/// because switching the policy can push it behind other apps.
+#[cfg(target_os = "macos")]
+pub fn set_dock_icon_visible(window: &dyn iced::window::Window, visible: bool) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let policy = if visible {
+        NSApplicationActivationPolicy::Regular
+    } else {
+        NSApplicationActivationPolicy::Accessory
+    };
+    NSApplication::sharedApplication(mtm).setActivationPolicy(policy);
+    with_ns_window(window, |ns_window| ns_window.orderFrontRegardless());
+}
+
+/// Shows or hides the window's taskbar button. A tool window has none; the
+/// window is hidden around the style change so the taskbar notices it.
+#[cfg(windows)]
+pub fn set_dock_icon_visible(window: &dyn iced::window::Window, visible: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
+        SW_SHOWNOACTIVATE, WS_EX_TOOLWINDOW,
+    };
+
+    let Some(hwnd) = hwnd(window) else {
+        return;
+    };
+    // SAFETY: style queries and updates on a live window handle, on the
+    // thread that owns it.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let tool = WS_EX_TOOLWINDOW as isize;
+        let wanted = if visible { style & !tool } else { style | tool };
+        if wanted == style {
+            return;
+        }
+        ShowWindow(hwnd, SW_HIDE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn set_dock_icon_visible(_window: &dyn iced::window::Window, _visible: bool) {}
+
 /// Cursor position relative to the window's top-left corner in logical pixels,
 /// read from the OS so it also works while mouse passthrough is on.
 #[cfg(target_os = "macos")]
@@ -55,17 +115,23 @@ pub fn cursor_in_window(window: &dyn iced::window::Window) -> Option<iced::Point
 }
 
 #[cfg(windows)]
-pub fn cursor_in_window(window: &dyn iced::window::Window) -> Option<iced::Point> {
+fn hwnd(window: &dyn iced::window::Window) -> Option<windows_sys::Win32::Foundation::HWND> {
     use raw_window_handle::RawWindowHandle;
-    use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
-    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
 
     let handle = window.window_handle().ok()?;
     let RawWindowHandle::Win32(win32) = handle.as_raw() else {
         return None;
     };
-    let hwnd = win32.hwnd.get() as HWND;
+    Some(win32.hwnd.get() as windows_sys::Win32::Foundation::HWND)
+}
+
+#[cfg(windows)]
+pub fn cursor_in_window(window: &dyn iced::window::Window) -> Option<iced::Point> {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
+
+    let hwnd = hwnd(window)?;
     let mut cursor = POINT { x: 0, y: 0 };
     let mut rect = RECT {
         left: 0,
