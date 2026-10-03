@@ -3,9 +3,13 @@
 
 use crate::app::Message;
 use crate::color_picker::swatch;
-use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, PRESETS};
+#[cfg(any(windows, target_os = "macos", test))]
+use crate::settings::SettingToggle;
+use crate::settings::{SettingKey, Settings, SettingsGroup, PRESETS};
 
-use iced::widget::{button, column, container, row, scrollable, slider, text, toggler, Space};
+#[cfg(any(windows, target_os = "macos"))]
+use iced::widget::toggler;
+use iced::widget::{button, column, container, row, scrollable, slider, text, Space};
 use iced::{
     Background, Border, Color, Element, Fill, Length, Padding, Shadow, Size, Theme, Vector,
 };
