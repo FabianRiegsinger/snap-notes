@@ -11,16 +11,81 @@ use iced::event::Event;
 use iced::mouse;
 use iced::{Color, Element, Length, Pixels, Point, Rectangle, Size, Theme};
 
-const BAR_REST_WIDTH: f32 = 6.0;
-const BAR_REST_HEIGHT: f32 = 30.0;
-const BAR_GAP: f32 = 4.0;
-const ADD_BUTTON_SIZE: f32 = 20.0;
+pub const BAR_REST_WIDTH: f32 = 6.0;
+pub const BAR_REST_HEIGHT: f32 = 30.0;
+pub const BAR_GAP: f32 = 12.0;
+pub const STRIP_WIDTH: f32 = 64.0;
+const ADD_BUTTON_SIZE: f32 = 30.0;
+const ADD_BUTTON_GAP: f32 = 20.0;
+const ADD_BUTTON_RIGHT_MARGIN: f32 = 4.0;
+const EDGE_PADDING: f32 = 16.0;
 const CORNER_RADIUS: f32 = 3.0;
+
+pub struct StripLayout {
+    pub bars: Vec<Rectangle>,
+    pub add_button: Rectangle,
+    /// Generous click target for the add button: the full strip width around it.
+    pub add_hit_area: Rectangle,
+    pub max_scroll: f32,
+}
+
+/// Lays out the bars plus the add button as one stack, centered vertically in
+/// `bounds`. Centering on the *current* (magnified) height keeps the hovered
+/// bar roughly in place while its neighbours grow. If the stack is taller than
+/// the bounds, it is top-aligned and scrolled by `scroll_offset`.
+pub fn compute_layout(
+    count: usize,
+    scale: impl Fn(usize) -> f32,
+    bounds: Rectangle,
+    scroll_offset: f32,
+) -> StripLayout {
+    let heights: Vec<f32> = (0..count).map(|i| BAR_REST_HEIGHT * scale(i)).collect();
+    let bars_height: f32 = heights.iter().sum::<f32>() + BAR_GAP * count.saturating_sub(1) as f32;
+    let add_gap = if count > 0 { ADD_BUTTON_GAP } else { 0.0 };
+    let content_height = bars_height + add_gap + ADD_BUTTON_SIZE;
+
+    let available = bounds.height - 2.0 * EDGE_PADDING;
+    let (mut y, max_scroll) = if content_height <= available {
+        (bounds.y + (bounds.height - content_height) / 2.0, 0.0)
+    } else {
+        let max_scroll = content_height - available;
+        (
+            bounds.y + EDGE_PADDING - scroll_offset.clamp(0.0, max_scroll),
+            max_scroll,
+        )
+    };
+
+    let right = bounds.x + bounds.width;
+    let mut bars = Vec::with_capacity(count);
+    for (i, h) in heights.iter().enumerate() {
+        let w = BAR_REST_WIDTH * scale(i);
+        bars.push(Rectangle::new(Point::new(right - w, y), Size::new(w, *h)));
+        y += h + BAR_GAP;
+    }
+    if count > 0 {
+        y += add_gap - BAR_GAP;
+    }
+
+    let add_button = Rectangle::new(
+        Point::new(right - ADD_BUTTON_RIGHT_MARGIN - ADD_BUTTON_SIZE, y),
+        Size::new(ADD_BUTTON_SIZE, ADD_BUTTON_SIZE),
+    );
+    let add_hit_area = Rectangle::new(
+        Point::new(bounds.x, y - add_gap / 2.0),
+        Size::new(bounds.width, ADD_BUTTON_SIZE + add_gap / 2.0 + EDGE_PADDING),
+    );
+
+    StripLayout {
+        bars,
+        add_button,
+        add_hit_area,
+        max_scroll,
+    }
+}
 
 pub struct BarStrip<'a> {
     notes: &'a [Note],
     magnification: &'a MagnificationState,
-    show_add_button: bool,
     drag: &'a Option<DragState>,
     scroll_offset: f32,
 }
@@ -29,31 +94,24 @@ impl<'a> BarStrip<'a> {
     pub fn new(
         notes: &'a [Note],
         magnification: &'a MagnificationState,
-        show_add_button: bool,
         drag: &'a Option<DragState>,
         scroll_offset: f32,
     ) -> Self {
         Self {
             notes,
             magnification,
-            show_add_button,
             drag,
             scroll_offset,
         }
     }
 
-    fn bar_bounds(&self, layout_bounds: Rectangle) -> Vec<Rectangle> {
-        let mut bars = Vec::new();
-        let mut y = layout_bounds.y - self.scroll_offset;
-        for (i, _note) in self.notes.iter().enumerate() {
-            let scale = self.magnification.scale(i);
-            let w = BAR_REST_WIDTH * scale;
-            let h = BAR_REST_HEIGHT * scale;
-            let x = layout_bounds.x + layout_bounds.width - w;
-            bars.push(Rectangle::new(Point::new(x, y), Size::new(w, h)));
-            y += h + BAR_GAP;
-        }
-        bars
+    fn layout_in(&self, bounds: Rectangle) -> StripLayout {
+        compute_layout(
+            self.notes.len(),
+            |i| self.magnification.scale(i),
+            bounds,
+            self.scroll_offset,
+        )
     }
 
     fn insertion_index(&self, cursor_y: f32, bars: &[Rectangle]) -> usize {
@@ -65,28 +123,11 @@ impl<'a> BarStrip<'a> {
         }
         bars.len()
     }
-
-    fn add_button_bounds(&self, layout_bounds: Rectangle) -> Rectangle {
-        let bars = self.bar_bounds(layout_bounds);
-        let y = bars
-            .last()
-            .map(|b| b.y + b.height + BAR_GAP * 2.0)
-            .unwrap_or(layout_bounds.y);
-        let x = layout_bounds.x + layout_bounds.width - ADD_BUTTON_SIZE;
-        Rectangle::new(
-            Point::new(x, y),
-            Size::new(ADD_BUTTON_SIZE, ADD_BUTTON_SIZE),
-        )
-    }
 }
 
 impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
     fn size(&self) -> Size<Length> {
-        let max_scale = (0..self.notes.len())
-            .map(|i| self.magnification.scale(i))
-            .fold(1.0f32, f32::max);
-        let width = (BAR_REST_WIDTH * max_scale).max(ADD_BUTTON_SIZE + 4.0);
-        Size::new(Length::Fixed(width + 30.0), Length::Fill)
+        Size::new(Length::Fixed(STRIP_WIDTH), Length::Fill)
     }
 
     fn layout(
@@ -95,12 +136,10 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         _renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let max_scale = (0..self.notes.len())
-            .map(|i| self.magnification.scale(i))
-            .fold(1.0f32, f32::max);
-        let width = (BAR_REST_WIDTH * max_scale).max(ADD_BUTTON_SIZE + 4.0) + 30.0;
-        let limits = limits.width(Length::Fixed(width)).height(Length::Fill);
-        let size = limits.resolve(width, f32::INFINITY, Size::new(width, 0.0));
+        let limits = limits
+            .width(Length::Fixed(STRIP_WIDTH))
+            .height(Length::Fill);
+        let size = limits.resolve(STRIP_WIDTH, f32::INFINITY, Size::new(STRIP_WIDTH, 0.0));
         layout::Node::new(size)
     }
 
@@ -111,11 +150,12 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         _theme: &Theme,
         _style: &renderer::Style,
         layout: Layout<'_>,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
         _viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
-        let bars = self.bar_bounds(bounds);
+        let strip = self.layout_in(bounds);
+        let bars = &strip.bars;
         let dragging_index = self.drag.as_ref().map(|d| d.bar_index);
         let drag_active = self
             .drag
@@ -150,8 +190,13 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 );
 
                 let scale = self.magnification.scale(i);
-                if scale > 2.0 && !note.content.is_empty() {
-                    let preview: String = note.content.chars().take(40).collect();
+                let preview_source = if note.title.is_empty() {
+                    &note.content
+                } else {
+                    &note.title
+                };
+                if scale > 2.0 && !preview_source.is_empty() {
+                    let preview: String = preview_source.chars().take(40).collect();
                     let text_size = 10.0 * (scale / 5.0).min(1.0);
                     let text_bounds = Rectangle {
                         x: bar_rect.x + 2.0,
@@ -191,51 +236,59 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             }
         }
 
-        if self.show_add_button {
-            let btn = self.add_button_bounds(bounds);
+        let btn = strip.add_button;
+        let hovered = cursor.is_over(strip.add_hit_area) && self.drag.is_none();
+        let (fill, border, plus) = if hovered {
+            (
+                Color::from_rgba(1.0, 1.0, 1.0, 0.95),
+                Color::from_rgba(1.0, 1.0, 1.0, 1.0),
+                Color::from_rgb(0.15, 0.15, 0.17),
+            )
+        } else {
+            (
+                Color::from_rgba(0.2, 0.2, 0.22, 0.6),
+                Color::from_rgba(1.0, 1.0, 1.0, 0.35),
+                Color::from_rgba(1.0, 1.0, 1.0, 0.85),
+            )
+        };
+        renderer::Renderer::fill_quad(
+            renderer,
+            renderer::Quad {
+                bounds: btn,
+                border: iced::Border {
+                    radius: (ADD_BUTTON_SIZE / 2.0).into(),
+                    width: 1.5,
+                    color: border,
+                },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, if hovered { 0.35 } else { 0.0 }),
+                    offset: iced::Vector::new(0.0, 2.0),
+                    blur_radius: 6.0,
+                },
+                snap: true,
+            },
+            fill,
+        );
+        let plus_h = 2.0;
+        let plus_len = ADD_BUTTON_SIZE * 0.42;
+        let cx = btn.x + btn.width / 2.0;
+        let cy = btn.y + btn.height / 2.0;
+        for size in [Size::new(plus_len, plus_h), Size::new(plus_h, plus_len)] {
             renderer::Renderer::fill_quad(
                 renderer,
                 renderer::Quad {
-                    bounds: btn,
+                    bounds: Rectangle::new(
+                        Point::new(cx - size.width / 2.0, cy - size.height / 2.0),
+                        size,
+                    ),
                     border: iced::Border {
-                        radius: (ADD_BUTTON_SIZE / 2.0).into(),
-                        width: 1.5,
-                        color: Color::from_rgba(0.6, 0.6, 0.6, 0.8),
+                        radius: 1.0.into(),
+                        ..Default::default()
                     },
                     shadow: Default::default(),
                     snap: true,
                 },
-                Color::from_rgba(0.3, 0.3, 0.3, 0.5),
-            );
-            let plus_h = 2.0;
-            let plus_len = ADD_BUTTON_SIZE * 0.4;
-            let cx = btn.x + btn.width / 2.0;
-            let cy = btn.y + btn.height / 2.0;
-            renderer::Renderer::fill_quad(
-                renderer,
-                renderer::Quad {
-                    bounds: Rectangle::new(
-                        Point::new(cx - plus_len / 2.0, cy - plus_h / 2.0),
-                        Size::new(plus_len, plus_h),
-                    ),
-                    border: Default::default(),
-                    shadow: Default::default(),
-                    snap: true,
-                },
-                Color::WHITE,
-            );
-            renderer::Renderer::fill_quad(
-                renderer,
-                renderer::Quad {
-                    bounds: Rectangle::new(
-                        Point::new(cx - plus_h / 2.0, cy - plus_len / 2.0),
-                        Size::new(plus_h, plus_len),
-                    ),
-                    border: Default::default(),
-                    shadow: Default::default(),
-                    snap: true,
-                },
-                Color::WHITE,
+                plus,
             );
         }
 
@@ -266,7 +319,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                         ),
                     );
 
-                    let target = self.insertion_index(drag.current_y, &bars);
+                    let target = self.insertion_index(drag.current_y, bars);
                     let indicator_y = if target < bars.len() {
                         bars[target].y - BAR_GAP / 2.0
                     } else {
@@ -317,18 +370,17 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(pos) = cursor.position() {
-                    let bars = self.bar_bounds(bounds);
-                    for (i, bar_rect) in bars.iter().enumerate() {
+                    let strip = self.layout_in(bounds);
+                    for (i, bar_rect) in strip.bars.iter().enumerate() {
                         if bar_rect.contains(pos) {
                             shell.publish(Message::DragStart(i));
+                            shell.capture_event();
                             return;
                         }
                     }
-                    if self.show_add_button {
-                        let btn = self.add_button_bounds(bounds);
-                        if btn.contains(pos) {
-                            shell.publish(Message::AddNote);
-                        }
+                    if strip.add_hit_area.contains(pos) {
+                        shell.publish(Message::AddNote);
+                        shell.capture_event();
                     }
                 }
             }
@@ -366,18 +418,9 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             return mouse::Interaction::Grabbing;
         }
         if let Some(pos) = cursor.position() {
-            let bounds = layout.bounds();
-            let bars = self.bar_bounds(bounds);
-            for bar_rect in &bars {
-                if bar_rect.contains(pos) {
-                    return mouse::Interaction::Pointer;
-                }
-            }
-            if self.show_add_button {
-                let btn = self.add_button_bounds(bounds);
-                if btn.contains(pos) {
-                    return mouse::Interaction::Pointer;
-                }
+            let strip = self.layout_in(layout.bounds());
+            if strip.bars.iter().any(|bar| bar.contains(pos)) || strip.add_hit_area.contains(pos) {
+                return mouse::Interaction::Pointer;
             }
         }
         mouse::Interaction::None
@@ -393,9 +436,58 @@ impl<'a> From<BarStrip<'a>> for Element<'a, Message> {
 pub fn bar_strip<'a>(
     notes: &'a [Note],
     magnification: &'a MagnificationState,
-    show_add_button: bool,
     drag: &'a Option<DragState>,
     scroll_offset: f32,
 ) -> Element<'a, Message> {
-    BarStrip::new(notes, magnification, show_add_button, drag, scroll_offset).into()
+    BarStrip::new(notes, magnification, drag, scroll_offset).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounds(height: f32) -> Rectangle {
+        Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, height))
+    }
+
+    fn stack_center(l: &StripLayout) -> f32 {
+        let top = l.bars.first().map_or(l.add_button.y, |b| b.y);
+        let bottom = l.add_button.y + l.add_button.height;
+        (top + bottom) / 2.0
+    }
+
+    #[test]
+    fn stack_is_vertically_centered_for_any_count() {
+        for count in [0, 1, 3, 8] {
+            let l = compute_layout(count, |_| 1.0, bounds(900.0), 0.0);
+            assert!((stack_center(&l) - 450.0).abs() < 0.01, "count {count}");
+            assert_eq!(l.max_scroll, 0.0);
+        }
+    }
+
+    #[test]
+    fn bars_are_spaced_by_gap() {
+        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0);
+        let gap = l.bars[1].y - (l.bars[0].y + l.bars[0].height);
+        assert!((gap - BAR_GAP).abs() < 0.01);
+    }
+
+    #[test]
+    fn overflowing_stack_scrolls_and_clamps() {
+        let l = compute_layout(40, |_| 1.0, bounds(400.0), 0.0);
+        assert!(l.max_scroll > 0.0);
+        assert!((l.bars[0].y - EDGE_PADDING).abs() < 0.01);
+        let scrolled = compute_layout(40, |_| 1.0, bounds(400.0), 1.0e6);
+        let last = scrolled.add_button.y + scrolled.add_button.height;
+        assert!((last - (400.0 - EDGE_PADDING)).abs() < 0.01);
+    }
+
+    #[test]
+    fn add_hit_area_spans_strip_width() {
+        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0);
+        assert_eq!(l.add_hit_area.width, STRIP_WIDTH);
+        assert!(l
+            .add_hit_area
+            .contains(Point::new(2.0, l.add_button.y + 2.0)));
+    }
 }

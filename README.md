@@ -1,14 +1,15 @@
 # Work Notes
 
-A lightweight, portable note-taking app for Windows. Notes live as thin colorful bars docked to the right edge of your screen — always visible, never in the way.
+A lightweight, portable note-taking app for Windows. Notes live as thin colorful bars docked to the vertical center of your screen's right edge — always visible, never in the way.
 
 ## Features
 
 - **Dock-style magnification** — hover over the bar strip and nearby bars scale up with smooth spring physics, just like the macOS Dock
 - **Peek preview** — magnified bars show a snippet of the note's content
-- **Click to edit** — a panel slides out from the right edge with a full text editor
+- **Click to open** — the bar morphs into a sticky note with a title header and a body; Esc, ✕, clicking outside or clicking the bar again folds it back
 - **Color coded** — each note gets a color from a 12-color palette; click the color indicator to change it
-- **Expand to center** — grow the editing panel for longer notes, shrink it back when done
+- **Expand** — grow the note for longer text, shrink it back when done
+- **Quick add** — the `+` below the bars (whole strip width is clickable) or Cmd/Ctrl+N
 - **Drag to reorder** — hold and drag bars to rearrange your notes
 - **Scroll overflow** — mousewheel scrolls the strip when you have more notes than screen space
 - **Auto-save** — edits are saved automatically (500ms debounce, atomic writes)
@@ -31,7 +32,7 @@ The release binary is optimized for size (`opt-level = "z"`, LTO, stripped).
 
 ## Usage
 
-Run the executable. A narrow strip of colored bars appears at the right edge of your screen, always on top. Hover to magnify, click to edit, use the `+` button at the bottom to add notes.
+Run the executable. A narrow strip of colored bars appears at the right edge of your screen, always on top. Hover to magnify, click to open a note, use the `+` button below the bars (or Cmd/Ctrl+N) to add notes.
 
 ## License
 

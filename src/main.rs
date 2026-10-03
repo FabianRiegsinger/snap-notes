@@ -20,7 +20,7 @@ fn main() -> iced::Result {
         .transparent(true)
         .decorations(false)
         .level(window::Level::AlwaysOnTop)
-        .window_size((80, 600))
+        .window_size((bar_strip::STRIP_WIDTH, 600.0))
         .position(window::Position::SpecificWith(dock_right))
         .resizable(false)
         .theme(theme)

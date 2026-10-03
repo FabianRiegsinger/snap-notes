@@ -70,6 +70,8 @@ pub const PALETTE: [NoteColor; 12] = [
 pub struct Note {
     pub id: Uuid,
     pub color: NoteColor,
+    #[serde(default)]
+    pub title: String,
     pub content: String,
     pub order: usize,
     pub created_at: DateTime<Utc>,
@@ -82,6 +84,7 @@ impl Note {
         Self {
             id: Uuid::new_v4(),
             color,
+            title: String::new(),
             content: String::new(),
             order: 0,
             created_at: now,
@@ -102,6 +105,14 @@ mod tests {
         let json = serde_json::to_string(&color).unwrap();
         let back: NoteColor = serde_json::from_str(&json).unwrap();
         assert_eq!(back.to_hex(), "#FF6B6B");
+    }
+
+    #[test]
+    fn note_without_title_deserializes() {
+        let json = r##"{"id":"6f1c2c1e-6c1a-4a8e-9a43-2a1f0e0f9b11","color":"#FF6B6B","content":"hi","order":0,"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}"##;
+        let note: Note = serde_json::from_str(json).unwrap();
+        assert_eq!(note.title, "");
+        assert_eq!(note.content, "hi");
     }
 
     #[test]
