@@ -18,7 +18,7 @@ Add a menu bar icon (macOS) / tray icon (Windows) with a dropdown menu, and sett
 | Show Notes / Hide Notes | `ToggleVisibility` | Label reflects the current state |
 | New Note | `AddNote` | Also shows the notes if they are hidden |
 | Settings… | `ToggleSettings` | Also shows the notes if they are hidden; opens the panel |
-| Quit Work Notes | `Quit` | Saves notes and settings first (existing behavior) |
+| Quit Snap Notes | `Quit` | Saves notes and settings first (existing behavior) |
 
 The menu item IDs are fixed strings (`"toggle"`, `"new"`, `"settings"`, `"quit"`). `tray::message_for(id: &str) -> Option<Message>` maps an ID to its message.
 

@@ -22,7 +22,7 @@ fn main() -> iced::Result {
 
     iced::application(App::boot, App::update, App::view)
         .subscription(App::subscription)
-        .title("Work Notes")
+        .title("Snap Notes")
         .transparent(true)
         .decorations(false)
         .level(window::Level::AlwaysOnTop)

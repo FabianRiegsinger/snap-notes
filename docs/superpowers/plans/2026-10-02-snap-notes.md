@@ -1,4 +1,4 @@
-# Work Notes Implementation Plan
+# Snap Notes Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, iced 0.14 (wgpu, advanced features), serde/serde_json, uuid, chrono, rand, single-instance, tray-item (Windows), winres (build)
 
-**Spec:** `docs/superpowers/specs/2026-10-02-work-notes-design.md`
+**Spec:** `docs/superpowers/specs/2026-10-02-snap-notes-design.md`
 
 ## Global Constraints
 
@@ -318,7 +318,7 @@ pub enum Message {
 
 ```toml
 [package]
-name = "work-notes"
+name = "snap-notes"
 edition = "2021"
 
 [dependencies]
@@ -534,7 +534,7 @@ git commit -m "feat: add drag-to-reorder for note bars"
 ```rust
 #[cfg(target_os = "windows")]
 pub fn enforce_single_instance() {
-    let instance = single_instance::SingleInstance::new("work-notes-{unique-id}").unwrap();
+    let instance = single_instance::SingleInstance::new("snap-notes-{unique-id}").unwrap();
     if !instance.is_single() { std::process::exit(0); }
     std::mem::forget(instance); // keep mutex alive
 }

@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Menu IDs: `"toggle"`, `"new"`, `"settings"`, `"quit"`. Labels: "Show Notes" / "Hide Notes", "New Note", "Settings…", "Quit Work Notes".
+- Menu IDs: `"toggle"`, `"new"`, `"settings"`, `"quit"`. Labels: "Show Notes" / "Hide Notes", "New Note", "Settings…", "Quit Snap Notes".
 - `AppSettings` defaults are both `true`. It is stored under `"app"` with fields `show_menu_bar_icon` and `show_dock_icon`.
 - Both icons must never be hidden at once, whether they come from the file, a toggle or a reset.
 - Tray and Dock code is compiled only for `cfg(any(windows, target_os = "macos"))`. Linux builds and tests must still pass.
@@ -107,7 +107,7 @@
 - **Produces**, other platforms: stubs where `create` returns false and `poll` returns an empty `Vec`.
 - **Implementation notes:**
   - `thread_local! { static TRAY: RefCell<Option<(TrayIcon, MenuItem)>> }`
-  - Build the icon with `TrayIconBuilder::new().with_menu(Box::new(menu)).with_icon(Icon::from_rgba(icon_rgba(36), 36, 36)?).with_icon_as_template(true).with_tooltip("Work Notes")`.
+  - Build the icon with `TrayIconBuilder::new().with_menu(Box::new(menu)).with_icon(Icon::from_rgba(icon_rgba(36), 36, 36)?).with_icon_as_template(true).with_tooltip("Snap Notes")`.
 - **Cargo:**
   - Add `tray-icon = "0.26"` under `[target.'cfg(any(windows, target_os = "macos"))'.dependencies]`. If 0.26 conflicts with the existing objc2 0.6, use the newest version that builds.
   - Remove `tray-item`.

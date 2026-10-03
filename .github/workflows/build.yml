@@ -17,16 +17,16 @@ jobs:
         include:
           - name: windows-x64
             os: windows-latest
-            bin: work-notes.exe
+            bin: snap-notes.exe
           - name: macos-arm64
             os: macos-latest
-            bin: work-notes
+            bin: snap-notes
           - name: linux-x64
             os: ubuntu-24.04
-            bin: work-notes
+            bin: snap-notes
           - name: linux-arm64
             os: ubuntu-24.04-arm
-            bin: work-notes
+            bin: snap-notes
 
     steps:
       - uses: actions/checkout@v7
@@ -52,13 +52,13 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --bin work-notes
+        run: cargo test --bin snap-notes
 
       - name: Build release
         run: cargo build --release
 
       - uses: actions/upload-artifact@v7
         with:
-          name: work-notes-${{ matrix.name }}
+          name: snap-notes-${{ matrix.name }}
           path: target/release/${{ matrix.bin }}
           if-no-files-found: error

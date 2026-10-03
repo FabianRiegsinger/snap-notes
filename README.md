@@ -1,16 +1,16 @@
-# Work Notes
+# Snap Notes
 
 A lightweight, portable note-taking app for Windows. Notes live as thin colorful bars docked to the vertical center of your screen's right edge — always visible, never in the way.
 
 ## Features
 
 - **Dock-style magnification** — hover over the bar strip and nearby bars scale up with smooth spring physics, just like the macOS Dock
-- **Peek preview** — magnified bars show a snippet of the note's content
+- **Peek preview** — rest on a bar and it widens into a small preview of the note; hover the preview to keep it open, click it to open the note
 - **Click to open** — the bar morphs into a sticky note with a title header and a body; Esc, ✕, clicking outside or clicking the bar again folds it back
 - **Color coded** — each note gets a color from a 20-color palette; click the color indicator to change it
 - **Drag anywhere** — drag an open note by its top grip; it reopens where you left it (double-click the grip to dock it again)
 - **Click-through** — empty screen areas pass clicks to the apps behind, so the dock never gets in the way
-- **Expand** — grow the note for longer text, shrink it back when done
+- **Resize** — drag any edge or corner of an open note; each note remembers its size
 - **Quick add** — the `+` below the bars (whole strip width is clickable) or Cmd/Ctrl+N
 - **Drag to reorder** — hold and drag bars to rearrange your notes
 - **Scroll overflow** — mousewheel scrolls the strip when you have more notes than screen space
