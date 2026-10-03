@@ -1,4 +1,4 @@
-use crate::note::{Note, NoteColor};
+use crate::note::{Note, NoteColor, PALETTE};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -61,6 +61,18 @@ impl NoteStore {
         let id = note.id;
         self.notes.push(note);
         id
+    }
+
+    pub fn seed_templates(&mut self) {
+        use rand::seq::IndexedRandom;
+        if !self.notes.is_empty() {
+            return;
+        }
+        for (order, color) in PALETTE.choose_multiple(&mut rand::rng(), 3).enumerate() {
+            let mut note = Note::new(*color);
+            note.order = order;
+            self.notes.push(note);
+        }
     }
 
     pub fn delete_note(&mut self, id: Uuid) {
@@ -131,6 +143,34 @@ mod tests {
         store.reorder(0, 2);
         assert_eq!(store.notes()[2].id, a);
         assert_eq!(store.notes()[0].id, b);
+    }
+
+    #[test]
+    fn seed_templates_fills_empty_store_with_three_distinct_blank_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = NoteStore::load(dir.path().join("n.json"));
+        store.seed_templates();
+        let notes = store.notes();
+        assert_eq!(notes.len(), 3);
+        assert!(notes.iter().all(|n| n.content.is_empty()));
+        assert_eq!(
+            notes.iter().map(|n| n.order).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        let mut colors: Vec<String> = notes.iter().map(|n| n.color.to_hex()).collect();
+        colors.sort();
+        colors.dedup();
+        assert_eq!(colors.len(), 3);
+    }
+
+    #[test]
+    fn seed_templates_leaves_existing_notes_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = NoteStore::load(dir.path().join("n.json"));
+        let id = store.add_note();
+        store.seed_templates();
+        assert_eq!(store.notes().len(), 1);
+        assert_eq!(store.notes()[0].id, id);
     }
 
     #[test]

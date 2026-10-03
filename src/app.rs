@@ -69,7 +69,11 @@ fn data_path() -> PathBuf {
 
 impl App {
     pub fn boot() -> (Self, Task<Message>) {
-        let store = NoteStore::load(data_path());
+        let mut store = NoteStore::load(data_path());
+        if store.notes().is_empty() {
+            store.seed_templates();
+            let _ = store.save();
+        }
         (
             Self {
                 store,

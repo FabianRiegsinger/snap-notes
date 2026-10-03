@@ -9,7 +9,7 @@ mod store;
 
 use app::App;
 use iced::window;
-use iced::Theme;
+use iced::{Color, Point, Size, Theme};
 
 fn main() -> iced::Result {
     platform::enforce_single_instance();
@@ -21,11 +21,27 @@ fn main() -> iced::Result {
         .decorations(false)
         .level(window::Level::AlwaysOnTop)
         .window_size((80, 600))
+        .position(window::Position::SpecificWith(dock_right))
         .resizable(false)
         .theme(theme)
+        .style(style)
         .run()
 }
 
 fn theme(_app: &App) -> Theme {
     Theme::Dark
+}
+
+fn style(_app: &App, theme: &Theme) -> iced::theme::Style {
+    iced::theme::Style {
+        background_color: Color::TRANSPARENT,
+        text_color: theme.palette().text,
+    }
+}
+
+fn dock_right(window: Size, monitor: Size) -> Point {
+    Point::new(
+        monitor.width - window.width,
+        ((monitor.height - window.height) / 2.0).max(0.0),
+    )
 }
