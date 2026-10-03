@@ -1,5 +1,5 @@
 use crate::animation::{lerp, morph_frame, AnimationState, MagnificationState, Morph, MorphFrame};
-use crate::bar_strip::{band, bar_strip, compute_layout, StripLayout, STRIP_WIDTH};
+use crate::bar_strip::{band, compute_layout, BarStrip, StripLayout, STRIP_WIDTH};
 use crate::note::NoteColor;
 use crate::note_panel::{post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
@@ -633,17 +633,19 @@ impl App {
         if !self.visible {
             return Space::new().width(Fill).height(Fill).into();
         }
-        let strip = container(bar_strip(
-            self.store.notes(),
-            &self.magnification,
-            &self.drag,
-            self.scroll_offset,
-            self.peek_note
+        let strip = container(BarStrip {
+            notes: self.store.notes(),
+            magnification: &self.magnification,
+            drag: &self.drag,
+            scroll_offset: self.scroll_offset,
+            peek: self
+                .peek_note
                 .and_then(|id| self.store.notes().iter().position(|n| n.id == id))
                 .map(|index| (index, self.peek.progress())),
-            &self.settings.settings().bars,
-            self.strip_fraction(),
-        ))
+            bars: &self.settings.settings().bars,
+            height_fraction: self.strip_fraction(),
+            paper_tint: self.settings.settings().notes.paper_tint,
+        })
         .width(Fill)
         .height(Fill)
         .align_x(iced::Alignment::End);

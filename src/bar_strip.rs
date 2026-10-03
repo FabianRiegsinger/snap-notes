@@ -129,38 +129,20 @@ pub fn compute_layout(
 }
 
 pub struct BarStrip<'a> {
-    notes: &'a [Note],
-    magnification: &'a MagnificationState,
-    drag: &'a Option<DragState>,
-    scroll_offset: f32,
+    pub notes: &'a [Note],
+    pub magnification: &'a MagnificationState,
+    pub drag: &'a Option<DragState>,
+    pub scroll_offset: f32,
     /// Bar index being peeked and the peek's progress (0..=1).
-    peek: Option<(usize, f32)>,
-    bars: &'a BarSettings,
+    pub peek: Option<(usize, f32)>,
+    pub bars: &'a BarSettings,
     /// Share of the widget height the bars may use (centered).
-    height_fraction: f32,
+    pub height_fraction: f32,
+    /// Paper tint of an open note, which the hover peek imitates.
+    pub paper_tint: f32,
 }
 
 impl<'a> BarStrip<'a> {
-    pub fn new(
-        notes: &'a [Note],
-        magnification: &'a MagnificationState,
-        drag: &'a Option<DragState>,
-        scroll_offset: f32,
-        peek: Option<(usize, f32)>,
-        bars: &'a BarSettings,
-        height_fraction: f32,
-    ) -> Self {
-        Self {
-            notes,
-            magnification,
-            drag,
-            scroll_offset,
-            peek,
-            bars,
-            height_fraction,
-        }
-    }
-
     fn layout_in(&self, bounds: Rectangle) -> StripLayout {
         compute_layout(
             self.notes.len(),
@@ -228,7 +210,15 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             if let Some((peek_index, progress)) = self.peek {
                 if peek_index == i && progress > 0.0 {
                     if let Some(note) = self.notes.get(i) {
-                        draw_peek(renderer, note, *bar_rect, CORNER_RADIUS, progress);
+                        draw_peek(
+                            renderer,
+                            note,
+                            *bar_rect,
+                            bounds,
+                            CORNER_RADIUS,
+                            progress,
+                            self.paper_tint,
+                        );
                     }
                     continue;
                 }
@@ -515,27 +505,6 @@ impl<'a> From<BarStrip<'a>> for Element<'a, Message> {
     fn from(strip: BarStrip<'a>) -> Self {
         Self::new(strip)
     }
-}
-
-pub fn bar_strip<'a>(
-    notes: &'a [Note],
-    magnification: &'a MagnificationState,
-    drag: &'a Option<DragState>,
-    scroll_offset: f32,
-    peek: Option<(usize, f32)>,
-    bars: &'a BarSettings,
-    height_fraction: f32,
-) -> Element<'a, Message> {
-    BarStrip::new(
-        notes,
-        magnification,
-        drag,
-        scroll_offset,
-        peek,
-        bars,
-        height_fraction,
-    )
-    .into()
 }
 
 /// A "sliders" settings icon inside `slot`: three tracks, each with a knob
