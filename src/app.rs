@@ -23,6 +23,8 @@ pub(crate) const NOTE_MARGIN: f32 = 24.0;
 /// it entering the strip or the note again.
 const CURSOR_POLL: Duration = Duration::from_millis(50);
 const PEEK_POLL: Duration = Duration::from_millis(100);
+/// How long focus changes caused by switching the Dock icon are ignored.
+const FOCUS_GRACE: Duration = Duration::from_millis(500);
 /// How often clicks in the tray menu are collected.
 const TRAY_POLL: Duration = Duration::from_millis(100);
 
@@ -118,6 +120,9 @@ pub struct App {
     palette_slot: Option<usize>,
     /// The menu bar / tray icon exists.
     tray_ok: bool,
+    /// Switching the Dock / taskbar icon briefly takes focus away from the
+    /// window; until then losing focus doesn't close the note or settings.
+    keep_open_until: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +192,7 @@ impl App {
                 settings_anchor_y: 0.0,
                 palette_slot: None,
                 tray_ok: false,
+                keep_open_until: None,
             },
             window::oldest().then(|id| match id {
                 Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
@@ -236,6 +242,9 @@ impl App {
             }
             Message::SettingToggled(toggle) => {
                 self.settings.settings_mut().toggle(toggle);
+                if toggle == SettingToggle::DockIcon {
+                    self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
+                }
                 return self.apply_app_visibility();
             }
             Message::ResetGroup(group) => {
@@ -248,6 +257,7 @@ impl App {
                     self.settings.settings_mut().reset(group);
                 }
                 if group == SettingsGroup::App {
+                    self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
                     return self.apply_app_visibility();
                 }
                 return self.apply_settings();
@@ -580,6 +590,8 @@ impl App {
                     self.finish_note_drag();
                 }
             }
+            Message::WindowUnfocused
+                if self.keep_open_until.is_some_and(|t| Instant::now() < t) => {}
             Message::WindowUnfocused => {
                 // Clicking another app (through the passthrough area) closes
                 // the note and the settings.

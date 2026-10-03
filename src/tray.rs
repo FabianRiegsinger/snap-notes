@@ -18,9 +18,9 @@ pub fn message_for(id: &str) -> Option<Message> {
     }
 }
 
-/// A monochrome note glyph as RGBA: a sheet outline with three text lines,
-/// black on transparent. macOS tints it to match the menu bar.
-pub fn icon_rgba(size: u32) -> Vec<u8> {
+/// A monochrome note glyph as RGBA: a sheet outline with three text lines in
+/// `color` on transparent.
+pub fn icon_rgba(size: u32, color: [u8; 3]) -> Vec<u8> {
     let s = size as f32 / 36.0;
     let inside = |x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32| {
         x >= x0 * s && x < x1 * s && y >= y0 * s && y < y1 * s
@@ -40,7 +40,7 @@ pub fn icon_rgba(size: u32) -> Vec<u8> {
                 .any(|&ly| inside(fx, fy, 13.0, ly, 23.0, ly + 2.0));
             if (sheet && !hollow && !corner) || line {
                 let i = ((y * size + x) * 4) as usize;
-                rgba[i + 3] = 255;
+                rgba[i..i + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
             }
         }
     }
@@ -52,9 +52,15 @@ mod native {
     use super::{icon_rgba, MENU_IDS};
     use std::cell::RefCell;
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-    use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+    use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
     const ICON_SIZE: u32 = 36;
+    /// macOS recolors the template icon itself; the Windows taskbar is dark
+    /// by default and shows the icon as drawn.
+    #[cfg(target_os = "macos")]
+    const ICON_COLOR: [u8; 3] = [0, 0, 0];
+    #[cfg(windows)]
+    const ICON_COLOR: [u8; 3] = [255, 255, 255];
 
     thread_local! {
         /// The tray icon and its Show/Hide item, whose label follows the notes.
@@ -83,13 +89,19 @@ mod native {
                 &MenuItem::with_id(quit, "Quit Work Notes", true, None),
             ])
             .ok()?;
-            let icon = Icon::from_rgba(icon_rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE).ok()?;
-            let tray = TrayIconBuilder::new()
+            let icon =
+                Icon::from_rgba(icon_rgba(ICON_SIZE, ICON_COLOR), ICON_SIZE, ICON_SIZE).ok()?;
+            let builder = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
-                .with_icon_templated(icon)
-                .with_tooltip("Work Notes")
-                .build()
-                .ok()?;
+                .with_tooltip("Work Notes");
+            #[cfg(target_os = "macos")]
+            let builder = builder.with_icon_templated(icon);
+            #[cfg(windows)]
+            let builder = builder.with_icon(icon);
+            let tray = builder.build().ok()?;
+            // Clicks and hovers on the icon itself are unused. Without a
+            // handler they queue up in an unbounded channel forever.
+            TrayIconEvent::set_event_handler(Some(|_| {}));
             tray.set_visible(visible).ok()?;
             Some((tray, toggle_item))
         };
@@ -165,8 +177,17 @@ mod tests {
     }
 
     #[test]
+    fn icon_is_drawn_in_the_given_color() {
+        let rgba = icon_rgba(36, [255, 255, 255]);
+        assert!(rgba
+            .chunks(4)
+            .filter(|p| p[3] > 0)
+            .all(|p| p[..3] == [255, 255, 255]));
+    }
+
+    #[test]
     fn icon_has_opaque_and_transparent_pixels() {
-        let rgba = icon_rgba(36);
+        let rgba = icon_rgba(36, [0, 0, 0]);
         assert_eq!(rgba.len(), 36 * 36 * 4);
         let pixels: Vec<&[u8]> = rgba.chunks(4).collect();
         assert!(pixels.iter().any(|p| p[3] == 255));
