@@ -88,14 +88,14 @@ mod native {
                 &MenuItem::with_id(new, "New Note", true, None),
                 &MenuItem::with_id(settings, "Settings…", true, None),
                 &PredefinedMenuItem::separator(),
-                &MenuItem::with_id(quit, "Quit Work Notes", true, None),
+                &MenuItem::with_id(quit, "Quit Snap Notes", true, None),
             ])
             .ok()?;
             let icon =
                 Icon::from_rgba(icon_rgba(ICON_SIZE, ICON_COLOR), ICON_SIZE, ICON_SIZE).ok()?;
             let builder = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
-                .with_tooltip("Work Notes");
+                .with_tooltip("Snap Notes");
             #[cfg(target_os = "macos")]
             let builder = builder.with_icon_templated(icon);
             #[cfg(windows)]

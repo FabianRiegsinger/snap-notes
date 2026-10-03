@@ -1,4 +1,4 @@
-# Work Notes — Design Spec
+# Snap Notes — Design Spec
 
 ## Overview
 
