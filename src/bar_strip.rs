@@ -153,6 +153,14 @@ impl<'a> BarStrip<'a> {
         )
     }
 
+    /// Index of the note whose open peek is under `pos`, if any.
+    fn peek_hit(&self, bounds: Rectangle, pos: Point) -> Option<usize> {
+        let (i, _) = self.peek?;
+        let bar = *self.layout_in(bounds).bars.get(i)?;
+        let note = self.notes.get(i)?;
+        peek_target(bar, bounds, note).contains(pos).then_some(i)
+    }
+
     /// How far a slot at magnification `scale` has revealed its glyph (0..=1).
     fn reveal(scale: f32) -> f32 {
         ((scale - 1.0) / (ADD_PLUS_SCALE - 1.0)).clamp(0.0, 1.0)
@@ -440,17 +448,10 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 if let Some(pos) = cursor.position() {
                     let strip = self.layout_in(bounds);
                     // Clicking the open peek opens its note.
-                    if let Some((i, _)) = self.peek {
-                        let target = strip
-                            .bars
-                            .get(i)
-                            .zip(self.notes.get(i))
-                            .map(|(bar, note)| peek_target(*bar, bounds, note));
-                        if target.is_some_and(|rect| rect.contains(pos)) {
-                            shell.publish(Message::BarClicked(i));
-                            shell.capture_event();
-                            return;
-                        }
+                    if let Some(i) = self.peek_hit(bounds, pos) {
+                        shell.publish(Message::BarClicked(i));
+                        shell.capture_event();
+                        return;
                     }
                     for (i, bar_rect) in strip.bars.iter().enumerate() {
                         if bar_rect.contains(pos) {
@@ -503,7 +504,8 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         }
         if let Some(pos) = cursor.position() {
             let strip = self.layout_in(layout.bounds());
-            if strip.bars.iter().any(|bar| bar.contains(pos))
+            if self.peek_hit(layout.bounds(), pos).is_some()
+                || strip.bars.iter().any(|bar| bar.contains(pos))
                 || strip.add_hit_area.contains(pos)
                 || strip.settings_hit_area.contains(pos)
             {
@@ -702,6 +704,31 @@ mod tests {
         let rect = peek_target(bar, strip, &note);
         assert!(rect.width > STRIP_WIDTH);
         assert!(rect.contains(Point::new(bar.x - 100.0, bar.center().y)));
+    }
+
+    #[test]
+    fn peek_hit_covers_open_peek_only() {
+        let notes = [crate::note::Note::new(crate::note::PALETTE[0])];
+        let magnification = MagnificationState::new();
+        let drag = None;
+        let bars = BarSettings::default();
+        let strip = |peek| BarStrip {
+            notes: &notes,
+            magnification: &magnification,
+            drag: &drag,
+            scroll_offset: 0.0,
+            peek,
+            bars: &bars,
+            height_fraction: 1.0,
+            paper_tint: 0.0,
+        };
+        let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
+        let bar = strip(None).layout_in(bounds).bars[0];
+        let on_peek = Point::new(bar.x - 100.0, bar.center().y);
+        assert_eq!(strip(Some((0, 1.0))).peek_hit(bounds, on_peek), Some(0));
+        assert_eq!(strip(None).peek_hit(bounds, on_peek), None);
+        let far = Point::new(bar.x - 600.0, bar.center().y);
+        assert_eq!(strip(Some((0, 1.0))).peek_hit(bounds, far), None);
     }
 
     #[test]
