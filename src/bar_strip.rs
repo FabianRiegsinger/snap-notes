@@ -30,10 +30,28 @@ pub struct StripLayout {
     /// Generous click target for the add button: the full strip width around it.
     pub add_hit_area: Rectangle,
     /// Settings slot below the add button, drawn and magnified like it.
-    pub settings_button: Rectangle,
-    pub settings_hit_area: Rectangle,
+    /// Only where there is no tray menu to open settings from.
+    pub settings_button: Option<Rectangle>,
+    pub settings_hit_area: Option<Rectangle>,
     pub max_scroll: f32,
 }
+
+impl StripLayout {
+    /// Where the settings panel unfolds from: the gear slot, or the add
+    /// button where there is none.
+    pub fn settings_anchor(&self) -> Rectangle {
+        self.settings_button.unwrap_or(self.add_button)
+    }
+
+    /// Bottom edge of the lowest hit area.
+    pub fn hit_bottom(&self) -> f32 {
+        let area = self.settings_hit_area.unwrap_or(self.add_hit_area);
+        area.y + area.height
+    }
+}
+
+/// The strip shows a settings slot only where no tray menu offers Settings.
+pub const SETTINGS_SLOT: bool = !cfg!(any(windows, target_os = "macos"));
 
 /// The vertically centered `fraction` of `bounds` the bars are laid out in.
 pub fn band(bounds: Rectangle, fraction: f32) -> Rectangle {
@@ -59,13 +77,14 @@ fn slot_size(bars: &BarSettings, scale: f32) -> Size {
 /// taller than the bounds, it is top-aligned and scrolled by `scroll_offset`.
 ///
 /// `scale(count)` is the add button's magnification, `scale(count + 1)` the
-/// settings button's.
+/// settings button's (if `settings_slot`).
 pub fn compute_layout(
     count: usize,
     scale: impl Fn(usize) -> f32,
     bounds: Rectangle,
     scroll_offset: f32,
     bars_settings: &BarSettings,
+    settings_slot: bool,
 ) -> StripLayout {
     let gap = bars_settings.gap;
     let heights: Vec<f32> = (0..count)
@@ -75,7 +94,12 @@ pub fn compute_layout(
     let add_gap = if count > 0 { ADD_BUTTON_GAP } else { 0.0 };
     let add_size = slot_size(bars_settings, scale(count));
     let gear_size = slot_size(bars_settings, scale(count + 1));
-    let content_height = bars_height + add_gap + add_size.height + gap + gear_size.height;
+    let gear_height = if settings_slot {
+        gap + gear_size.height
+    } else {
+        0.0
+    };
+    let content_height = bars_height + add_gap + add_size.height + gear_height;
 
     let available = bounds.height - 2.0 * EDGE_PADDING;
     let (mut y, max_scroll) = if content_height <= available {
@@ -100,22 +124,31 @@ pub fn compute_layout(
     }
 
     let add_button = Rectangle::new(Point::new(right - add_size.width, y), add_size);
-    let gear_y = y + add_size.height + gap;
-    let settings_button = Rectangle::new(Point::new(right - gear_size.width, gear_y), gear_size);
-    // The two hit areas meet halfway between the slots.
-    let split = gear_y - gap / 2.0;
     let add_top = y - add_gap / 2.0;
+    let gear_y = y + add_size.height + gap;
+    // With a gear slot the two hit areas meet halfway between the slots.
+    let add_bottom = if settings_slot {
+        gear_y - gap / 2.0
+    } else {
+        y + add_size.height + EDGE_PADDING
+    };
     let add_hit_area = Rectangle::new(
         Point::new(bounds.x, add_top),
-        Size::new(bounds.width, split - add_top),
+        Size::new(bounds.width, add_bottom - add_top),
     );
-    let settings_hit_area = Rectangle::new(
-        Point::new(bounds.x, split),
-        Size::new(
-            bounds.width,
-            gear_y + gear_size.height + EDGE_PADDING - split,
-        ),
-    );
+    let (settings_button, settings_hit_area) = if settings_slot {
+        let button = Rectangle::new(Point::new(right - gear_size.width, gear_y), gear_size);
+        let hit = Rectangle::new(
+            Point::new(bounds.x, add_bottom),
+            Size::new(
+                bounds.width,
+                gear_y + gear_size.height + EDGE_PADDING - add_bottom,
+            ),
+        );
+        (Some(button), Some(hit))
+    } else {
+        (None, None)
+    };
 
     StripLayout {
         bars,
@@ -149,6 +182,7 @@ impl<'a> BarStrip<'a> {
             band(bounds, self.height_fraction),
             self.scroll_offset,
             self.bars,
+            SETTINGS_SLOT,
         )
     }
 
@@ -297,28 +331,29 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         }
 
         let gear_reveal = Self::reveal(self.magnification.scale(count + 1));
-        let gear = strip.settings_button;
-        draw_slot(
-            renderer,
-            gear,
-            idle && cursor.is_over(strip.settings_hit_area),
-            gear_reveal,
-        );
-        if gear_reveal > 0.0 {
-            for quad in settings_glyph(gear) {
-                renderer::Renderer::fill_quad(
-                    renderer,
-                    renderer::Quad {
-                        bounds: quad,
-                        border: iced::Border {
-                            radius: 1.0.into(),
-                            ..Default::default()
+        if let (Some(gear), Some(gear_hit)) = (strip.settings_button, strip.settings_hit_area) {
+            draw_slot(
+                renderer,
+                gear,
+                idle && cursor.is_over(gear_hit),
+                gear_reveal,
+            );
+            if gear_reveal > 0.0 {
+                for quad in settings_glyph(gear) {
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: quad,
+                            border: iced::Border {
+                                radius: 1.0.into(),
+                                ..Default::default()
+                            },
+                            shadow: Default::default(),
+                            snap: true,
                         },
-                        shadow: Default::default(),
-                        snap: true,
-                    },
-                    Color::from_rgba(1.0, 1.0, 1.0, 0.95 * gear_reveal),
-                );
+                        Color::from_rgba(1.0, 1.0, 1.0, 0.95 * gear_reveal),
+                    );
+                }
             }
         }
 
@@ -417,7 +452,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     if strip.add_hit_area.contains(pos) {
                         shell.publish(Message::AddNote);
                         shell.capture_event();
-                    } else if strip.settings_hit_area.contains(pos) {
+                    } else if strip.settings_hit_area.is_some_and(|hit| hit.contains(pos)) {
                         shell.publish(Message::ToggleSettings);
                         shell.capture_event();
                     }
@@ -461,7 +496,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             if self.peek_hit(layout.bounds(), pos).is_some()
                 || strip.bars.iter().any(|bar| bar.contains(pos))
                 || strip.add_hit_area.contains(pos)
-                || strip.settings_hit_area.contains(pos)
+                || strip.settings_hit_area.is_some_and(|hit| hit.contains(pos))
             {
                 return mouse::Interaction::Pointer;
             }
@@ -541,12 +576,13 @@ mod tests {
             bounds(height),
             scroll,
             &BarSettings::default(),
+            true,
         )
     }
 
     fn stack_center(l: &StripLayout) -> f32 {
         let top = l.bars.first().map_or(l.add_button.y, |b| b.y);
-        let bottom = l.settings_button.y + l.settings_button.height;
+        let bottom = l.settings_button.unwrap().y + l.settings_button.unwrap().height;
         (top + bottom) / 2.0
     }
 
@@ -577,7 +613,7 @@ mod tests {
             height: 50.0,
             gap: 20.0,
         };
-        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &bars);
+        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &bars, true);
         assert_eq!(l.bars[0].size(), Size::new(10.0, 50.0));
         let gap = l.bars[1].y - (l.bars[0].y + l.bars[0].height);
         assert!((gap - 20.0).abs() < 0.01);
@@ -589,14 +625,18 @@ mod tests {
         assert!(l.max_scroll > 0.0);
         assert!((l.bars[0].y - EDGE_PADDING).abs() < 0.01);
         let scrolled = layout(40, |_| 1.0, 400.0, 1.0e6);
-        let last = scrolled.settings_button.y + scrolled.settings_button.height;
+        let last = scrolled.settings_button.unwrap().y + scrolled.settings_button.unwrap().height;
         assert!((last - (400.0 - EDGE_PADDING)).abs() < 0.01);
     }
 
     #[test]
     fn bars_keep_margin_from_screen_edge() {
         let l = layout(3, |_| 5.0, 900.0, 0.0);
-        for bar in l.bars.iter().chain([&l.add_button, &l.settings_button]) {
+        for bar in l
+            .bars
+            .iter()
+            .chain([&l.add_button, &l.settings_button.unwrap()])
+        {
             assert!((STRIP_WIDTH - (bar.x + bar.width) - EDGE_MARGIN).abs() < 0.01);
         }
     }
@@ -686,12 +726,32 @@ mod tests {
     }
 
     #[test]
+    fn no_settings_slot_where_the_tray_opens_settings() {
+        for count in [0, 3] {
+            let l = compute_layout(
+                count,
+                |_| 1.0,
+                bounds(900.0),
+                0.0,
+                &BarSettings::default(),
+                false,
+            );
+            assert!(l.settings_button.is_none() && l.settings_hit_area.is_none());
+            let top = l.bars.first().map_or(l.add_button.y, |b| b.y);
+            let bottom = l.add_button.y + l.add_button.height;
+            assert!(((top + bottom) / 2.0 - 450.0).abs() < 0.01, "count {count}");
+            assert!(l.add_hit_area.contains(l.add_button.center()));
+            assert_eq!(l.settings_anchor(), l.add_button);
+        }
+    }
+
+    #[test]
     fn gear_slot_below_add_button_for_any_count() {
         for count in [0, 1, 5] {
             let l = layout(count, |_| 1.0, 900.0, 0.0);
-            let gear = center(&l.settings_button);
-            assert!(l.settings_button.y >= l.add_button.y + l.add_button.height);
-            assert!(l.settings_hit_area.contains(gear), "count {count}");
+            let gear = center(&l.settings_button.unwrap());
+            assert!(l.settings_button.unwrap().y >= l.add_button.y + l.add_button.height);
+            assert!(l.settings_hit_area.unwrap().contains(gear), "count {count}");
             assert!(!l.add_hit_area.contains(gear), "count {count}");
             assert!(l.add_hit_area.contains(center(&l.add_button)));
         }
@@ -701,7 +761,7 @@ mod tests {
     fn magnified_gear_uses_its_own_scale() {
         let d = BarSettings::default();
         let l = layout(2, |i| if i == 3 { 4.0 } else { 1.0 }, 900.0, 0.0);
-        assert!((l.settings_button.width - d.width * 4.0).abs() < 0.01);
+        assert!((l.settings_button.unwrap().width - d.width * 4.0).abs() < 0.01);
         assert_eq!(l.add_button.size(), l.bars[0].size());
     }
 }

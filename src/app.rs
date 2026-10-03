@@ -1,5 +1,7 @@
 use crate::animation::{lerp, morph_frame, AnimationState, MagnificationState, Morph, MorphFrame};
-use crate::bar_strip::{band, compute_layout, peek_target, BarStrip, StripLayout, STRIP_WIDTH};
+use crate::bar_strip::{
+    band, compute_layout, peek_target, BarStrip, StripLayout, SETTINGS_SLOT, STRIP_WIDTH,
+};
 use crate::note::NoteColor;
 use crate::note_panel::{post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
@@ -243,7 +245,7 @@ impl App {
                 }
                 let close_note = self.update(Message::ClosePanel);
                 self.hide_peek();
-                let gear = self.strip_layout().settings_button;
+                let gear = self.strip_layout().settings_anchor();
                 self.settings_anchor_y = gear.y + gear.height / 2.0;
                 self.settings_open = true;
                 self.palette_slot = None;
@@ -862,7 +864,7 @@ impl App {
         let strip = self.strip_layout();
         let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y)
             - self.settings.settings().bars.gap;
-        let bottom = strip.settings_hit_area.y + strip.settings_hit_area.height;
+        let bottom = strip.hit_bottom();
         let over_strip = position.x >= self.window_size.width - STRIP_WIDTH
             && (top..=bottom).contains(&position.y);
         let over_panel = |frame: Option<MorphFrame>| {
@@ -974,7 +976,7 @@ impl App {
         if !self.settings_open {
             return None;
         }
-        let source = self.strip_layout().settings_button;
+        let source = self.strip_layout().settings_anchor();
         let height = (self.window_size.height - 2.0 * NOTE_MARGIN).min(PANEL_MAX_HEIGHT);
         let right = self.window_size.width - STRIP_WIDTH - NOTE_GAP;
         let min_center = NOTE_MARGIN + height / 2.0;
@@ -1013,6 +1015,7 @@ impl App {
             band(bounds, self.strip_fraction()),
             self.scroll_offset,
             &self.settings.settings().bars,
+            SETTINGS_SLOT,
         )
     }
 
@@ -1102,7 +1105,9 @@ impl App {
         strip
             .bars
             .iter()
-            .chain([&strip.add_button, &strip.settings_button])
+            .copied()
+            .chain([strip.add_button])
+            .chain(strip.settings_button)
             .map(|r| r.y + r.height / 2.0)
             .collect()
     }
