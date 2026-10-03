@@ -36,7 +36,7 @@ The menu item IDs are fixed strings (`"toggle"`, `"new"`, `"settings"`, `"quit"`
 - **Creation:** the tray is created on the main thread inside the `window::run` callback on `WindowReady` (the same pattern as `platform::disable_native_shadow`). This guarantees the native application object exists.
 - **Storage:** the `TrayIcon` handle and the toggle `MenuItem` live in a `thread_local!` because they are not `Send`. `tray::set_visible(bool)` adds or removes the icon, and `tray::set_notes_shown(bool)` updates the toggle label. Both run through `window::run` so they stay on the main thread.
 - **Events:** `muda::MenuEvent::receiver()` is polled by an iced subscription every 100 ms. The poll runs only while the tray exists. Each event becomes `Message::TrayMenu(String)`, which is mapped with `message_for`.
-- **Icon:** a 36×36 monochrome PNG at `assets/tray.png`, embedded with `include_bytes!` and decoded with the `png` crate. On macOS it is marked as a template icon (`with_icon_as_template(true)`) so the system tints it for light and dark menu bars. Windows uses the same image.
+- **Icon:** a 36×36 monochrome icon (a rounded note outline with three text lines), drawn in code by `tray::icon_rgba`, so the app needs no image asset or PNG decoder. On macOS it is marked as a template icon (`with_icon_as_template(true)`) so the system tints it for light and dark menu bars. Windows uses the same image.
 - **Failure:** if tray creation fails, the error is ignored and the app keeps running without a tray. The settings still keep the Dock icon on in that case (see Settings).
 
 ## Dock / Taskbar Visibility (`src/platform.rs`)
