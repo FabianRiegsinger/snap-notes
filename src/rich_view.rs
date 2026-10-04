@@ -63,26 +63,30 @@ pub fn view<'a>(
             .color(theme.ink(0.35 * alpha))
             .into();
     }
-    let ink = move |a: f32| theme.ink(a);
-    column(doc.blocks.iter().map(|b| block(b, dir, broken, ink, alpha)))
-        .width(Fill)
-        .into()
+    column(
+        doc.blocks
+            .iter()
+            .map(|b| block(b, dir, broken, theme, alpha)),
+    )
+    .width(Fill)
+    .into()
 }
 
 fn block<'a>(
     block: &'a Block,
     dir: &'a Path,
     broken: &'a HashSet<String>,
-    ink: impl Fn(f32) -> Color + Copy + 'a,
+    theme: theme::Theme,
     alpha: f32,
 ) -> Element<'a, Message> {
+    let ink = move |a: f32| theme.ink(a);
     let size = match block.kind {
         BlockKind::Heading(level) => heading_size(level),
         _ => BODY_SIZE,
     };
     let bold = matches!(block.kind, BlockKind::Heading(_));
     let mono = block.kind == BlockKind::CodeBlock;
-    let styled = || lines(block, size, bold, mono, ink, alpha);
+    let styled = || lines(block, size, bold, mono, theme, alpha);
 
     let content: Element<'a, Message> = match &block.kind {
         BlockKind::Paragraph | BlockKind::Heading(_) => styled(),
@@ -205,7 +209,7 @@ fn lines<'a>(
     size: f32,
     bold: bool,
     mono: bool,
-    ink: impl Fn(f32) -> Color + Copy + 'a,
+    theme: theme::Theme,
     alpha: f32,
 ) -> Element<'a, Message> {
     column(
@@ -216,7 +220,7 @@ fn lines<'a>(
                     .into_iter()
                     .map(|(i, range)| {
                         let s = &block.spans[i];
-                        styled(s, &s.text[range], size, bold, mono, ink, alpha)
+                        styled(s, &s.text[range], size, bold, mono, theme, alpha)
                     })
                     .collect();
                 if spans.is_empty() {
@@ -243,7 +247,7 @@ fn styled<'a>(
     size: f32,
     bold: bool,
     mono: bool,
-    ink: impl Fn(f32) -> Color,
+    theme: theme::Theme,
     alpha: f32,
 ) -> text::Span<'a, String> {
     let font = Font {
@@ -264,14 +268,7 @@ fn styled<'a>(
         },
         ..Font::DEFAULT
     };
-    let color = s
-        .color
-        .map(|c| note_color(c, alpha))
-        .unwrap_or_else(|| ink(0.9 * alpha));
-    let background = s
-        .background
-        .map(|c| note_color(c, alpha))
-        .or_else(|| (s.code && !mono).then(|| ink(0.08 * alpha)));
+    let (color, background) = span_colors(s, mono, theme, alpha);
     text::Span::new(content)
         .size(s.size.unwrap_or(size))
         .font(font)
@@ -282,9 +279,26 @@ fn styled<'a>(
         .link_maybe(s.link.clone())
 }
 
+/// A span's text and background colors.
+fn span_colors(s: &Span, mono: bool, theme: theme::Theme, alpha: f32) -> (Color, Option<Color>) {
+    // Text on a background takes the ink that reads on it (a highlight is
+    // light in both modes); a span's own color always wins.
+    let color = match (s.color, s.background) {
+        (Some(c), _) => note_color(c, alpha),
+        (None, Some(bg)) => theme.text_on(note_color(bg, 1.0), alpha),
+        (None, None) => theme.ink(0.9 * alpha),
+    };
+    let background = s
+        .background
+        .map(|c| note_color(c, alpha))
+        .or_else(|| (s.code && !mono).then(|| theme.ink(0.08 * alpha)));
+    (color, background)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::note::PALETTE;
 
     fn span(text: &str) -> Span {
         Span {
@@ -300,6 +314,31 @@ mod tests {
             pieces,
             vec![(0, vec![(0, 0..1)]), (2, vec![(0, 2..3), (1, 0..1)])]
         );
+    }
+
+    #[test]
+    fn highlight_text_contrasts_in_dark_mode() {
+        let theme = theme::Theme::new(theme::Mode::Dark);
+        let s = Span {
+            background: Some(PALETTE[5]),
+            ..span("hi")
+        };
+        let (fg, bg) = span_colors(&s, false, theme, 1.0);
+        let bg = bg.unwrap();
+        assert!(theme::contrast(fg, bg) >= 4.5);
+
+        // A span's own text color is kept over a background.
+        let s = Span {
+            color: Some(PALETTE[0]),
+            ..s
+        };
+        assert_eq!(
+            span_colors(&s, false, theme, 1.0).0,
+            note_color(PALETTE[0], 1.0)
+        );
+
+        // Without a background the text keeps the softened ink.
+        assert_eq!(span_colors(&span("x"), false, theme, 1.0).0, theme.ink(0.9));
     }
 
     #[test]

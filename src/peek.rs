@@ -5,7 +5,7 @@
 use crate::animation::{ease_out_cubic, lerp};
 use crate::icons::{Icon, ICON_FONT};
 use crate::note::Note;
-use crate::note_panel::morph_paper;
+use crate::note_panel::{morph_paper, PLACEHOLDER};
 use crate::rich;
 use crate::theme::{self, Theme, TITLE_FONT};
 
@@ -27,6 +27,8 @@ const PADDING_BOTTOM: f32 = 14.0;
 const TITLE_SIZE: f32 = theme::TEXT_MD;
 const TITLE_LINE: f32 = 21.0;
 const BODY_SIZE: f32 = theme::TEXT_SM;
+/// The open note's body font, for the body, confirmation and buttons.
+const BODY_FONT: Font = theme::BODY_FONT;
 /// The open note's body line height, as whole pixels for layout.
 const BODY_LINE: f32 = (theme::TEXT_SM * theme::BODY_LINE_HEIGHT + 0.5).floor();
 /// Space between the title and the divider, and the divider and the body.
@@ -227,7 +229,15 @@ fn draw_button(
         },
         fill,
     );
-    draw_label(renderer, label, rect, Font::DEFAULT, 13.0, text_color, clip);
+    draw_label(
+        renderer,
+        label,
+        rect,
+        BODY_FONT,
+        theme::TEXT_SM,
+        text_color,
+        clip,
+    );
 }
 
 /// Draws the peek: the bar's color turning into paper, then the title,
@@ -387,8 +397,8 @@ pub fn draw_peek(
         draw_text(
             "Delete this note?".into(),
             layout.body,
-            Font::DEFAULT,
-            13.0,
+            BODY_FONT,
+            theme::TEXT_SM,
             BODY_LINE,
             LineHeight::Relative(theme::BODY_LINE_HEIGHT),
             1,
@@ -396,9 +406,9 @@ pub fn draw_peek(
         );
     } else if text.lines.is_empty() {
         draw_text(
-            "Write something…".into(),
+            PLACEHOLDER.into(),
             layout.body,
-            Font::DEFAULT,
+            BODY_FONT,
             BODY_SIZE,
             BODY_LINE,
             LineHeight::Relative(theme::BODY_LINE_HEIGHT),
@@ -416,7 +426,7 @@ pub fn draw_peek(
         draw_text(
             content,
             at,
-            Font::DEFAULT,
+            BODY_FONT,
             BODY_SIZE,
             BODY_LINE,
             LineHeight::Relative(theme::BODY_LINE_HEIGHT),
@@ -493,6 +503,11 @@ mod tests {
             (theme::TEXT_SM * theme::BODY_LINE_HEIGHT).round()
         );
         assert_eq!(TITLE_SIZE, theme::TEXT_MD);
+    }
+
+    #[test]
+    fn peek_uses_bundled_font() {
+        assert_eq!(BODY_FONT, theme::BODY_FONT);
     }
 
     #[test]

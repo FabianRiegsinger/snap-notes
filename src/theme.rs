@@ -59,6 +59,17 @@ impl Theme {
         Color { a: alpha, ..base }
     }
 
+    /// Text on a colored `bg`: whichever ink, dark or light, contrasts more
+    /// with it, so a highlight stays readable in both modes.
+    pub fn text_on(&self, bg: Color, alpha: f32) -> Color {
+        let ink = if contrast(LIGHT_INK, bg) >= contrast(DARK_INK, bg) {
+            LIGHT_INK
+        } else {
+            DARK_INK
+        };
+        Color { a: alpha, ..ink }
+    }
+
     /// The note's paper color: softened in light mode, deepened in dark
     /// mode, shaded by `tint` and always readable under the ink.
     pub fn paper(&self, color: NoteColor, tint: f32) -> Color {
@@ -236,6 +247,19 @@ mod tests {
                     let ratio = contrast(theme.ink(1.0), theme.paper(*c, tint));
                     assert!(ratio >= 4.5, "{mode:?} {:?} tint {tint}: {ratio}", c.rgba);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn text_on_backgrounds_meets_aa() {
+        for mode in MODES {
+            let theme = Theme::new(mode);
+            for c in PALETTE {
+                let [r, g, b, _] = c.rgba;
+                let bg = Color::from_rgb(r, g, b);
+                let ratio = contrast(theme.text_on(bg, 1.0), bg);
+                assert!(ratio >= 4.5, "{mode:?} {:?}: {ratio}", c.rgba);
             }
         }
     }
