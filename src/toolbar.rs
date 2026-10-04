@@ -120,6 +120,7 @@ pub fn toolbar<'a>(
                         18.0,
                         false,
                         Message::FormatApplied(Format::Color(r * 10 + i)),
+                        theme,
                     )
                 }))
                 .spacing(2)

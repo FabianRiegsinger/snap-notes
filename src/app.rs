@@ -1058,6 +1058,7 @@ impl App {
                         .into(),
                 );
                 let panel = settings_panel(SettingsView {
+                    theme: self.theme,
                     settings: self.settings.settings(),
                     size: rect.size(),
                     morph_progress: self.settings_morph.progress(),

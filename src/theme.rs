@@ -29,7 +29,6 @@ pub const RADIUS_BAR: f32 = 3.0;
 pub const RADIUS_CONTROL: f32 = 4.0;
 pub const RADIUS_SURFACE: f32 = 10.0;
 
-#[allow(dead_code)] // part of the type scale; no surface uses it yet
 pub const TEXT_XS: f32 = 12.0;
 pub const TEXT_SM: f32 = 14.0;
 pub const TEXT_MD: f32 = 16.0;
@@ -113,7 +112,6 @@ impl Theme {
         self.ink(if active { 0.45 } else { 0.25 })
     }
 
-    #[allow(dead_code)] // used from Task 7 on
     pub fn card(&self) -> Color {
         if self.is_dark() {
             Color::from_rgb(0.16, 0.155, 0.15)
@@ -177,6 +175,17 @@ pub fn mix(a: Color, b: Color, t: f32) -> Color {
         a.b + (b.b - a.b) * t,
         a.a + (b.a - a.a) * t,
     )
+}
+
+/// `fg` composited over `bg` (alpha blending); the result is opaque when
+/// `bg` is.
+pub fn over(fg: Color, bg: Color) -> Color {
+    let a = fg.a + bg.a * (1.0 - fg.a);
+    if a <= 0.0 {
+        return Color::TRANSPARENT;
+    }
+    let ch = |f: f32, b: f32| (f * fg.a + b * bg.a * (1.0 - fg.a)) / a;
+    Color::from_rgba(ch(fg.r, bg.r), ch(fg.g, bg.g), ch(fg.b, bg.b), a)
 }
 
 /// Moves `c` toward its own gray by `amount` (0 keeps it, 1 is fully gray).

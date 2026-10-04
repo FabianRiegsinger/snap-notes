@@ -489,7 +489,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         let mut col = column![grip, header, divider];
         if color_picker_open {
             col = col.push(
-                container(color_picker(&note.color, palette))
+                container(color_picker(&note.color, palette, theme))
                     .padding(Padding::ZERO.left(14).bottom(6)),
             );
         }
