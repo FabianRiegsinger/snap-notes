@@ -175,16 +175,21 @@ fn data_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Hands `url` to the system's default opener; failures are ignored.
-fn open_url(url: &str) {
-    use std::process::Command;
-    #[cfg(target_os = "macos")]
-    let spawned = Command::new("open").arg(url).spawn();
-    #[cfg(windows)]
-    let spawned = Command::new("cmd").args(["/c", "start", "", url]).spawn();
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let spawned = Command::new("xdg-open").arg(url).spawn();
-    drop(spawned);
+/// Seeds a fresh store with template notes and deletes images no note uses.
+/// If the notes file exists but could not be loaded, neither happens: the
+/// file is not overwritten and its images are kept.
+fn prepare_store(store: &mut NoteStore, palette: &[NoteColor]) {
+    if store.load_failed() {
+        eprintln!("could not load the notes file; leaving it and its images untouched");
+        return;
+    }
+    if store.notes().is_empty() {
+        store.seed_templates(palette);
+        let _ = store.save();
+    }
+    if let Err(e) = images::sweep(store.dir(), store.notes()) {
+        eprintln!("could not clean up note images: {e}");
+    }
 }
 
 impl App {
@@ -195,13 +200,7 @@ impl App {
             platform::set_dock_policy(false);
         }
         let mut store = NoteStore::load(data_dir().join("notes.json"));
-        if store.notes().is_empty() {
-            store.seed_templates(&settings.settings().palette);
-            let _ = store.save();
-        }
-        if let Err(e) = images::sweep(store.dir(), store.notes()) {
-            eprintln!("could not clean up note images: {e}");
-        }
+        prepare_store(&mut store, &settings.settings().palette);
         (
             Self::new(store, settings),
             window::oldest().then(|id| match id {
@@ -462,8 +461,8 @@ impl App {
                 }
             }
             Message::LinkClicked(url) => {
-                if rich_view::is_openable(&url) {
-                    open_url(&url);
+                if let Some(url) = rich_view::openable(&url) {
+                    platform::open_url(url);
                 }
             }
             Message::ClosePanel => {
@@ -1492,13 +1491,63 @@ mod tests {
     }
 
     #[test]
+    fn failed_load_keeps_notes_file_and_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes.json");
+        std::fs::write(&notes, "{not json").unwrap();
+        let image = images::import_png(dir.path(), &[255; 16], 2, 2).unwrap();
+        let mut store = NoteStore::load(notes.clone());
+        prepare_store(&mut store, &crate::note::PALETTE);
+        assert!(dir.path().join(&image).is_file());
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "{not json");
+        assert!(store.notes().is_empty());
+    }
+
+    #[test]
+    fn fresh_store_is_seeded_and_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = images::import_png(dir.path(), &[255; 16], 2, 2).unwrap();
+        let mut store = NoteStore::load(dir.path().join("notes.json"));
+        prepare_store(&mut store, &crate::note::PALETTE);
+        assert_eq!(store.notes().len(), 3);
+        assert!(!dir.path().join(&image).exists());
+    }
+
+    #[test]
+    fn jpeg_gif_and_webp_images_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("images")).unwrap();
+        let mut content = String::new();
+        for ext in ["jpg", "gif", "webp"] {
+            let rel = format!("images/{}.{ext}", Uuid::new_v4());
+            image::RgbImage::from_pixel(2, 2, image::Rgb([200, 30, 30]))
+                .save(dir.path().join(&rel))
+                .unwrap();
+            content.push_str(&format!("![]({rel})\n\n"));
+        }
+        let app = app_with_note(&dir, &content);
+        assert_eq!(app.doc.blocks.len(), 3);
+        assert!(app.broken_images.is_empty(), "{:?}", app.broken_images);
+    }
+
+    #[test]
     fn link_scheme_filter() {
-        use crate::rich_view::is_openable;
-        assert!(is_openable("https://a"));
-        assert!(is_openable("http://a"));
-        assert!(is_openable("mailto:a@b"));
-        assert!(!is_openable("file:///etc"));
-        assert!(!is_openable("javascript:x"));
+        use crate::rich_view::openable;
+        assert!(openable("https://a").is_some());
+        assert!(openable("http://a").is_some());
+        assert!(openable("mailto:a@b").is_some());
+        assert!(openable("file:///etc").is_none());
+        assert!(openable("javascript:x").is_none());
+    }
+
+    #[test]
+    fn openable_returns_the_trimmed_url_it_checked() {
+        use crate::rich_view::openable;
+        assert_eq!(
+            openable("  \thttps://a/?x=1&y=2 "),
+            Some("https://a/?x=1&y=2")
+        );
+        assert_eq!(openable(" javascript:x"), None);
     }
 
     #[test]

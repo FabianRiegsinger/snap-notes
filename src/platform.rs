@@ -169,3 +169,39 @@ pub fn cursor_in_window(window: &dyn iced::window::Window) -> Option<iced::Point
 pub fn cursor_in_window(_window: &dyn iced::window::Window) -> Option<iced::Point> {
     None
 }
+
+/// Hands `url` to the system's default opener, as a single argument and
+/// never through a shell; failures are ignored.
+#[cfg(target_os = "macos")]
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
+/// Hands `url` to the system's default opener via `ShellExecuteW`, never
+/// through `cmd`; failures are ignored.
+#[cfg(windows)]
+pub fn open_url(url: &str) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (operation, file) = (wide("open"), wide(url));
+    // SAFETY: both strings are NUL-terminated and outlive the call; the
+    // other pointers may be null.
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Hands `url` to the system's default opener, as a single argument and
+/// never through a shell; failures are ignored.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}

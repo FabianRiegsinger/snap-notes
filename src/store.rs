@@ -18,21 +18,31 @@ pub struct NoteStore {
     path: PathBuf,
     dirty: bool,
     last_mark: Option<Instant>,
+    load_failed: bool,
 }
 
 impl NoteStore {
     pub fn load(path: PathBuf) -> Self {
-        let notes = fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<StoreFile>(&s).ok())
-            .map(|f| f.notes)
-            .unwrap_or_default();
+        let (notes, load_failed) = match fs::read_to_string(&path) {
+            Ok(s) => match serde_json::from_str::<StoreFile>(&s) {
+                Ok(f) => (f.notes, false),
+                Err(_) => (Vec::new(), true),
+            },
+            Err(e) => (Vec::new(), e.kind() != io::ErrorKind::NotFound),
+        };
         Self {
             notes,
             path,
             dirty: false,
             last_mark: None,
+            load_failed,
         }
+    }
+
+    /// The notes file exists but could not be read or parsed, so the store
+    /// started empty.
+    pub fn load_failed(&self) -> bool {
+        self.load_failed
     }
 
     pub fn save(&self) -> io::Result<()> {
@@ -152,6 +162,22 @@ mod tests {
     fn load_missing_file_returns_empty_store() {
         let store = NoteStore::load(PathBuf::from("/nonexistent/notes.json"));
         assert!(store.notes().is_empty());
+    }
+
+    #[test]
+    fn corrupt_file_sets_load_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.json");
+        fs::write(&path, "{not json").unwrap();
+        let store = NoteStore::load(path);
+        assert!(store.load_failed());
+        assert!(store.notes().is_empty());
+    }
+
+    #[test]
+    fn missing_file_does_not_set_load_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!NoteStore::load(dir.path().join("notes.json")).load_failed());
     }
 
     #[test]

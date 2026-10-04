@@ -14,12 +14,15 @@ const LIST_INDENT: f32 = 16.0;
 /// Space below each block; part of the block, so clicks there still hit it.
 const BLOCK_GAP: f32 = 6.0;
 
-/// Whether a link may be handed to the system opener.
-pub fn is_openable(url: &str) -> bool {
-    let lower = url.trim_start().to_ascii_lowercase();
+/// The trimmed link if it may be handed to the system opener (`http`,
+/// `https` and `mailto` only); pass on exactly this string.
+pub fn openable(url: &str) -> Option<&str> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
     ["http://", "https://", "mailto:"]
         .iter()
         .any(|scheme| lower.starts_with(scheme))
+        .then_some(url)
 }
 
 fn heading_size(level: u8) -> f32 {
