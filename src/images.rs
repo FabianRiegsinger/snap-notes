@@ -65,13 +65,20 @@ pub fn resolve(dir: &Path, rel: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Whether `rel` resolves to an image file that can be decoded (its header
-/// is read, not the whole image).
+/// Images with more pixels than this are treated as broken rather than decoded.
+const MAX_PIXELS: u64 = 50_000_000;
+
+/// Whether `rel` resolves to an image file that can be decoded and is not
+/// too large (only its header is read, not the whole image).
 pub fn is_usable(dir: &Path, rel: &str) -> bool {
-    resolve(dir, rel).is_some_and(|path| image::image_dimensions(path).is_ok())
+    resolve(dir, rel).is_some_and(|path| {
+        image::image_dimensions(path)
+            .is_ok_and(|(width, height)| u64::from(width) * u64::from(height) <= MAX_PIXELS)
+    })
 }
 
-/// Deletes `<uuid>.<ext>` files in `images/` that no note references; returns how many.
+/// Deletes `<uuid>.<ext>` files in `images/` that no note references; returns
+/// how many. A file that can't be read or removed is logged and skipped.
 pub fn sweep(dir: &Path, notes: &[Note]) -> io::Result<usize> {
     let entries = match fs::read_dir(dir.join(DIR)) {
         Ok(entries) => entries,
@@ -80,9 +87,20 @@ pub fn sweep(dir: &Path, notes: &[Note]) -> io::Result<usize> {
     };
     let mut removed = 0;
     for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                eprintln!("image sweep skipped an entry: {e}");
+                continue;
+            }
+        };
+        match entry.file_type() {
+            Ok(kind) if kind.is_file() => {}
+            Ok(_) => continue,
+            Err(e) => {
+                eprintln!("image sweep skipped {}: {e}", entry.path().display());
+                continue;
+            }
         }
         let path = entry.path();
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -101,8 +119,10 @@ pub fn sweep(dir: &Path, notes: &[Note]) -> io::Result<usize> {
         }
         let needle = format!("{DIR}/{name}");
         if !notes.iter().any(|n| n.content.contains(&needle)) {
-            fs::remove_file(&path)?;
-            removed += 1;
+            match fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(e) => eprintln!("image sweep could not remove {}: {e}", path.display()),
+            }
         }
     }
     Ok(removed)
@@ -165,6 +185,29 @@ mod tests {
         assert_eq!(reader.info().width, 2);
     }
 
+    /// A PNG that claims `width`x`height` pixels; only its header is real.
+    fn png_header(dir: &Path, width: u32, height: u32) -> String {
+        let rel = format!("images/{}.png", Uuid::new_v4());
+        fs::create_dir_all(dir.join("images")).unwrap();
+        let mut bytes = Vec::new();
+        let mut enc = png::Encoder::new(&mut bytes, width, height);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.set_depth(png::BitDepth::One);
+        let mut writer = enc.write_header().unwrap();
+        // An empty data chunk: enough for the header to be read.
+        writer.write_chunk(png::chunk::IDAT, &[]).unwrap();
+        drop(writer);
+        fs::write(dir.join(&rel), bytes).unwrap();
+        rel
+    }
+
+    #[test]
+    fn huge_images_are_not_usable() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(is_usable(d.path(), &png_header(d.path(), 5_000, 10_000)));
+        assert!(!is_usable(d.path(), &png_header(d.path(), 10_000, 10_000)));
+    }
+
     #[test]
     fn resolve_accepts_imported() {
         let d = tempfile::tempdir().unwrap();
@@ -213,6 +256,25 @@ mod tests {
         fs::write(d.path().join("images/mine.png"), "x").unwrap();
         assert_eq!(sweep(d.path(), &[]).unwrap(), 0);
         assert!(d.path().join("images/mine.png").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_skips_files_it_cannot_remove() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let a = import(d.path(), &src_file(d.path(), "a.png", b"a")).unwrap();
+        let images = d.path().join("images");
+        fs::set_permissions(&images, fs::Permissions::from_mode(0o555)).unwrap();
+        // Root ignores the mode; nothing would fail to remove.
+        let writable = File::create(images.join("probe")).is_ok();
+        let swept = sweep(d.path(), &[]);
+        fs::set_permissions(&images, fs::Permissions::from_mode(0o755)).unwrap();
+        if writable {
+            return;
+        }
+        assert_eq!(swept.unwrap(), 0);
+        assert!(d.path().join(&a).exists());
     }
 
     #[test]

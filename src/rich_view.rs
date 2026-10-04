@@ -39,8 +39,8 @@ fn note_color(color: NoteColor, alpha: f32) -> Color {
 }
 
 /// The rendered note body: one clickable element per block.
-/// Image references in `broken` (missing or undecodable, checked when the
-/// note was parsed) show a placeholder; nothing here touches the disk.
+/// Image references in `broken` (missing, undecodable or too large, checked
+/// when the note was parsed) show a placeholder; nothing here touches the disk.
 pub fn view<'a>(
     doc: &'a Doc,
     dir: &'a Path,

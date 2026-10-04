@@ -174,7 +174,18 @@ pub fn cursor_in_window(_window: &dyn iced::window::Window) -> Option<iced::Poin
 /// never through a shell; failures are ignored.
 #[cfg(target_os = "macos")]
 pub fn open_url(url: &str) {
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    spawn_and_reap(std::process::Command::new("open").arg(url));
+}
+
+/// Starts `command` and waits for it on a thread, so it never lingers as a
+/// zombie; failures are ignored.
+#[cfg(not(windows))]
+fn spawn_and_reap(command: &mut std::process::Command) {
+    if let Ok(mut child) = command.spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 /// Hands `url` to the system's default opener via `ShellExecuteW`, never
@@ -203,5 +214,5 @@ pub fn open_url(url: &str) {
 /// never through a shell; failures are ignored.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn open_url(url: &str) {
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    spawn_and_reap(std::process::Command::new("xdg-open").arg(url));
 }
