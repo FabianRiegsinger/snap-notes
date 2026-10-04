@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Largest image file accepted for import.
-#[allow(dead_code)] // used from Task 6 on
 pub const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 const EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
@@ -30,7 +29,6 @@ fn store(dir: &Path, ext: &str, write: impl FnOnce(&Path) -> io::Result<()>) -> 
 }
 
 /// Copies `src` into `images/` under a fresh uuid name and returns `images/<uuid>.<ext>`.
-#[allow(dead_code)] // used from Task 6 on
 pub fn import(dir: &Path, src: &Path) -> io::Result<String> {
     let ext = src
         .extension()
@@ -45,7 +43,6 @@ pub fn import(dir: &Path, src: &Path) -> io::Result<String> {
 }
 
 /// Encodes RGBA pixels as a PNG into `images/` and returns `images/<uuid>.png`.
-#[allow(dead_code)] // used from Task 6 on
 pub fn import_png(dir: &Path, rgba: &[u8], width: u32, height: u32) -> io::Result<String> {
     store(dir, "png", |tmp| {
         let file = io::BufWriter::new(fs::File::create(tmp)?);

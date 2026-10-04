@@ -71,6 +71,13 @@ pub enum Message {
     ToggleTextColorPicker,
     /// Wrap the editor selection in this format's markup.
     FormatApplied(rich::Format),
+    /// A file was dropped on the window; images are added to the open note.
+    ImageDropped(PathBuf),
+    /// Cmd/Ctrl+V in the editor: adds a clipboard image, if there is one.
+    ImagePasted,
+    /// The toolbar's image button: opens the file dialog.
+    PickImage,
+    ImagePicked(Option<PathBuf>),
     ColorChosen(NoteColor),
     DragStart(usize, f32),
     DragMove(f32),
@@ -554,6 +561,26 @@ impl App {
                 self.color_picker_open = false;
             }
             Message::FormatApplied(format) => return self.apply_format(format),
+            Message::ImageDropped(path) | Message::ImagePicked(Some(path)) => {
+                if self.active_note.is_some() {
+                    match images::import(&self.data_dir, &path) {
+                        Ok(rel) => return self.insert_image(&rel),
+                        Err(e) => eprintln!("image import failed: {e}"),
+                    }
+                }
+            }
+            Message::ImagePicked(None) => {}
+            Message::ImagePasted => return self.paste_image(),
+            Message::PickImage => {
+                // The dialog steals focus, which must not fold the note.
+                self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
+                let dialog = rfd::AsyncFileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+                    .pick_file();
+                return Task::perform(dialog, |file| {
+                    Message::ImagePicked(file.map(|f| f.path().to_path_buf()))
+                });
+            }
             Message::ColorChosen(color) => {
                 if let Some(id) = self.active_note {
                     if let Some(note) = self.store.note_mut(id) {
@@ -705,6 +732,10 @@ impl App {
                     }
                     keyboard::Key::Character("n") if modifiers.command() => {
                         return self.update(Message::AddNote)
+                    }
+                    // The editor still gets the key for a text paste.
+                    keyboard::Key::Character("v") if modifiers.command() && self.editing => {
+                        return self.update(Message::ImagePasted)
                     }
                     _ => {}
                 }
@@ -866,6 +897,9 @@ impl App {
                 Some(Message::MouseButton(false))
             }
             iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowUnfocused),
+            iced::Event::Window(window::Event::FileDropped(path)) => {
+                Some(Message::ImageDropped(path))
+            }
             _ => None,
         });
 
@@ -955,6 +989,72 @@ impl App {
         }
         self.store.mark_dirty();
         focus_body()
+    }
+
+    /// Adds a clipboard image to the open note. Text on the clipboard wins:
+    /// then nothing happens and the editor pastes it. Reads and encodes
+    /// synchronously, which is fine for screenshots.
+    fn paste_image(&mut self) -> Task<Message> {
+        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+            return Task::none();
+        };
+        if clipboard.get_text().is_ok_and(|t| !t.is_empty()) {
+            return Task::none();
+        }
+        let Ok(img) = clipboard.get_image() else {
+            return Task::none();
+        };
+        let (Ok(width), Ok(height)) = (u32::try_from(img.width), u32::try_from(img.height)) else {
+            return Task::none();
+        };
+        match images::import_png(&self.data_dir, &img.bytes, width, height) {
+            Ok(rel) => self.insert_image(&rel),
+            Err(e) => {
+                eprintln!("image paste failed: {e}");
+                Task::none()
+            }
+        }
+    }
+
+    /// Puts `![](rel)` on its own line at the cursor (editing) or at the end
+    /// of the open note (rendered).
+    fn insert_image(&mut self, rel: &str) -> Task<Message> {
+        let Some(id) = self.active_note else {
+            return Task::none();
+        };
+        let block = format!("![]({rel})");
+        let (text, end) = match (&self.editor_content, self.editing) {
+            (Some(content), true) => {
+                let text = content.text();
+                let text = text.trim_end_matches('\n');
+                let at = content.cursor().position;
+                rich::insert_block(text, rich::offset_of(text, at.line, at.column), &block)
+            }
+            _ => {
+                let Some(note) = self.store.notes().iter().find(|n| n.id == id) else {
+                    return Task::none();
+                };
+                rich::insert_block(&note.content, note.content.len(), &block)
+            }
+        };
+        let mut rebuilt = text_editor::Content::with_text(&text);
+        let (line, column) = rich::position_of(&text, end);
+        rebuilt.move_to(text_editor::Cursor {
+            position: text_editor::Position { line, column },
+            selection: None,
+        });
+        self.editor_content = Some(rebuilt);
+        if let Some(note) = self.store.note_mut(id) {
+            note.content = text;
+            note.updated_at = chrono::Utc::now();
+        }
+        self.store.mark_dirty();
+        self.reparse();
+        if self.editing {
+            focus_body()
+        } else {
+            Task::none()
+        }
     }
 
     /// Re-parses the open note for the rendered view and checks its images
@@ -1538,6 +1638,101 @@ mod tests {
         let _ = app.update(Message::FormatApplied(crate::rich::Format::Bold));
         assert_eq!(app.store.notes()[0].content, "word");
         assert!(!app.store.is_dirty());
+    }
+
+    fn png_file(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        let mut bytes = Vec::new();
+        let mut enc = png::Encoder::new(&mut bytes, 1, 1);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()
+            .unwrap()
+            .write_image_data(&[0, 0, 0, 255])
+            .unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn image_ref(content: &str) -> &str {
+        let start = content.find("![](").unwrap();
+        &content[start..content[start..].find(')').unwrap() + start + 1]
+    }
+
+    #[test]
+    fn dropped_image_appends_in_render_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hi");
+        let src = png_file(&dir, "p.png");
+        let _ = app.update(Message::ImageDropped(src));
+        let content = app.store.notes()[0].content.clone();
+        let rel = content
+            .strip_prefix("hi\n![](")
+            .and_then(|r| r.strip_suffix(')'))
+            .unwrap();
+        assert!(rel.starts_with("images/") && rel.ends_with(".png"));
+        assert!(dir.path().join(rel).is_file());
+        assert!(app
+            .doc
+            .blocks
+            .iter()
+            .any(|b| matches!(b.kind, BlockKind::Image { .. })));
+        assert!(!app.editing);
+        assert!(app.store.is_dirty());
+    }
+
+    #[test]
+    fn dropped_image_inserts_at_cursor_in_edit_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "a\nb");
+        let _ = app.update(Message::BodyClicked(Some(1)));
+        let _ = app.update(Message::ImageDropped(png_file(&dir, "p.png")));
+        let content = app.store.notes()[0].content.clone();
+        let r = image_ref(&content);
+        assert_eq!(content, format!("a\n{r}\nb"));
+        assert!(app.editing);
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (1, r.len()));
+    }
+
+    #[test]
+    fn dropped_image_mid_line_goes_on_own_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        app.editor_content
+            .as_mut()
+            .unwrap()
+            .move_to(text_editor::Cursor {
+                position: text_editor::Position { line: 0, column: 1 },
+                selection: None,
+            });
+        let _ = app.update(Message::ImageDropped(png_file(&dir, "p.png")));
+        let content = app.store.notes()[0].content.clone();
+        assert_eq!(content, format!("a\n{}\nb", image_ref(&content)));
+    }
+
+    #[test]
+    fn dropped_non_image_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hi");
+        let txt = dir.path().join("a.txt");
+        std::fs::write(&txt, "x").unwrap();
+        let _ = app.update(Message::ImageDropped(txt));
+        assert_eq!(app.store.notes()[0].content, "hi");
+        assert!(!app.store.is_dirty());
+    }
+
+    #[test]
+    fn drop_without_open_note_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.store.add_note(&crate::note::PALETTE);
+        app.store.did_save();
+        let _ = app.update(Message::ImageDropped(png_file(&dir, "p.png")));
+        assert_eq!(app.store.notes()[0].content, "");
+        assert!(!app.store.is_dirty());
+        assert!(!dir.path().join("images").exists());
     }
 
     #[test]

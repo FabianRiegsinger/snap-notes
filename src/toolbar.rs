@@ -55,6 +55,7 @@ pub fn toolbar<'a>(palette: &'a [NoteColor], color_open: bool, alpha: f32) -> El
         apply("H", Format::Highlight),
         sizes,
         apply("🔗", Format::Link),
+        icon_button("🖼", Message::PickImage, alpha),
     ]
     .spacing(2)
     .align_y(iced::Alignment::Center);

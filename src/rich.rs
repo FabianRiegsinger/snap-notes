@@ -663,10 +663,35 @@ pub fn position_of(content: &str, offset: usize) -> (usize, usize) {
     (line, offset - line_start)
 }
 
+/// Inserts `block` on its own line at byte `offset` and returns the new text
+/// with the offset right after the block.
+pub fn insert_block(content: &str, offset: usize, block: &str) -> (String, usize) {
+    let offset = snap(content, offset);
+    let (before, after) = content.split_at(offset);
+    let lead = if before.is_empty() || before.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let trail = if after.is_empty() { "" } else { "\n" };
+    let end = offset + lead.len() + block.len();
+    (format!("{before}{lead}{block}{trail}{after}"), end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::note::PALETTE;
+
+    #[test]
+    fn insert_block_puts_block_on_its_own_line() {
+        assert_eq!(insert_block("a\nb", 2, "X"), ("a\nX\nb".into(), 3));
+        assert_eq!(insert_block("ab", 1, "X"), ("a\nX\nb".into(), 3));
+        assert_eq!(insert_block("hi", 2, "X"), ("hi\nX".into(), 4));
+        assert_eq!(insert_block("hi\n", 3, "X"), ("hi\nX".into(), 4));
+        assert_eq!(insert_block("", 0, "X"), ("X".into(), 1));
+        assert_eq!(insert_block("ab", 0, "X"), ("X\nab".into(), 1));
+    }
 
     fn texts(doc: &Doc) -> Vec<String> {
         doc.blocks
