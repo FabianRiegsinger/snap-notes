@@ -38,6 +38,7 @@ pub(crate) const TITLE_FONT: Font = Font {
 
 const BODY_SCROLL_ID: &str = "note-body-scroll";
 const BODY_EDITOR_ID: &str = "note-body-editor";
+const TITLE_ID: &str = "note-title";
 /// Space kept below the last line when following the caret (part of the
 /// editor's bottom padding).
 const CARET_MARGIN: f32 = 12.0;
@@ -253,6 +254,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         Space::new().width(Fill).height(Fill).into()
     } else {
         let title = text_input("Title", &note.title)
+            .id(TITLE_ID)
             .on_input(Message::TitleEdited)
             .size(16)
             .padding(0)
@@ -462,16 +464,40 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         .into()
 }
 
-/// The body editor's key bindings: Cmd/Ctrl+V asks the app to paste (text or
-/// image) while the editor has focus; everything else is iced's default.
+/// Whether the note's title field has keyboard focus.
+pub(crate) fn title_focused() -> iced::Task<bool> {
+    iced::widget::operation::is_focused(TITLE_ID)
+}
+
+/// `Undo` for Cmd/Ctrl+Z, `Redo` for Cmd/Ctrl+Shift+Z (and Ctrl+Y off
+/// macOS), given a key's character and the held modifiers.
+pub(crate) fn history_key(key: &str, modifiers: keyboard::Modifiers) -> Option<Message> {
+    if !modifiers.command() {
+        return None;
+    }
+    match key {
+        "z" | "Z" if modifiers.shift() => Some(Message::Redo),
+        "z" | "Z" => Some(Message::Undo),
+        "y" | "Y" if cfg!(not(target_os = "macos")) => Some(Message::Redo),
+        _ => None,
+    }
+}
+
+/// The body editor's key bindings while it has focus: Cmd/Ctrl+V asks the
+/// app to paste (text or image), and the undo/redo keys step its history;
+/// everything else is iced's default.
 fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    if !matches!(press.status, text_editor::Status::Focused { .. }) {
+        return text_editor::Binding::from_key_press(press);
+    }
     match press.key.as_ref() {
-        keyboard::Key::Character("v")
-            if press.modifiers.command()
-                && matches!(press.status, text_editor::Status::Focused { .. }) =>
-        {
+        keyboard::Key::Character("v") if press.modifiers.command() => {
             Some(text_editor::Binding::Custom(Message::PasteRequested))
         }
+        keyboard::Key::Character(c) => match history_key(c, press.modifiers) {
+            Some(step) => Some(text_editor::Binding::Custom(step)),
+            None => text_editor::Binding::from_key_press(press),
+        },
         _ => text_editor::Binding::from_key_press(press),
     }
 }
@@ -494,6 +520,32 @@ mod tests {
             text: Some(ch.into()),
             status,
         }
+    }
+
+    #[test]
+    fn undo_and_redo_bindings_when_focused() {
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        assert!(matches!(
+            body_key_binding(press("z", true, focused)),
+            Some(text_editor::Binding::Custom(Message::Undo))
+        ));
+        let mut shift_z = press("Z", true, focused);
+        shift_z.modifiers |= keyboard::Modifiers::SHIFT;
+        assert!(matches!(
+            body_key_binding(shift_z),
+            Some(text_editor::Binding::Custom(Message::Redo))
+        ));
+        assert!(body_key_binding(press("z", true, text_editor::Status::Active)).is_none());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn ctrl_y_redoes_off_macos() {
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        assert!(matches!(
+            body_key_binding(press("y", true, focused)),
+            Some(text_editor::Binding::Custom(Message::Redo))
+        ));
     }
 
     #[test]

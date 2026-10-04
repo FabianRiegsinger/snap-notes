@@ -2,6 +2,7 @@ mod animation;
 mod app;
 mod bar_strip;
 mod color_picker;
+mod history;
 mod images;
 mod note;
 mod note_panel;

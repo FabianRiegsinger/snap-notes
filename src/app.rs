@@ -2,6 +2,7 @@ use crate::animation::{morph_frame, MagnificationState, Morph, MorphFrame};
 use crate::bar_strip::{
     band, compute_layout, peek_target, BarStrip, StripLayout, SETTINGS_SLOT, STRIP_WIDTH,
 };
+use crate::history::History;
 use crate::images;
 use crate::note::NoteColor;
 use crate::note_panel::{focus_body, post_it, PostIt};
@@ -79,6 +80,10 @@ pub enum Message {
     /// Text from the system clipboard, read for the note with this id;
     /// ignored unless that note is still open and being edited.
     ClipboardText(Uuid, String),
+    /// Cmd/Ctrl+Z: steps the open note's body back.
+    Undo,
+    /// Cmd+Shift+Z (or Ctrl+Y off macOS): steps forward again.
+    Redo,
     /// The toolbar's image button: opens the file dialog.
     PickImage,
     /// The file dialog opened for the note with this id returned; ignored
@@ -168,6 +173,8 @@ pub struct App {
     data_dir: PathBuf,
     /// Image references in `doc` that are missing or can't be decoded.
     broken_images: HashSet<String>,
+    /// Undo/redo for the open note's body: its text and cursor.
+    history: History<(String, text_editor::Cursor)>,
     morph: Morph,
     anchor_y: f32,
     pending_delete: Option<Uuid>,
@@ -292,6 +299,7 @@ impl App {
             doc: Doc { blocks: Vec::new() },
             data_dir,
             broken_images: HashSet::new(),
+            history: History::default(),
             morph,
             anchor_y: 0.0,
             pending_delete: None,
@@ -462,6 +470,17 @@ impl App {
             Message::NoteEdited(action) => {
                 if let Some(content) = &mut self.editor_content {
                     let is_edit = action.is_edit();
+                    if is_edit {
+                        let typing = matches!(
+                            action,
+                            text_editor::Action::Edit(text_editor::Edit::Insert(c))
+                                if !c.is_whitespace()
+                        );
+                        let before = (content.text(), content.cursor());
+                        self.history.record(before, typing, Instant::now());
+                    } else {
+                        self.history.break_step();
+                    }
                     content.perform(action);
                     if is_edit {
                         if let Some(id) = self.active_note {
@@ -518,6 +537,10 @@ impl App {
                     return Task::none();
                 };
                 if let Some(content) = rich::toggle_task(&note.content, line) {
+                    if let Some(editor) = &self.editor_content {
+                        let before = (editor.text(), editor.cursor());
+                        self.history.record(before, false, Instant::now());
+                    }
                     self.editor_content = Some(text_editor::Content::with_text(&content));
                     note.content = content;
                     note.updated_at = chrono::Utc::now();
@@ -629,6 +652,8 @@ impl App {
                 return self.apply_paste(ClipboardContent::Text(text));
             }
             Message::ClipboardText(..) => {}
+            Message::Undo => return self.step_history(false),
+            Message::Redo => return self.step_history(true),
             Message::PickImage => {
                 let Some(id) = self.active_note else {
                     return Task::none();
@@ -793,6 +818,19 @@ impl App {
                     }
                     keyboard::Key::Character("n") if modifiers.command() => {
                         return self.update(Message::AddNote)
+                    }
+                    // In edit mode the body editor's own key binding handles
+                    // undo/redo; the title field ignores them, so skip it here.
+                    keyboard::Key::Character(c) if !self.editing && self.active_note.is_some() => {
+                        if let Some(step) = crate::note_panel::history_key(c, modifiers) {
+                            return crate::note_panel::title_focused().then(move |focused| {
+                                if focused {
+                                    Task::none()
+                                } else {
+                                    Task::done(step.clone())
+                                }
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -989,6 +1027,7 @@ impl App {
 
         let switching = self.active_note.is_some_and(|active| active != id);
         self.editor_content = Some(text_editor::Content::with_text(&note.content));
+        self.history.clear();
         self.editing = note.content.trim().is_empty();
         self.hide_peek();
         // A note and the settings never show at the same time.
@@ -1025,6 +1064,8 @@ impl App {
         let cursor = content.cursor();
         // The untrimmed text, so markup typed on a fresh last line lands there.
         let text = content.text();
+        self.history
+            .record((text.clone(), cursor), false, Instant::now());
         let offset = |p: text_editor::Position| rich::offset_of(&text, p.line, p.column);
         let head = offset(cursor.position);
         let anchor = cursor.selection.map_or(head, offset);
@@ -1099,6 +1140,36 @@ impl App {
         }
     }
 
+    /// Undoes (or with `forward`, redoes) one step of the open note's body.
+    fn step_history(&mut self, forward: bool) -> Task<Message> {
+        let (Some(id), Some(content)) = (self.active_note, &self.editor_content) else {
+            return Task::none();
+        };
+        let current = (content.text(), content.cursor());
+        let target = if forward {
+            self.history.redo(current)
+        } else {
+            self.history.undo(current)
+        };
+        let Some((text, cursor)) = target else {
+            return Task::none();
+        };
+        let mut restored = text_editor::Content::with_text(&text);
+        restored.move_to(cursor);
+        self.editor_content = Some(restored);
+        if let Some(note) = self.store.note_mut(id) {
+            note.content = text.trim_end_matches('\n').to_string();
+            note.updated_at = chrono::Utc::now();
+        }
+        self.store.mark_dirty();
+        if self.editing {
+            focus_body()
+        } else {
+            self.reparse();
+            Task::none()
+        }
+    }
+
     /// Puts `![](rel)` on its own line at the cursor (editing) or at the end
     /// of the open note (rendered).
     fn insert_image(&mut self, rel: &str) -> Task<Message> {
@@ -1106,6 +1177,10 @@ impl App {
             return Task::none();
         };
         let block = format!("![]({rel})");
+        if let Some(editor) = &self.editor_content {
+            let before = (editor.text(), editor.cursor());
+            self.history.record(before, false, Instant::now());
+        }
         let (text, end) = match (&self.editor_content, self.editing) {
             (Some(content), true) => {
                 // The untrimmed text, so a block typed below blank lines stays there.
@@ -1173,6 +1248,7 @@ impl App {
         self.editing = false;
         self.doc = Doc { blocks: Vec::new() };
         self.broken_images.clear();
+        self.history.clear();
         self.color_picker_open = false;
         self.text_color_picker_open = false;
         self.confirm_delete = None;
@@ -1916,6 +1992,117 @@ mod tests {
         let task = app.apply_paste(classify(None, None));
         assert!(task.units() > 0, "no clipboard read was started");
         assert_eq!(app.store.notes()[0].content, "ab");
+    }
+
+    fn type_char(app: &mut App, c: char) {
+        let _ = app.update(Message::NoteEdited(text_editor::Action::Edit(
+            text_editor::Edit::Insert(c),
+        )));
+    }
+
+    fn cmd_z(shift: bool) -> Message {
+        use keyboard::key::{NativeCode, Physical};
+        let key = keyboard::Key::Character(if shift { "Z" } else { "z" }.into());
+        let mut modifiers = keyboard::Modifiers::COMMAND;
+        if shift {
+            modifiers |= keyboard::Modifiers::SHIFT;
+        }
+        Message::Key(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: Physical::Unidentified(NativeCode::Unidentified),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn undo_reverts_typing_and_redo_restores_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(None));
+        type_char(&mut app, 'c');
+        type_char(&mut app, 'd');
+        assert_eq!(app.store.notes()[0].content, "abcd");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "ab");
+        assert_eq!(cursor_of(&app).column, 2);
+        let _ = app.update(Message::Redo);
+        assert_eq!(app.store.notes()[0].content, "abcd");
+        let _ = app.update(Message::Redo);
+        assert_eq!(app.store.notes()[0].content, "abcd");
+    }
+
+    #[test]
+    fn words_undo_one_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "");
+        let _ = app.update(Message::BodyClicked(None));
+        for c in "hi you".chars() {
+            type_char(&mut app, c);
+        }
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "hi ");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "hi");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "");
+    }
+
+    #[test]
+    fn undo_reverts_toolbar_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hello world");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let _ = app.update(Message::NoteEdited(text_editor::Action::SelectWord));
+        let _ = app.update(Message::FormatApplied(rich::Format::Bold));
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "hello world");
+    }
+
+    #[test]
+    fn undo_reverts_checkbox_toggle_in_rendered_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "- [ ] t");
+        assert!(!app.editing);
+        let _ = app.update(Message::ToggleTask(0));
+        assert_eq!(app.store.notes()[0].content, "- [x] t");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "- [ ] t");
+        assert!(matches!(
+            app.doc.blocks[0].kind,
+            BlockKind::ListItem {
+                task: Some(false),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reopening_a_note_starts_a_fresh_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(None));
+        type_char(&mut app, 'c');
+        let _ = app.update(Message::ClosePanel);
+        settle(&mut app);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "abc");
+    }
+
+    #[test]
+    fn cmd_z_in_rendered_view_checks_title_focus_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "- [ ] t");
+        let _ = app.update(Message::ToggleTask(0));
+        let task = app.update(cmd_z(false));
+        // Undo waits for the focus check, so nothing changed yet.
+        assert!(task.units() > 0);
+        assert_eq!(app.store.notes()[0].content, "- [x] t");
     }
 
     #[test]
