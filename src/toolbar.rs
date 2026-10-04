@@ -42,14 +42,20 @@ fn button_icons() -> [Icon; 9] {
     ]
 }
 
+/// How far the toolbar rises while it fades in.
+const SLIDE: f32 = 6.0;
+
 /// The formatting row shown above the editor, with the text color grid
-/// below it while `color_open`. `alpha` fades it like the header controls.
+/// below it while `color_open`. `alpha` fades it like the header controls;
+/// `fade` (eased, 0..=1) fades it in further and slides it up into place.
 pub fn toolbar<'a>(
     palette: &'a [NoteColor],
     color_open: bool,
     alpha: f32,
+    fade: f32,
     theme: theme::Theme,
 ) -> Element<'a, Message> {
+    let alpha = alpha * fade;
     let tool = |glyph: Icon, message: Message| -> Element<'a, Message> {
         pressable(
             icon(glyph, TEXT_SM),
@@ -129,8 +135,15 @@ pub fn toolbar<'a>(
             .collect();
         col = col.push(container(column(rows).spacing(2)));
     }
+    // The slide moves space from above to below, so the body never jumps.
     container(col)
-        .padding(Padding::new(4.0).left(14).right(14))
+        .padding(
+            Padding::new(4.0)
+                .left(14)
+                .right(14)
+                .top(4.0 + SLIDE * (1.0 - fade))
+                .bottom(4.0 + SLIDE * fade),
+        )
         .into()
 }
 

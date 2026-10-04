@@ -1,4 +1,4 @@
-use crate::animation::{morph_frame, MagnificationState, Morph, MorphFrame};
+use crate::animation::{ease_out_cubic, morph_frame, MagnificationState, Morph, MorphFrame};
 use crate::bar_strip::{
     band, compute_layout, peek_target, BarStrip, StripLayout, SETTINGS_SLOT, STRIP_WIDTH,
 };
@@ -35,6 +35,10 @@ const CURSOR_POLL: Duration = Duration::from_millis(50);
 const PEEK_POLL: Duration = Duration::from_millis(100);
 /// How long focus changes caused by switching the Dock icon are ignored.
 const FOCUS_GRACE: Duration = Duration::from_millis(500);
+/// A deleted note's bar shrinks away in this long (at speed 1).
+const COLLAPSE_SECS: f32 = 0.18;
+/// Toolbar and body fade in this long after switching edit/render mode.
+const MODE_FADE_SECS: f32 = 0.12;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -194,6 +198,11 @@ pub struct App {
     morph: Morph,
     anchor_y: f32,
     pending_delete: Option<Uuid>,
+    /// A deleted note whose bar is shrinking away; it is removed from the
+    /// store once the bar is gone.
+    collapsing: Option<(Uuid, Morph)>,
+    /// Fades the toolbar and body in after switching edit/render mode.
+    mode_fade: Morph,
     color_picker_open: bool,
     text_color_picker_open: bool,
     note_hovered: bool,
@@ -317,6 +326,7 @@ impl App {
         let morph = Morph::new(s.motion.speed);
         let peek = Morph::peek(s.motion.speed);
         let settings_morph = Morph::new(s.motion.speed);
+        let mode_fade = Self::settled_fade(s.motion.speed);
         let window_size = Size::new(Self::docked_width(s, false), 600.0);
         let data_dir = store.dir().to_path_buf();
         Self {
@@ -337,6 +347,8 @@ impl App {
             morph,
             anchor_y: 0.0,
             pending_delete: None,
+            collapsing: None,
+            mode_fade,
             color_picker_open: false,
             text_color_picker_open: false,
             note_hovered: false,
@@ -567,12 +579,13 @@ impl App {
                         self.confirm_delete = Some(id);
                         return self.update(Message::ConfirmDelete(true));
                     }
-                    self.store.delete_note(id);
-                    self.store.mark_dirty();
-                    self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
+                    self.start_collapse(id);
                 }
             }
             Message::BodyPressed(offset) => {
+                if !self.editing && self.editor_content.is_some() {
+                    self.restart_mode_fade();
+                }
                 if let Some(content) = &mut self.editor_content {
                     self.editing = true;
                     let (line, column) = rich::position_of(&content.text(), offset);
@@ -590,6 +603,9 @@ impl App {
                 }
             }
             Message::BodyClicked(line) => {
+                if !self.editing && self.editor_content.is_some() {
+                    self.restart_mode_fade();
+                }
                 if let Some(content) = &mut self.editor_content {
                     self.editing = true;
                     match line {
@@ -611,6 +627,7 @@ impl App {
                     self.editing = false;
                     self.text_color_picker_open = false;
                     self.reparse();
+                    self.restart_mode_fade();
                 }
             }
             Message::ToggleTask(line) => {
@@ -683,8 +700,14 @@ impl App {
                     dt,
                     &self.settings.settings().hover,
                 );
-                let morph_active =
-                    self.morph.tick(dt) | self.peek.tick(dt) | self.settings_morph.tick(dt);
+                let morph_active = self.morph.tick(dt)
+                    | self.peek.tick(dt)
+                    | self.settings_morph.tick(dt)
+                    | self.mode_fade.tick(dt);
+                let collapse_active = self.collapsing.as_mut().is_some_and(|(_, m)| m.tick(dt));
+                if self.collapsing.is_some() && !collapse_active {
+                    self.finish_collapse();
+                }
                 if self.peek.is_closed() {
                     self.peek_note = None;
                 }
@@ -693,7 +716,7 @@ impl App {
                     self.settings_open = false;
                     self.palette_slot = None;
                 }
-                self.animating = mag_active || morph_active;
+                self.animating = mag_active || morph_active || collapse_active;
                 if !self.animating {
                     self.last_tick = None;
                 }
@@ -780,6 +803,7 @@ impl App {
                     }
                 }
             }
+            Message::DragStart(index, _) if self.is_collapsing(index) => {}
             Message::DragStart(index, origin_y) => {
                 self.hide_peek();
                 // Origin is the press position, so a click without movement
@@ -868,6 +892,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Quit => {
+                self.finish_collapse();
                 let _ = self.store.save();
                 let _ = self.settings.save();
                 std::process::exit(0);
@@ -1000,6 +1025,7 @@ impl App {
             open_index: self
                 .active_note
                 .and_then(|id| self.store.notes().iter().position(|n| n.id == id)),
+            collapse: self.collapse(),
         })
         .width(Fill)
         .height(Fill)
@@ -1039,6 +1065,7 @@ impl App {
                         text_color_picker_open: self.text_color_picker_open,
                         hovered: self.note_hovered,
                         dragging: self.note_drag.is_some(),
+                        mode_fade: self.mode_fade.progress(),
                     });
                     let note_view = mouse_area(note_view)
                         .on_enter(Message::NoteHovered(true))
@@ -1118,6 +1145,10 @@ impl App {
             return Task::none();
         };
         let id = note.id;
+        // A deleted note's bar can't be opened while it collapses.
+        if self.is_collapsing(index) {
+            return Task::none();
+        }
 
         if self.active_note == Some(id) && self.morph.is_opening() {
             return self.update(Message::ClosePanel);
@@ -1382,12 +1413,67 @@ impl App {
         self.confirm_delete = None;
         self.note_resize = None;
         if let Some(id) = self.pending_delete.take() {
-            self.store.delete_note(id);
-            let _ = self.store.save();
-            self.store.did_save();
-            self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
+            self.start_collapse(id);
         }
         self.dock_window()
+    }
+
+    /// Starts shrinking the deleted note's bar away. A collapse still
+    /// running for another note finishes at once.
+    fn start_collapse(&mut self, id: Uuid) {
+        self.finish_collapse();
+        let mut morph = Morph::with_secs(COLLAPSE_SECS, self.settings.settings().motion.speed);
+        morph.restart();
+        self.collapsing = Some((id, morph));
+        if self.peek_note == Some(id) || self.hover_bar.is_some_and(|(hovered, _)| hovered == id) {
+            self.hide_peek();
+        }
+        self.animating = true;
+    }
+
+    /// Removes the collapsing note (if any) for good.
+    fn finish_collapse(&mut self) {
+        let Some((id, _)) = self.collapsing.take() else {
+            return;
+        };
+        let index = self.store.notes().iter().position(|n| n.id == id);
+        // A bar dragged below the removed one moves up a slot.
+        if let (Some(drag), Some(index)) = (&mut self.drag, index) {
+            if drag.bar_index > index {
+                drag.bar_index -= 1;
+            }
+        }
+        self.store.delete_note(id);
+        let _ = self.store.save();
+        self.store.did_save();
+        self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
+    }
+
+    /// The collapsing bar's index and how far it has shrunk (eased).
+    fn collapse(&self) -> Option<(usize, f32)> {
+        let (id, morph) = self.collapsing.as_ref()?;
+        let index = self.store.notes().iter().position(|n| n.id == *id)?;
+        Some((index, ease_out_cubic(morph.progress())))
+    }
+
+    fn is_collapsing(&self, index: usize) -> bool {
+        self.collapse().is_some_and(|(c, _)| c == index)
+    }
+
+    /// Fades the toolbar and body in again after an edit/render switch; a
+    /// switch mid-fade starts over from transparent.
+    fn restart_mode_fade(&mut self) {
+        self.mode_fade.restart();
+        self.animating = true;
+    }
+
+    /// A mode fade that has already finished, so a note opens fully visible.
+    fn settled_fade(speed: f32) -> Morph {
+        let mut fade = Morph::with_secs(MODE_FADE_SECS, speed);
+        fade.open();
+        // Any step at least as long as the fade lands exactly on 1.
+        fade.tick(2.0 * MODE_FADE_SECS / speed.max(0.01));
+        fade
     }
 
     /// Window width for the current state. With passthrough the window always
@@ -1529,6 +1615,7 @@ impl App {
                     .bars
                     .iter()
                     .position(|bar| (bar.y..=bar.y + bar.height).contains(&y))
+                    .filter(|i| !self.is_collapsing(*i))
                     .map(|i| self.store.notes()[i].id)
             }
             _ => None,
@@ -1626,6 +1713,7 @@ impl App {
             self.scroll_offset,
             &self.settings.settings().bars,
             SETTINGS_SLOT,
+            self.collapse(),
         )
     }
 
@@ -1664,6 +1752,10 @@ impl App {
         self.morph.set_speed(speed);
         self.peek.set_speed(speed);
         self.settings_morph.set_speed(speed);
+        self.mode_fade.set_speed(speed);
+        if let Some((_, collapse)) = &mut self.collapsing {
+            collapse.set_speed(speed);
+        }
         self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
         self.animating = true;
         self.dock_window()
@@ -1788,8 +1880,10 @@ mod tests {
         assert_eq!(app.peek_confirm_delete, Some(id));
         assert_eq!(app.store.notes().len(), 1);
         let _ = app.update(Message::PeekDeleteConfirmed);
+        settle(&mut app);
         assert!(app.store.notes().is_empty());
-        assert!(app.store.is_dirty());
+        // Deleting saves at once, like deleting the open note.
+        assert!(!app.store.is_dirty());
         assert_eq!(app.peek_note, None);
         assert_eq!(app.peek_confirm_delete, None);
     }
@@ -1866,6 +1960,104 @@ mod tests {
         let _ = app.update(Message::BarClicked(0));
         settle(&mut app);
         app
+    }
+
+    /// Runs frame ticks until `done` holds (at most 240).
+    fn tick_until(app: &mut App, done: impl Fn(&App) -> bool) {
+        let mut now = Instant::now();
+        for _ in 0..240 {
+            if done(app) {
+                return;
+            }
+            now += Duration::from_millis(16);
+            let _ = app.update(Message::Tick(now));
+        }
+        panic!("condition never held");
+    }
+
+    #[test]
+    fn deleting_collapses_the_bar_before_removing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "first");
+        app.store.add_note(&crate::note::PALETTE);
+        let id = app.store.notes()[0].id;
+        let _ = app.update(Message::DeleteRequested);
+        let _ = app.update(Message::ConfirmDelete(true));
+        tick_until(&mut app, |a| a.active_note.is_none());
+        assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(id));
+        assert!(app.store.notes().iter().any(|n| n.id == id));
+        settle(&mut app);
+        assert!(app.store.notes().iter().all(|n| n.id != id));
+        assert_eq!(app.store.notes().len(), 1);
+        assert!(app.collapsing.is_none());
+    }
+
+    #[test]
+    fn peek_delete_collapses_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        let id = app.store.notes()[0].id;
+        let _ = app.update(Message::PeekDeleteRequested(0));
+        let _ = app.update(Message::PeekDeleteConfirmed);
+        assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(id));
+        assert_eq!(app.store.notes().len(), 1);
+        assert!(app.animating);
+        settle(&mut app);
+        assert!(app.store.notes().is_empty());
+        assert!(app.collapsing.is_none());
+    }
+
+    #[test]
+    fn second_delete_finishes_running_collapse() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        let b = app.store.add_note(&crate::note::PALETTE);
+        let a = app.store.notes()[0].id;
+        let _ = app.update(Message::PeekDeleteRequested(0));
+        let _ = app.update(Message::PeekDeleteConfirmed);
+        assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(a));
+
+        app.peek_note = Some(b);
+        let _ = app.update(Message::PeekDeleteRequested(1));
+        let _ = app.update(Message::PeekDeleteConfirmed);
+        assert!(app.store.notes().iter().all(|n| n.id != a));
+        assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(b));
+        assert_eq!(app.store.notes().len(), 1);
+    }
+
+    #[test]
+    fn collapsing_bar_ignores_clicks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        app.store.add_note(&crate::note::PALETTE);
+        let _ = app.update(Message::PeekDeleteRequested(0));
+        let _ = app.update(Message::PeekDeleteConfirmed);
+        let bar = app.strip_layout().bars[0];
+        let _ = app.update(Message::BarClicked(0));
+        assert_eq!(app.active_note, None);
+        // A real click on the bar arrives as a drag without movement.
+        let _ = app.update(Message::DragStart(0, bar.center().y));
+        let _ = app.update(Message::DragEnd);
+        assert_eq!(app.active_note, None);
+        let _ = app.update(Message::StripHover(Some(bar.center().y)));
+        assert_eq!(app.hover_bar, None);
+        // The other bar still opens.
+        let _ = app.update(Message::BarClicked(1));
+        assert!(app.active_note.is_some());
+    }
+
+    #[test]
+    fn mode_switch_fade_reaches_full_opacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hello");
+        assert_eq!(app.mode_fade.progress(), 1.0);
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        assert_eq!(app.mode_fade.progress(), 0.0);
+        let _ = app.update(Message::EditorBlurred);
+        let _ = app.update(Message::BodyClicked(None));
+        assert!(app.animating);
+        settle(&mut app);
+        assert_eq!(app.mode_fade.progress(), 1.0);
     }
 
     fn escape() -> Message {

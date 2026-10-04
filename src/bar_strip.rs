@@ -94,6 +94,9 @@ fn slot_size(bars: &BarSettings, scale: f32) -> Size {
 ///
 /// `scale(count)` is the add button's magnification, `scale(count + 1)` the
 /// settings button's (if `settings_slot`).
+///
+/// `collapse` is a deleted bar's index and how far it has collapsed (0..=1):
+/// its height and one gap next to it shrink by that share.
 pub fn compute_layout(
     count: usize,
     scale: impl Fn(usize) -> f32,
@@ -101,12 +104,27 @@ pub fn compute_layout(
     scroll_offset: f32,
     bars_settings: &BarSettings,
     settings_slot: bool,
+    collapse: Option<(usize, f32)>,
 ) -> StripLayout {
     let gap = bars_settings.gap;
+    let shrink = |i: usize| match collapse {
+        Some((c, t)) if c == i => 1.0 - t.clamp(0.0, 1.0),
+        _ => 1.0,
+    };
     let heights: Vec<f32> = (0..count)
-        .map(|i| bars_settings.height * scale(i))
+        .map(|i| bars_settings.height * scale(i) * shrink(i))
         .collect();
-    let bars_height: f32 = heights.iter().sum::<f32>() + gap * count.saturating_sub(1) as f32;
+    // Gap `i` sits below bar `i`; the last bar collapses into the gap above.
+    let gaps: Vec<f32> = (0..count.saturating_sub(1))
+        .map(|i| {
+            let owner = match collapse {
+                Some((c, _)) if c + 1 == count => i + 1,
+                _ => i,
+            };
+            gap * shrink(owner)
+        })
+        .collect();
+    let bars_height: f32 = heights.iter().sum::<f32>() + gaps.iter().sum::<f32>();
     let add_gap = if count > 0 { ADD_BUTTON_GAP } else { 0.0 };
     let add_size = slot_size(bars_settings, scale(count));
     let gear_size = slot_size(bars_settings, scale(count + 1));
@@ -133,10 +151,7 @@ pub fn compute_layout(
     for (i, h) in heights.iter().enumerate() {
         let w = bars_settings.width * scale(i);
         bars.push(Rectangle::new(Point::new(right - w, y), Size::new(w, *h)));
-        y += h + gap;
-    }
-    if count > 0 {
-        y += add_gap - gap;
+        y += h + gaps.get(i).copied().unwrap_or(add_gap);
     }
 
     let add_button = Rectangle::new(Point::new(right - add_size.width, y), add_size);
@@ -193,6 +208,8 @@ pub struct BarStrip<'a> {
     pub theme: theme::Theme,
     /// Index of the open (or opening) note's bar.
     pub open_index: Option<usize>,
+    /// Bar index of a deleted note and how far its bar has collapsed.
+    pub collapse: Option<(usize, f32)>,
 }
 
 impl<'a> BarStrip<'a> {
@@ -204,6 +221,7 @@ impl<'a> BarStrip<'a> {
             self.scroll_offset,
             self.bars,
             SETTINGS_SLOT,
+            self.collapse,
         )
     }
 
@@ -358,7 +376,11 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     renderer::Quad {
                         bounds: Rectangle::new(
                             Point::new(rect.x + corner, rect.y),
-                            Size::new((rect.width - 2.0 * corner).max(0.0), 1.0),
+                            Size::new(
+                                (rect.width - 2.0 * corner).max(0.0),
+                                // A collapsing bar takes its highlight with it.
+                                rect.height.min(1.0),
+                            ),
                         ),
                         border: Default::default(),
                         shadow: Default::default(),
@@ -663,6 +685,7 @@ mod tests {
             scroll,
             &BarSettings::default(),
             true,
+            None,
         )
     }
 
@@ -696,6 +719,22 @@ mod tests {
     }
 
     #[test]
+    fn collapsing_bar_shrinks_with_progress() {
+        let d = BarSettings::default();
+        let with = |collapse| compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &d, true, collapse);
+        let full = with(None);
+        let half = with(Some((1, 0.5)));
+        assert!((half.bars[1].height - d.height / 2.0).abs() < 0.01);
+        let gone = with(Some((1, 1.0)));
+        assert_eq!(gone.bars[1].height, 0.0);
+        let extent = |l: &StripLayout| {
+            let gear = l.settings_button.unwrap();
+            gear.y + gear.height - l.bars[0].y
+        };
+        assert!((extent(&full) - extent(&gone) - (d.height + d.gap)).abs() < 0.01);
+    }
+
+    #[test]
     fn bars_are_spaced_by_gap() {
         let l = layout(3, |_| 1.0, 900.0, 0.0);
         let gap = l.bars[1].y - (l.bars[0].y + l.bars[0].height);
@@ -709,7 +748,7 @@ mod tests {
             height: 50.0,
             gap: 20.0,
         };
-        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &bars, true);
+        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &bars, true, None);
         assert_eq!(l.bars[0].size(), Size::new(10.0, 50.0));
         let gap = l.bars[1].y - (l.bars[0].y + l.bars[0].height);
         assert!((gap - 20.0).abs() < 0.01);
@@ -814,6 +853,7 @@ mod tests {
             peek_confirm: false,
             theme: theme::Theme::default(),
             open_index: None,
+            collapse: None,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -834,6 +874,7 @@ mod tests {
                 0.0,
                 &BarSettings::default(),
                 false,
+                None,
             );
             assert!(l.settings_button.is_none() && l.settings_hit_area.is_none());
             let top = l.bars.first().map_or(l.add_button.y, |b| b.y);

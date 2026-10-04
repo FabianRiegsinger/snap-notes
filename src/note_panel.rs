@@ -114,6 +114,8 @@ pub struct PostIt<'a> {
     pub text_color_picker_open: bool,
     pub hovered: bool,
     pub dragging: bool,
+    /// Progress (0..=1) of the fade after switching edit/render mode.
+    pub mode_fade: f32,
 }
 
 /// A button whose background darkens while pressed and whose label sinks
@@ -300,7 +302,11 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         text_color_picker_open,
         hovered,
         dragging,
+        mode_fade,
     } = p;
+    let mode_eased = ease_out_cubic(mode_fade);
+    // The body that just appeared fades in after a mode switch.
+    let body_a = a * mode_eased;
     let controls = if hovered || dragging || color_picker_open || confirm_delete {
         a
     } else {
@@ -434,29 +440,29 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                         .style(move |_theme: &Theme, _status| text_editor::Style {
                             background: Color::TRANSPARENT.into(),
                             border: Border::default(),
-                            placeholder: theme.ink(0.35 * a),
-                            value: theme.ink(0.9 * a),
-                            selection: theme.ink(0.18 * a),
+                            placeholder: theme.ink(0.35 * body_a),
+                            value: theme.ink(0.9 * body_a),
+                            selection: theme.ink(0.18 * body_a),
                         });
-                    body_scrollable(pass_wheel(editor), theme, hovered, a)
+                    body_scrollable(pass_wheel(editor), theme, hovered, body_a)
                 }),
                 theme,
                 true,
-                a,
+                body_a,
             )
         } else {
             // Content inside a scrollable can't fill its height, so the
             // click target for the space below the text sits behind it.
-            let rendered = container(rich_view::view(doc, data_dir, broken_images, theme, a))
+            let rendered = container(rich_view::view(doc, data_dir, broken_images, theme, body_a))
                 .padding(body_padding());
             stack![
                 mouse_area(Space::new().width(Fill).height(Fill))
                     .on_press(Message::BodyClicked(None)),
                 body_inset(
-                    body_scrollable(rendered, theme, hovered, a),
+                    body_scrollable(rendered, theme, hovered, body_a),
                     theme,
                     false,
-                    a
+                    body_a
                 ),
             ]
             .width(Fill)
@@ -494,7 +500,13 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             );
         }
         if editing {
-            col = col.push(toolbar(palette, text_color_picker_open, controls, theme));
+            col = col.push(toolbar(
+                palette,
+                text_color_picker_open,
+                controls,
+                mode_eased,
+                theme,
+            ));
         }
         col = col.push(body);
 

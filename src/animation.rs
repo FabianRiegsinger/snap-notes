@@ -132,7 +132,6 @@ impl Morph {
     }
 
     /// One duration for both directions; `speed` 2 runs twice as fast.
-    #[allow(dead_code)] // used from Task 3 on
     pub fn with_secs(secs: f32, speed: f32) -> Self {
         Self::with_durations(secs, secs, speed)
     }
