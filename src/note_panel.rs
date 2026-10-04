@@ -2,19 +2,25 @@ use crate::app::Message;
 use crate::color_picker::color_picker;
 use crate::note::{Note, NoteColor};
 use crate::pass_wheel::pass_wheel;
+use crate::press_through::press_through;
+use crate::rich::Doc;
+use crate::rich_view;
+use crate::toolbar::toolbar;
 
 use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, Scrollable};
 use iced::advanced::widget::{Id, Operation};
 use iced::Rectangle;
+use std::collections::HashSet;
+use std::path::Path;
 
 use iced::widget::{
-    button, column, container, mouse_area, responsive, row, scrollable, text, text_editor,
+    button, column, container, mouse_area, responsive, row, scrollable, stack, text, text_editor,
     text_input, Space,
 };
 use iced::{
     font, gradient, Background, Border, Color, Element, Fill, Font, Length, Padding, Shadow, Size,
 };
-use iced::{mouse, Theme, Vector};
+use iced::{keyboard, mouse, Theme, Vector};
 
 /// Named explicitly: with the generic family, the bold face can fall back to a
 /// monospace font.
@@ -32,9 +38,15 @@ pub(crate) const TITLE_FONT: Font = Font {
 
 const BODY_SCROLL_ID: &str = "note-body-scroll";
 const BODY_EDITOR_ID: &str = "note-body-editor";
+const TITLE_ID: &str = "note-title";
 /// Space kept below the last line when following the caret (part of the
 /// editor's bottom padding).
 const CARET_MARGIN: f32 = 12.0;
+
+/// Puts the keyboard focus into the body editor.
+pub(crate) fn focus_body() -> iced::Task<Message> {
+    iced::widget::operation::focus(BODY_EDITOR_ID)
+}
 
 /// Scrolls the note body just enough to show its last line, and only if that
 /// line has gone below the visible area. Runs against the real layout, so it
@@ -89,11 +101,20 @@ pub struct PostIt<'a> {
     /// Header controls stay this faint until the note is hovered.
     pub idle_control_alpha: f32,
     pub content: &'a text_editor::Content,
+    /// The body shows the editor; otherwise it shows `doc` rendered.
+    pub editing: bool,
+    pub doc: &'a Doc,
+    /// Folder the note's `images/` references resolve against.
+    pub data_dir: &'a Path,
+    /// Image references in `doc` that can't be shown.
+    pub broken_images: &'a HashSet<String>,
     pub size: Size,
     pub morph_progress: f32,
     pub content_alpha: f32,
     pub confirm_delete: bool,
     pub color_picker_open: bool,
+    /// The toolbar's text color grid is open.
+    pub text_color_picker_open: bool,
     pub hovered: bool,
     pub dragging: bool,
 }
@@ -115,7 +136,11 @@ pub(crate) fn shade(note: &Note, amount: f32, alpha: f32) -> Color {
     Color::from_rgba(mix(r), mix(g), mix(b), alpha)
 }
 
-fn icon_button<'a>(label: &'a str, message: Message, alpha: f32) -> Element<'a, Message> {
+pub(crate) fn icon_button<'a>(
+    label: &'a str,
+    message: Message,
+    alpha: f32,
+) -> Element<'a, Message> {
     button(text(label).size(14))
         .on_press(message)
         .padding(Padding::new(3.0).left(7).right(7))
@@ -134,6 +159,61 @@ fn icon_button<'a>(label: &'a str, message: Message, alpha: f32) -> Element<'a, 
         .into()
 }
 
+/// Padding around the body text, the same in edit and rendered mode so the
+/// text doesn't jump when switching.
+fn body_padding() -> Padding {
+    Padding::new(EDITOR_PADDING_TOP)
+        .left(18)
+        .right(18)
+        .bottom(EDITOR_PADDING_BOTTOM)
+}
+
+/// The note body's scrollable, with a slim inked scrollbar.
+fn body_scrollable<'a>(content: impl Into<Element<'a, Message>>, a: f32) -> Element<'a, Message> {
+    scrollable(content)
+        .id(BODY_SCROLL_ID)
+        .height(Fill)
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::new()
+                .width(6)
+                .scroller_width(6)
+                .margin(5),
+        ))
+        .style(move |_theme: &Theme, status| {
+            let active = matches!(
+                status,
+                scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
+            );
+            let rail = scrollable::Rail {
+                background: Some(ink(0.06 * a).into()),
+                border: Border {
+                    radius: 3.0.into(),
+                    ..Default::default()
+                },
+                scroller: scrollable::Scroller {
+                    background: ink(if active { 0.45 } else { 0.28 } * a).into(),
+                    border: Border {
+                        radius: 3.0.into(),
+                        ..Default::default()
+                    },
+                },
+            };
+            scrollable::Style {
+                container: container::Style::default(),
+                vertical_rail: rail,
+                horizontal_rail: rail,
+                gap: None,
+                auto_scroll: scrollable::AutoScroll {
+                    background: ink(0.1 * a).into(),
+                    border: Border::default(),
+                    shadow: Shadow::default(),
+                    icon: ink(a),
+                },
+            }
+        })
+        .into()
+}
+
 /// Minimum editor height that makes it, padding included, exactly fill a
 /// body `available` px tall: short text then needs no scrollbar.
 fn editor_min_height(available: f32) -> f32 {
@@ -147,11 +227,16 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         paper_tint,
         idle_control_alpha,
         content,
+        editing,
+        doc,
+        data_dir,
+        broken_images,
         size,
         morph_progress,
         content_alpha: a,
         confirm_delete,
         color_picker_open,
+        text_color_picker_open,
         hovered,
         dragging,
     } = p;
@@ -169,6 +254,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         Space::new().width(Fill).height(Fill).into()
     } else {
         let title = text_input("Title", &note.title)
+            .id(TITLE_ID)
             .on_input(Message::TitleEdited)
             .size(16)
             .padding(0)
@@ -201,17 +287,22 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 ..Default::default()
             });
 
-        let header = container(
-            row![
-                title,
-                color_btn,
-                icon_button("🗑", Message::DeleteRequested, controls),
-                icon_button("✕", Message::ClosePanel, controls),
-            ]
-            .spacing(2)
-            .align_y(iced::Alignment::Center),
-        )
-        .padding(Padding::new(2.0).left(18).right(10).bottom(6));
+        // Any press on the header, title and buttons included, leaves edit
+        // mode; the press still reaches them.
+        let header = press_through(
+            container(
+                row![
+                    title,
+                    color_btn,
+                    icon_button("🗑", Message::DeleteRequested, controls),
+                    icon_button("✕", Message::ClosePanel, controls),
+                ]
+                .spacing(2)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding(Padding::new(2.0).left(18).right(10).bottom(6)),
+            Message::EditorBlurred,
+        );
 
         // Grip along the top edge: drag to move the note, double-click to
         // send it back next to the dock.
@@ -244,69 +335,40 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         // appears only once the text no longer fits. Its minimum height
         // fills exactly the space the body gets (measured, not estimated),
         // so clicks below short text still land in the editor.
-        let body = responsive(move |available| {
-            let editor = text_editor(content)
-                .id(BODY_EDITOR_ID)
-                .placeholder("Write something…")
-                .on_action(Message::NoteEdited)
-                .min_height(editor_min_height(available.height))
-                .size(14)
-                .padding(
-                    Padding::new(EDITOR_PADDING_TOP)
-                        .left(18)
-                        .right(18)
-                        .bottom(EDITOR_PADDING_BOTTOM),
-                )
-                .style(move |_theme: &Theme, _status| text_editor::Style {
-                    background: Color::TRANSPARENT.into(),
-                    border: Border::default(),
-                    placeholder: ink(0.35 * a),
-                    value: ink(0.9 * a),
-                    selection: ink(0.18 * a),
-                });
-            scrollable(pass_wheel(editor))
-                .id(BODY_SCROLL_ID)
-                .height(Fill)
-                .direction(scrollable::Direction::Vertical(
-                    scrollable::Scrollbar::new()
-                        .width(6)
-                        .scroller_width(6)
-                        .margin(5),
-                ))
-                .style(move |_theme: &Theme, status| {
-                    let active = matches!(
-                        status,
-                        scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
-                    );
-                    let rail = scrollable::Rail {
-                        background: Some(ink(0.06 * a).into()),
-                        border: Border {
-                            radius: 3.0.into(),
-                            ..Default::default()
-                        },
-                        scroller: scrollable::Scroller {
-                            background: ink(if active { 0.45 } else { 0.28 } * a).into(),
-                            border: Border {
-                                radius: 3.0.into(),
-                                ..Default::default()
-                            },
-                        },
-                    };
-                    scrollable::Style {
-                        container: container::Style::default(),
-                        vertical_rail: rail,
-                        horizontal_rail: rail,
-                        gap: None,
-                        auto_scroll: scrollable::AutoScroll {
-                            background: ink(0.1 * a).into(),
-                            border: Border::default(),
-                            shadow: Shadow::default(),
-                            icon: ink(a),
-                        },
-                    }
-                })
-                .into()
-        });
+        let body: Element<'_, Message> = if editing {
+            responsive(move |available| {
+                let editor = text_editor(content)
+                    .id(BODY_EDITOR_ID)
+                    .placeholder("Write something…")
+                    .on_action(Message::NoteEdited)
+                    .key_binding(body_key_binding)
+                    .min_height(editor_min_height(available.height))
+                    .size(14)
+                    .padding(body_padding())
+                    .style(move |_theme: &Theme, _status| text_editor::Style {
+                        background: Color::TRANSPARENT.into(),
+                        border: Border::default(),
+                        placeholder: ink(0.35 * a),
+                        value: ink(0.9 * a),
+                        selection: ink(0.18 * a),
+                    });
+                body_scrollable(pass_wheel(editor), a)
+            })
+            .into()
+        } else {
+            // Content inside a scrollable can't fill its height, so the
+            // click target for the space below the text sits behind it.
+            let rendered = container(rich_view::view(doc, data_dir, broken_images, ink, a))
+                .padding(body_padding());
+            stack![
+                mouse_area(Space::new().width(Fill).height(Fill))
+                    .on_press(Message::BodyClicked(None)),
+                body_scrollable(rendered, a),
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into()
+        };
 
         // Divider: a faint inked hairline with a short soft shadow fading
         // below it, as if the header sheet rests slightly on the body.
@@ -336,6 +398,9 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 container(color_picker(&note.color, palette))
                     .padding(Padding::ZERO.left(14).bottom(6)),
             );
+        }
+        if editing {
+            col = col.push(toolbar(palette, text_color_picker_open, controls));
         }
         col = col.push(body);
 
@@ -399,8 +464,109 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         .into()
 }
 
+/// Whether the note's title field has keyboard focus.
+pub(crate) fn title_focused() -> iced::Task<bool> {
+    iced::widget::operation::is_focused(TITLE_ID)
+}
+
+/// `Undo` for Cmd/Ctrl+Z, `Redo` for Cmd/Ctrl+Shift+Z (and Ctrl+Y off
+/// macOS), given a key's character and the held modifiers.
+pub(crate) fn history_key(key: &str, modifiers: keyboard::Modifiers) -> Option<Message> {
+    if !modifiers.command() {
+        return None;
+    }
+    match key {
+        "z" | "Z" if modifiers.shift() => Some(Message::Redo),
+        "z" | "Z" => Some(Message::Undo),
+        "y" | "Y" if cfg!(not(target_os = "macos")) => Some(Message::Redo),
+        _ => None,
+    }
+}
+
+/// The body editor's key bindings while it has focus: Cmd/Ctrl+V asks the
+/// app to paste (text or image), and the undo/redo keys step its history;
+/// everything else is iced's default.
+fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    if !matches!(press.status, text_editor::Status::Focused { .. }) {
+        return text_editor::Binding::from_key_press(press);
+    }
+    match press.key.as_ref() {
+        keyboard::Key::Character("v") if press.modifiers.command() => {
+            Some(text_editor::Binding::Custom(Message::PasteRequested))
+        }
+        keyboard::Key::Character(c) => match history_key(c, press.modifiers) {
+            Some(step) => Some(text_editor::Binding::Custom(step)),
+            None => text_editor::Binding::from_key_press(press),
+        },
+        _ => text_editor::Binding::from_key_press(press),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    fn press(ch: &str, command: bool, status: text_editor::Status) -> text_editor::KeyPress {
+        let key = keyboard::Key::Character(ch.into());
+        text_editor::KeyPress {
+            modified_key: key.clone(),
+            key,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            modifiers: if command {
+                keyboard::Modifiers::COMMAND
+            } else {
+                keyboard::Modifiers::empty()
+            },
+            text: Some(ch.into()),
+            status,
+        }
+    }
+
+    #[test]
+    fn undo_and_redo_bindings_when_focused() {
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        assert!(matches!(
+            body_key_binding(press("z", true, focused)),
+            Some(text_editor::Binding::Custom(Message::Undo))
+        ));
+        let mut shift_z = press("Z", true, focused);
+        shift_z.modifiers |= keyboard::Modifiers::SHIFT;
+        assert!(matches!(
+            body_key_binding(shift_z),
+            Some(text_editor::Binding::Custom(Message::Redo))
+        ));
+        assert!(body_key_binding(press("z", true, text_editor::Status::Active)).is_none());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn ctrl_y_redoes_off_macos() {
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        assert!(matches!(
+            body_key_binding(press("y", true, focused)),
+            Some(text_editor::Binding::Custom(Message::Redo))
+        ));
+    }
+
+    #[test]
+    fn paste_binding_only_when_focused() {
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        assert!(matches!(
+            body_key_binding(press("v", true, focused)),
+            Some(text_editor::Binding::Custom(Message::PasteRequested))
+        ));
+        assert!(body_key_binding(press("v", true, text_editor::Status::Active)).is_none());
+    }
+
+    #[test]
+    fn other_keys_use_default_bindings() {
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        assert!(matches!(
+            body_key_binding(press("x", false, focused)),
+            Some(text_editor::Binding::Insert('x'))
+        ));
+    }
+
     use super::*;
     use iced::advanced::widget::operation::scrollable::RelativeOffset;
     use iced::{Point, Size};

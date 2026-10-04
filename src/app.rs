@@ -2,10 +2,14 @@ use crate::animation::{morph_frame, MagnificationState, Morph, MorphFrame};
 use crate::bar_strip::{
     band, compute_layout, peek_target, BarStrip, StripLayout, SETTINGS_SLOT, STRIP_WIDTH,
 };
+use crate::history::History;
+use crate::images;
 use crate::note::NoteColor;
-use crate::note_panel::{post_it, PostIt};
+use crate::note_panel::{focus_body, post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
 use crate::resize::{resize_frame, resized, Edges, MIN_SIZE};
+use crate::rich::{self, BlockKind, Doc};
+use crate::rich_view;
 use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore};
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::NoteStore;
@@ -16,7 +20,9 @@ use iced::{
     event, keyboard, mouse, window, Element, Fill, Point, Rectangle, Size, Subscription, Task,
     Vector,
 };
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -45,6 +51,16 @@ pub enum Message {
     PaletteSlotSelected(Option<usize>),
     PaletteColorChosen(NoteColor),
     NoteEdited(text_editor::Action),
+    /// A click on the rendered body: the block's source line, or `None`
+    /// below the last block.
+    BodyClicked(Option<usize>),
+    /// A press on rendered text: the source offset of the character under it.
+    BodyPressed(usize),
+    /// Leave edit mode and show the note rendered again.
+    EditorBlurred,
+    /// Flip the task checkbox on this source line.
+    ToggleTask(usize),
+    LinkClicked(String),
     TitleEdited(String),
     NoteHovered(bool),
     NoteDragStart,
@@ -55,6 +71,26 @@ pub enum Message {
     DeleteRequested,
     ConfirmDelete(bool),
     ToggleColorPicker,
+    /// Open or close the toolbar's text color grid.
+    ToggleTextColorPicker,
+    /// Wrap the editor selection in this format's markup.
+    FormatApplied(rich::Format),
+    /// A file was dropped on the window; images are added to the open note.
+    ImageDropped(PathBuf),
+    /// Cmd/Ctrl+V in the editor: pastes the clipboard's text or image.
+    PasteRequested,
+    /// Text from the system clipboard, read for the note with this id;
+    /// ignored unless that note is still open and being edited.
+    ClipboardText(Uuid, String),
+    /// Cmd/Ctrl+Z: steps the open note's body back.
+    Undo,
+    /// Cmd+Shift+Z (or Ctrl+Y off macOS): steps forward again.
+    Redo,
+    /// The toolbar's image button: opens the file dialog.
+    PickImage,
+    /// The file dialog opened for the note with this id returned; ignored
+    /// unless that note is still the open one.
+    ImagePicked(Uuid, Option<PathBuf>),
     ColorChosen(NoteColor),
     DragStart(usize, f32),
     DragMove(f32),
@@ -79,6 +115,51 @@ pub enum Message {
     CursorPolled(Option<Point>),
 }
 
+/// What a paste found on the clipboard.
+#[derive(Debug, PartialEq)]
+enum ClipboardContent {
+    Text(String),
+    Image {
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+    Empty,
+}
+
+/// Text wins over an image: copied web content often carries both, while a
+/// screenshot is image-only.
+fn classify(text: Option<String>, image: Option<(Vec<u8>, u32, u32)>) -> ClipboardContent {
+    match (text.filter(|t| !t.is_empty()), image) {
+        (Some(text), _) => ClipboardContent::Text(text),
+        (None, Some((rgba, width, height))) => ClipboardContent::Image {
+            rgba,
+            width,
+            height,
+        },
+        (None, None) => ClipboardContent::Empty,
+    }
+}
+
+fn read_clipboard() -> ClipboardContent {
+    let Ok(mut clipboard) = arboard::Clipboard::new() else {
+        return ClipboardContent::Empty;
+    };
+    let text = clipboard.get_text().ok();
+    let image = if text.as_ref().is_some_and(|t| !t.is_empty()) {
+        None
+    } else {
+        clipboard.get_image().ok().and_then(|img| {
+            Some((
+                img.bytes.into_owned(),
+                u32::try_from(img.width).ok()?,
+                u32::try_from(img.height).ok()?,
+            ))
+        })
+    };
+    classify(text, image)
+}
+
 pub struct App {
     store: NoteStore,
     settings: SettingsStore,
@@ -86,10 +167,24 @@ pub struct App {
     cursor_y: Option<f32>,
     active_note: Option<Uuid>,
     editor_content: Option<text_editor::Content>,
+    /// The open note shows its editor rather than its rendered `doc`.
+    editing: bool,
+    /// The open note's content, parsed for the rendered view.
+    doc: Doc,
+    /// Folder of the notes file; note images live in `images/` inside it.
+    data_dir: PathBuf,
+    /// Image references in `doc` that are missing or can't be decoded.
+    broken_images: HashSet<String>,
+    /// Undo/redo for the open note's body: its text and cursor.
+    history: History<(String, text_editor::Cursor)>,
+    /// The last press on rendered text, so quick follow-up clicks (which land
+    /// on the editor it opened) select the word, then the line, around it.
+    rendered_click: Option<RenderedClick>,
     morph: Morph,
     anchor_y: f32,
     pending_delete: Option<Uuid>,
     color_picker_open: bool,
+    text_color_picker_open: bool,
     note_hovered: bool,
     drag: Option<DragState>,
     scroll_offset: f32,
@@ -130,6 +225,18 @@ pub struct App {
     keep_open_until: Option<Instant>,
 }
 
+/// Clicks counted from a press on the rendered note.
+struct RenderedClick {
+    at: Instant,
+    /// Source offset of the first press.
+    offset: usize,
+    count: u8,
+}
+
+/// How long after a click the next one still counts as the same series
+/// (iced's own double-click window).
+const MULTI_CLICK: Duration = Duration::from_millis(300);
+
 /// A resize of the open note in progress.
 struct NoteResize {
     edges: Edges,
@@ -155,6 +262,23 @@ fn data_dir() -> PathBuf {
         .to_path_buf()
 }
 
+/// Seeds a fresh store with template notes and deletes images no note uses.
+/// If the notes file exists but could not be loaded, neither happens: the
+/// file is not overwritten and its images are kept.
+fn prepare_store(store: &mut NoteStore, palette: &[NoteColor]) {
+    if store.load_failed() {
+        eprintln!("could not load the notes file; leaving it and its images untouched");
+        return;
+    }
+    if store.notes().is_empty() {
+        store.seed_templates(palette);
+        let _ = store.save();
+    }
+    if let Err(e) = images::sweep(store.dir(), store.notes()) {
+        eprintln!("could not clean up note images: {e}");
+    }
+}
+
 impl App {
     pub fn boot() -> (Self, Task<Message>) {
         let settings = SettingsStore::load(data_dir().join("settings.json"));
@@ -163,10 +287,7 @@ impl App {
             platform::set_dock_policy(false);
         }
         let mut store = NoteStore::load(data_dir().join("notes.json"));
-        if store.notes().is_empty() {
-            store.seed_templates(&settings.settings().palette);
-            let _ = store.save();
-        }
+        prepare_store(&mut store, &settings.settings().palette);
         (
             Self::new(store, settings),
             window::oldest().then(|id| match id {
@@ -183,6 +304,7 @@ impl App {
         let peek = Morph::peek(s.motion.speed);
         let settings_morph = Morph::new(s.motion.speed);
         let window_size = Size::new(Self::docked_width(s, false), 600.0);
+        let data_dir = store.dir().to_path_buf();
         Self {
             store,
             settings,
@@ -190,10 +312,17 @@ impl App {
             cursor_y: None,
             active_note: None,
             editor_content: None,
+            editing: false,
+            doc: Doc { blocks: Vec::new() },
+            data_dir,
+            broken_images: HashSet::new(),
+            history: History::default(),
+            rendered_click: None,
             morph,
             anchor_y: 0.0,
             pending_delete: None,
             color_picker_open: false,
+            text_color_picker_open: false,
             note_hovered: false,
             drag: None,
             scroll_offset: 0.0,
@@ -284,6 +413,7 @@ impl App {
                     if self.store.recolor_many(&changes) {
                         self.store.mark_dirty();
                     }
+                    self.reparse();
                 } else {
                     self.settings.settings_mut().reset(group);
                 }
@@ -306,6 +436,7 @@ impl App {
                         if self.store.recolor(old, color) {
                             self.store.mark_dirty();
                         }
+                        self.reparse();
                     }
                 }
             }
@@ -354,9 +485,32 @@ impl App {
                     self.store.mark_dirty();
                 }
             }
+            Message::NoteEdited(
+                text_editor::Action::Click(_)
+                | text_editor::Action::SelectWord
+                | text_editor::Action::SelectLine,
+            ) if self
+                .rendered_click
+                .as_ref()
+                .is_some_and(|c| c.at.elapsed() <= MULTI_CLICK) =>
+            {
+                self.extend_rendered_click();
+            }
             Message::NoteEdited(action) => {
+                self.rendered_click = None;
                 if let Some(content) = &mut self.editor_content {
                     let is_edit = action.is_edit();
+                    if is_edit {
+                        let typing = matches!(
+                            action,
+                            text_editor::Action::Edit(text_editor::Edit::Insert(c))
+                                if !c.is_whitespace()
+                        );
+                        let before = (content.text(), content.cursor());
+                        self.history.record(before, typing, Instant::now());
+                    } else {
+                        self.history.break_step();
+                    }
                     content.perform(action);
                     if is_edit {
                         if let Some(id) = self.active_note {
@@ -375,11 +529,83 @@ impl App {
                     }
                 }
             }
+            Message::BodyPressed(offset) => {
+                if let Some(content) = &mut self.editor_content {
+                    self.editing = true;
+                    let (line, column) = rich::position_of(&content.text(), offset);
+                    content.move_to(text_editor::Cursor {
+                        position: text_editor::Position { line, column },
+                        selection: None,
+                    });
+                    self.history.break_step();
+                    self.rendered_click = Some(RenderedClick {
+                        at: Instant::now(),
+                        offset,
+                        count: 1,
+                    });
+                    return focus_body();
+                }
+            }
+            Message::BodyClicked(line) => {
+                if let Some(content) = &mut self.editor_content {
+                    self.editing = true;
+                    match line {
+                        Some(line) => content.move_to(text_editor::Cursor {
+                            position: text_editor::Position {
+                                line: line.min(content.line_count().saturating_sub(1)),
+                                column: 0,
+                            },
+                            selection: None,
+                        }),
+                        None => content
+                            .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd)),
+                    }
+                    return focus_body();
+                }
+            }
+            Message::EditorBlurred => {
+                if self.editing {
+                    self.editing = false;
+                    self.text_color_picker_open = false;
+                    self.reparse();
+                }
+            }
+            Message::ToggleTask(line) => {
+                // Only real task items: `toggle_task` would also flip a
+                // look-alike line inside a code block.
+                let is_task = self.doc.blocks.iter().any(|b| {
+                    b.source_line == line
+                        && matches!(b.kind, BlockKind::ListItem { task: Some(_), .. })
+                });
+                if !is_task {
+                    return Task::none();
+                }
+                let Some(note) = self.active_note.and_then(|id| self.store.note_mut(id)) else {
+                    return Task::none();
+                };
+                if let Some(content) = rich::toggle_task(&note.content, line) {
+                    if let Some(editor) = &self.editor_content {
+                        let before = (editor.text(), editor.cursor());
+                        self.history.record(before, false, Instant::now());
+                    }
+                    self.editor_content = Some(text_editor::Content::with_text(&content));
+                    note.content = content;
+                    note.updated_at = chrono::Utc::now();
+                    self.store.mark_dirty();
+                    self.reparse();
+                }
+            }
+            Message::LinkClicked(url) => {
+                if let Some(url) = rich_view::openable(&url) {
+                    platform::open_url(url);
+                }
+            }
             Message::ClosePanel => {
                 if self.active_note.is_some() {
                     self.morph.close();
                     self.animating = true;
                     self.color_picker_open = false;
+                    self.text_color_picker_open = false;
                     self.confirm_delete = None;
                 }
             }
@@ -449,6 +675,44 @@ impl App {
             }
             Message::ToggleColorPicker => {
                 self.color_picker_open = !self.color_picker_open;
+                self.text_color_picker_open = false;
+            }
+            Message::ToggleTextColorPicker => {
+                self.text_color_picker_open = !self.text_color_picker_open;
+                self.color_picker_open = false;
+            }
+            Message::FormatApplied(format) => return self.apply_format(format),
+            Message::ImageDropped(path) => return self.import_image(&path),
+            Message::ImagePicked(id, Some(path))
+                if self.active_note == Some(id) && self.morph.is_opening() =>
+            {
+                return self.import_image(&path)
+            }
+            Message::ImagePicked(..) => {}
+            Message::PasteRequested if self.editing => {
+                return self.apply_paste(read_clipboard());
+            }
+            Message::PasteRequested => {}
+            Message::ClipboardText(id, text)
+                if self.editing && self.active_note == Some(id) && self.morph.is_opening() =>
+            {
+                return self.apply_paste(ClipboardContent::Text(text));
+            }
+            Message::ClipboardText(..) => {}
+            Message::Undo => return self.step_history(false),
+            Message::Redo => return self.step_history(true),
+            Message::PickImage => {
+                let Some(id) = self.active_note else {
+                    return Task::none();
+                };
+                // The dialog steals focus, which must not fold the note.
+                self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
+                let dialog = rfd::AsyncFileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+                    .pick_file();
+                return Task::perform(dialog, move |file| {
+                    Message::ImagePicked(id, file.map(|f| f.path().to_path_buf()))
+                });
             }
             Message::ColorChosen(color) => {
                 if let Some(id) = self.active_note {
@@ -592,12 +856,28 @@ impl App {
                     keyboard::Key::Named(Named::Escape) if self.settings_open => {
                         return self.update(Message::CloseSettings)
                     }
+                    keyboard::Key::Named(Named::Escape) if self.editing => {
+                        return self.update(Message::EditorBlurred)
+                    }
                     keyboard::Key::Named(Named::Escape) => return self.update(Message::ClosePanel),
                     keyboard::Key::Character(",") if modifiers.command() => {
                         return self.update(Message::ToggleSettings)
                     }
                     keyboard::Key::Character("n") if modifiers.command() => {
                         return self.update(Message::AddNote)
+                    }
+                    // In edit mode the body editor's own key binding handles
+                    // undo/redo; the title field ignores them, so skip it here.
+                    keyboard::Key::Character(c) if !self.editing && self.active_note.is_some() => {
+                        if let Some(step) = crate::note_panel::history_key(c, modifiers) {
+                            return crate::note_panel::title_focused().then(move |focused| {
+                                if focused {
+                                    Task::none()
+                                } else {
+                                    Task::done(step.clone())
+                                }
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -698,11 +978,16 @@ impl App {
                         paper_tint: self.settings.settings().notes.paper_tint,
                         idle_control_alpha: self.settings.settings().notes.idle_control_alpha,
                         content,
+                        editing: self.editing,
+                        doc: &self.doc,
+                        data_dir: &self.data_dir,
+                        broken_images: &self.broken_images,
                         size: rect.size(),
                         morph_progress: self.morph.progress(),
                         content_alpha: frame.content_alpha,
                         confirm_delete: self.confirm_delete.is_some(),
                         color_picker_open: self.color_picker_open,
+                        text_color_picker_open: self.text_color_picker_open,
                         hovered: self.note_hovered,
                         dragging: self.note_drag.is_some(),
                     });
@@ -754,6 +1039,9 @@ impl App {
                 Some(Message::MouseButton(false))
             }
             iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowUnfocused),
+            iced::Event::Window(window::Event::FileDropped(path)) => {
+                Some(Message::ImageDropped(path))
+            }
             _ => None,
         });
 
@@ -786,14 +1074,19 @@ impl App {
 
         let switching = self.active_note.is_some_and(|active| active != id);
         self.editor_content = Some(text_editor::Content::with_text(&note.content));
+        self.history.clear();
+        self.rendered_click = None;
+        self.editing = note.content.trim().is_empty();
         self.hide_peek();
         // A note and the settings never show at the same time.
         if self.settings_open {
             self.settings_morph.close();
         }
         self.active_note = Some(id);
+        self.reparse();
         self.pending_delete = None;
         self.color_picker_open = false;
+        self.text_color_picker_open = false;
         self.confirm_delete = None;
         if let Some(bar) = self.strip_layout().bars.get(index) {
             self.anchor_y = bar.y + bar.height / 2.0;
@@ -807,6 +1100,220 @@ impl App {
         self.dock_window()
     }
 
+    /// Wraps the editor selection in `format`'s markup, writes the result
+    /// back to the note and leaves the wrapped text selected.
+    fn apply_format(&mut self, format: rich::Format) -> Task<Message> {
+        self.text_color_picker_open = false;
+        let (Some(id), true, Some(content)) =
+            (self.active_note, self.editing, &mut self.editor_content)
+        else {
+            return Task::none();
+        };
+        let cursor = content.cursor();
+        // The untrimmed text, so markup typed on a fresh last line lands there.
+        let text = content.text();
+        self.history
+            .record((text.clone(), cursor), false, Instant::now());
+        let offset = |p: text_editor::Position| rich::offset_of(&text, p.line, p.column);
+        let head = offset(cursor.position);
+        let anchor = cursor.selection.map_or(head, offset);
+        let selected = content.selection();
+        let (from, to) = rich::selection_range(&text, head, anchor, selected.as_deref());
+        let (wrapped, start, end) = rich::wrap_selection(&text, from, to, format);
+        let position = |o| {
+            let (line, column) = rich::position_of(&wrapped, o);
+            text_editor::Position { line, column }
+        };
+        let mut rebuilt = text_editor::Content::with_text(&wrapped);
+        rebuilt.move_to(text_editor::Cursor {
+            position: position(end),
+            selection: (start != end).then(|| position(start)),
+        });
+        *content = rebuilt;
+        if let Some(note) = self.store.note_mut(id) {
+            note.content = wrapped.trim_end_matches('\n').to_string();
+            note.updated_at = chrono::Utc::now();
+        }
+        self.store.mark_dirty();
+        focus_body()
+    }
+
+    /// Copies an image file into the open note's folder and references it;
+    /// does nothing without an open note and logs files that don't import.
+    fn import_image(&mut self, path: &std::path::Path) -> Task<Message> {
+        if self.active_note.is_none() {
+            return Task::none();
+        }
+        match images::import(&self.data_dir, path) {
+            Ok(rel) => self.insert_image(&rel),
+            Err(e) => {
+                eprintln!("image import failed: {e}");
+                Task::none()
+            }
+        }
+    }
+
+    /// Pastes what the clipboard held: text through the editor's own edit
+    /// path, or an image as a new file. Encodes synchronously, which is fine
+    /// for screenshots. When arboard found nothing (or failed, as on Wayland
+    /// without XWayland), iced's own clipboard supplies the text.
+    fn apply_paste(&mut self, content: ClipboardContent) -> Task<Message> {
+        match content {
+            ClipboardContent::Text(text) => self.update(Message::NoteEdited(
+                text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(text))),
+            )),
+            ClipboardContent::Image {
+                rgba,
+                width,
+                height,
+            } => match images::import_png(&self.data_dir, &rgba, width, height) {
+                Ok(rel) => self.insert_image(&rel),
+                Err(e) => {
+                    eprintln!("image paste failed: {e}");
+                    Task::none()
+                }
+            },
+            ClipboardContent::Empty => {
+                // The read finishes later, so the result names its note.
+                let Some(id) = self.active_note else {
+                    return Task::none();
+                };
+                iced::clipboard::read().and_then(move |text| {
+                    if text.is_empty() {
+                        return Task::none();
+                    }
+                    Task::done(Message::ClipboardText(id, text))
+                })
+            }
+        }
+    }
+
+    /// Counts one more quick click after a press on the rendered note and
+    /// selects the word (second click) or line (third and later) around the
+    /// press. The editor's own idea of the click spot is ignored: it lays
+    /// the raw text out differently from the rendered view.
+    fn extend_rendered_click(&mut self) {
+        let (Some(click), Some(content)) = (&mut self.rendered_click, &mut self.editor_content)
+        else {
+            return;
+        };
+        click.count = click.count.saturating_add(1);
+        click.at = Instant::now();
+        let text = content.text();
+        let (start, end) = if click.count == 2 {
+            rich::word_at(&text, click.offset)
+        } else {
+            rich::line_bounds(&text, click.offset)
+        };
+        let position = |offset| {
+            let (line, column) = rich::position_of(&text, offset);
+            text_editor::Position { line, column }
+        };
+        content.move_to(text_editor::Cursor {
+            position: position(end),
+            selection: (start != end).then(|| position(start)),
+        });
+        self.history.break_step();
+    }
+
+    /// Undoes (or with `forward`, redoes) one step of the open note's body.
+    fn step_history(&mut self, forward: bool) -> Task<Message> {
+        let (Some(id), Some(content)) = (self.active_note, &self.editor_content) else {
+            return Task::none();
+        };
+        let current = (content.text(), content.cursor());
+        let target = if forward {
+            self.history.redo(current)
+        } else {
+            self.history.undo(current)
+        };
+        let Some((text, cursor)) = target else {
+            return Task::none();
+        };
+        let mut restored = text_editor::Content::with_text(&text);
+        restored.move_to(cursor);
+        self.editor_content = Some(restored);
+        if let Some(note) = self.store.note_mut(id) {
+            note.content = text.trim_end_matches('\n').to_string();
+            note.updated_at = chrono::Utc::now();
+        }
+        self.store.mark_dirty();
+        if self.editing {
+            focus_body()
+        } else {
+            self.reparse();
+            Task::none()
+        }
+    }
+
+    /// Puts `![](rel)` on its own line at the cursor (editing) or at the end
+    /// of the open note (rendered).
+    fn insert_image(&mut self, rel: &str) -> Task<Message> {
+        let Some(id) = self.active_note else {
+            return Task::none();
+        };
+        let block = format!("![]({rel})");
+        if let Some(editor) = &self.editor_content {
+            let before = (editor.text(), editor.cursor());
+            self.history.record(before, false, Instant::now());
+        }
+        let (text, end) = match (&self.editor_content, self.editing) {
+            (Some(content), true) => {
+                // The untrimmed text, so a block typed below blank lines stays there.
+                let text = content.text();
+                let at = content.cursor().position;
+                rich::insert_block(&text, rich::offset_of(&text, at.line, at.column), &block)
+            }
+            _ => {
+                let Some(note) = self.store.notes().iter().find(|n| n.id == id) else {
+                    return Task::none();
+                };
+                rich::insert_block(&note.content, note.content.len(), &block)
+            }
+        };
+        let mut rebuilt = text_editor::Content::with_text(&text);
+        let (line, column) = rich::position_of(&text, end);
+        rebuilt.move_to(text_editor::Cursor {
+            position: text_editor::Position { line, column },
+            selection: None,
+        });
+        self.editor_content = Some(rebuilt);
+        if let Some(note) = self.store.note_mut(id) {
+            note.content = text.trim_end_matches('\n').to_string();
+            note.updated_at = chrono::Utc::now();
+        }
+        self.store.mark_dirty();
+        self.reparse();
+        if self.editing {
+            focus_body()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Re-parses the open note for the rendered view and checks its images
+    /// once, so the view itself never touches the disk.
+    fn reparse(&mut self) {
+        let Some(note) = self
+            .active_note
+            .and_then(|id| self.store.notes().iter().find(|n| n.id == id))
+        else {
+            return;
+        };
+        self.doc = rich::parse(&note.content, &self.settings.settings().palette);
+        self.broken_images = self
+            .doc
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                BlockKind::Image { path, .. } if !images::is_usable(&self.data_dir, path) => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .collect();
+    }
+
     fn finish_close(&mut self) -> Task<Message> {
         if self.note_drag.is_some() {
             self.finish_note_drag();
@@ -814,7 +1321,13 @@ impl App {
         self.active_note = None;
         self.note_hovered = false;
         self.editor_content = None;
+        self.editing = false;
+        self.doc = Doc { blocks: Vec::new() };
+        self.broken_images.clear();
+        self.history.clear();
+        self.rendered_click = None;
         self.color_picker_open = false;
+        self.text_color_picker_open = false;
         self.confirm_delete = None;
         self.note_resize = None;
         if let Some(id) = self.pending_delete.take() {
@@ -1227,6 +1740,675 @@ mod tests {
         let _ = app.update(Message::BarClicked(0));
         settle(&mut app);
         app
+    }
+
+    /// An app with one fully open note holding `content`.
+    fn app_with_note(dir: &tempfile::TempDir, content: &str) -> App {
+        let mut app = app_in(dir);
+        let id = app.store.add_note(&crate::note::PALETTE);
+        app.store.note_mut(id).unwrap().content = content.into();
+        app.store.did_save();
+        app.window_size = Size::new(1400.0, 900.0);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        app
+    }
+
+    fn escape() -> Message {
+        use keyboard::key::{Code, Named, Physical};
+        Message::Key(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(Named::Escape),
+            modified_key: keyboard::Key::Named(Named::Escape),
+            physical_key: Physical::Code(Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        })
+    }
+
+    fn cursor_of(app: &App) -> text_editor::Position {
+        app.editor_content.as_ref().unwrap().cursor().position
+    }
+
+    #[test]
+    fn opening_empty_note_starts_in_edit_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_note(&dir, "  \n");
+        assert!(app.editing);
+    }
+
+    #[test]
+    fn opening_note_with_text_starts_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_note(&dir, "# Hi\nthere");
+        assert!(!app.editing);
+        assert_eq!(app.doc.blocks[0].kind, crate::rich::BlockKind::Heading(1));
+    }
+
+    #[test]
+    fn body_click_enters_edit_mode_at_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "a\nb\nc");
+        let _ = app.update(Message::BodyClicked(Some(2)));
+        assert!(app.editing);
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (2, 0));
+
+        let _ = app.update(Message::EditorBlurred);
+        let _ = app.update(Message::BodyClicked(None));
+        assert!(app.editing);
+        assert_eq!(cursor_of(&app).line, 2);
+    }
+
+    #[test]
+    fn blur_reparses_and_leaves_edit_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "plain");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let _ = app.update(Message::NoteEdited(text_editor::Action::SelectAll));
+        let _ = app.update(Message::NoteEdited(text_editor::Action::Edit(
+            text_editor::Edit::Paste(std::sync::Arc::new("# x".into())),
+        )));
+        assert_eq!(app.store.notes()[0].content, "# x");
+        let _ = app.update(Message::EditorBlurred);
+        assert!(!app.editing);
+        assert_eq!(app.doc.blocks[0].kind, crate::rich::BlockKind::Heading(1));
+    }
+
+    #[test]
+    fn escape_leaves_edit_mode_before_folding() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "text");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let _ = app.update(escape());
+        assert!(!app.editing);
+        assert!(app.active_note.is_some() && app.morph.is_opening());
+        let _ = app.update(escape());
+        assert!(!app.morph.is_opening());
+    }
+
+    #[test]
+    fn toggle_task_updates_note_and_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "- [ ] t");
+        let _ = app.update(Message::ToggleTask(0));
+        assert_eq!(app.store.notes()[0].content, "- [x] t");
+        assert!(app.store.is_dirty());
+        assert!(!app.editing);
+        assert_eq!(app.editor_content.as_ref().unwrap().text(), "- [x] t");
+        assert!(matches!(
+            app.doc.blocks[0].kind,
+            crate::rich::BlockKind::ListItem {
+                task: Some(true),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bold_wraps_selection_and_keeps_it_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "a word b");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        app.editor_content
+            .as_mut()
+            .unwrap()
+            .move_to(text_editor::Cursor {
+                position: text_editor::Position { line: 0, column: 6 },
+                selection: Some(text_editor::Position { line: 0, column: 2 }),
+            });
+        let _ = app.update(Message::FormatApplied(crate::rich::Format::Bold));
+        assert_eq!(app.store.notes()[0].content, "a **word** b");
+        assert!(app.store.is_dirty());
+        let content = app.editor_content.as_ref().unwrap();
+        assert_eq!(content.text().trim_end(), "a **word** b");
+        assert_eq!(content.selection().as_deref(), Some("word"));
+    }
+
+    /// Opens "Title" for editing and presses Enter `times` at its end.
+    fn title_then_enter(dir: &tempfile::TempDir, times: usize) -> App {
+        let mut app = app_with_note(dir, "Title");
+        let _ = app.update(Message::BodyClicked(None));
+        for _ in 0..times {
+            let _ = app.update(Message::NoteEdited(text_editor::Action::Edit(
+                text_editor::Edit::Enter,
+            )));
+        }
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (times, 0));
+        app
+    }
+
+    #[test]
+    fn bold_after_enter_goes_on_new_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = title_then_enter(&dir, 1);
+        let _ = app.update(Message::FormatApplied(crate::rich::Format::Bold));
+        assert_eq!(app.editor_content.as_ref().unwrap().text(), "Title\n****");
+        assert_eq!(app.store.notes()[0].content, "Title\n****");
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (1, 2));
+    }
+
+    #[test]
+    fn format_is_a_no_op_outside_edit_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "word");
+        assert!(!app.editing);
+        let _ = app.update(Message::FormatApplied(crate::rich::Format::Bold));
+        assert_eq!(app.store.notes()[0].content, "word");
+        assert!(!app.store.is_dirty());
+    }
+
+    fn png_file(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        let mut bytes = Vec::new();
+        let mut enc = png::Encoder::new(&mut bytes, 1, 1);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()
+            .unwrap()
+            .write_image_data(&[0, 0, 0, 255])
+            .unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn image_ref(content: &str) -> &str {
+        let start = content.find("![](").unwrap();
+        &content[start..content[start..].find(')').unwrap() + start + 1]
+    }
+
+    #[test]
+    fn dropped_image_appends_in_render_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hi");
+        let src = png_file(&dir, "p.png");
+        let _ = app.update(Message::ImageDropped(src));
+        let content = app.store.notes()[0].content.clone();
+        let rel = content
+            .strip_prefix("hi\n![](")
+            .and_then(|r| r.strip_suffix(')'))
+            .unwrap();
+        assert!(rel.starts_with("images/") && rel.ends_with(".png"));
+        assert!(dir.path().join(rel).is_file());
+        assert!(app
+            .doc
+            .blocks
+            .iter()
+            .any(|b| matches!(b.kind, BlockKind::Image { .. })));
+        assert!(!app.editing);
+        assert!(app.store.is_dirty());
+    }
+
+    #[test]
+    fn dropped_image_inserts_at_cursor_in_edit_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "a\nb");
+        let _ = app.update(Message::BodyClicked(Some(1)));
+        let _ = app.update(Message::ImageDropped(png_file(&dir, "p.png")));
+        let content = app.store.notes()[0].content.clone();
+        let r = image_ref(&content);
+        assert_eq!(content, format!("a\n{r}\nb"));
+        assert!(app.editing);
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (1, r.len()));
+    }
+
+    #[test]
+    fn dropped_image_after_blank_line_stays_below_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = title_then_enter(&dir, 2);
+        let _ = app.update(Message::ImageDropped(png_file(&dir, "p.png")));
+        let content = app.store.notes()[0].content.clone();
+        let r = image_ref(&content).to_string();
+        assert_eq!(content, format!("Title\n\n{r}"));
+        assert_eq!(
+            app.editor_content.as_ref().unwrap().text(),
+            format!("Title\n\n{r}")
+        );
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (2, r.len()));
+    }
+
+    #[test]
+    fn dropped_image_mid_line_goes_on_own_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        app.editor_content
+            .as_mut()
+            .unwrap()
+            .move_to(text_editor::Cursor {
+                position: text_editor::Position { line: 0, column: 1 },
+                selection: None,
+            });
+        let _ = app.update(Message::ImageDropped(png_file(&dir, "p.png")));
+        let content = app.store.notes()[0].content.clone();
+        assert_eq!(content, format!("a\n{}\nb", image_ref(&content)));
+    }
+
+    #[test]
+    fn picked_image_for_other_note_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "a");
+        let first = app.active_note.unwrap();
+        let _ = app.update(Message::ClosePanel);
+        settle(&mut app);
+        let second = app.store.add_note(&crate::note::PALETTE);
+        app.store.did_save();
+        let _ = app.update(Message::BarClicked(1));
+        settle(&mut app);
+        assert_eq!(app.active_note, Some(second));
+        let _ = app.update(Message::ImagePicked(first, Some(png_file(&dir, "p.png"))));
+        assert_eq!(app.store.notes()[0].content, "a");
+        assert_eq!(app.store.notes()[1].content, "");
+        assert!(!app.store.is_dirty());
+    }
+
+    fn rgba_1x1() -> (Vec<u8>, u32, u32) {
+        (vec![0, 0, 0, 255], 1, 1)
+    }
+
+    #[test]
+    fn classify_prefers_text_over_image() {
+        assert_eq!(
+            classify(Some("t".into()), Some(rgba_1x1())),
+            ClipboardContent::Text("t".into())
+        );
+        assert!(matches!(
+            classify(Some(String::new()), Some(rgba_1x1())),
+            ClipboardContent::Image { .. }
+        ));
+        assert_eq!(classify(None, None), ClipboardContent::Empty);
+    }
+
+    #[test]
+    fn paste_text_inserts_text_at_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        app.editor_content
+            .as_mut()
+            .unwrap()
+            .move_to(text_editor::Cursor {
+                position: text_editor::Position { line: 0, column: 1 },
+                selection: None,
+            });
+        let _ = app.apply_paste(ClipboardContent::Text("XY".into()));
+        assert_eq!(app.store.notes()[0].content, "aXYb");
+        assert!(app.store.is_dirty());
+    }
+
+    #[test]
+    fn paste_image_only_inserts_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "a");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let (rgba, width, height) = rgba_1x1();
+        let _ = app.apply_paste(classify(None, Some((rgba, width, height))));
+        let content = app.store.notes()[0].content.clone();
+        assert!(content.starts_with("![](images/") && content.ends_with(".png)\na"));
+    }
+
+    #[test]
+    fn paste_with_text_and_image_prefers_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "");
+        let _ = app.apply_paste(classify(Some("hello".into()), Some(rgba_1x1())));
+        assert_eq!(app.store.notes()[0].content, "hello");
+        assert!(!dir.path().join("images").exists());
+    }
+
+    #[test]
+    fn paste_falls_back_to_system_clipboard_without_arboard_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let task = app.apply_paste(classify(None, None));
+        assert!(task.units() > 0, "no clipboard read was started");
+        assert_eq!(app.store.notes()[0].content, "ab");
+    }
+
+    fn type_char(app: &mut App, c: char) {
+        let _ = app.update(Message::NoteEdited(text_editor::Action::Edit(
+            text_editor::Edit::Insert(c),
+        )));
+    }
+
+    fn cmd_z(shift: bool) -> Message {
+        use keyboard::key::{NativeCode, Physical};
+        let key = keyboard::Key::Character(if shift { "Z" } else { "z" }.into());
+        let mut modifiers = keyboard::Modifiers::COMMAND;
+        if shift {
+            modifiers |= keyboard::Modifiers::SHIFT;
+        }
+        Message::Key(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: Physical::Unidentified(NativeCode::Unidentified),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn undo_reverts_typing_and_redo_restores_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(None));
+        type_char(&mut app, 'c');
+        type_char(&mut app, 'd');
+        assert_eq!(app.store.notes()[0].content, "abcd");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "ab");
+        assert_eq!(cursor_of(&app).column, 2);
+        let _ = app.update(Message::Redo);
+        assert_eq!(app.store.notes()[0].content, "abcd");
+        let _ = app.update(Message::Redo);
+        assert_eq!(app.store.notes()[0].content, "abcd");
+    }
+
+    #[test]
+    fn words_undo_one_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "");
+        let _ = app.update(Message::BodyClicked(None));
+        for c in "hi you".chars() {
+            type_char(&mut app, c);
+        }
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "hi ");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "hi");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "");
+    }
+
+    #[test]
+    fn undo_reverts_toolbar_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hello world");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let _ = app.update(Message::NoteEdited(text_editor::Action::SelectWord));
+        let _ = app.update(Message::FormatApplied(rich::Format::Bold));
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "hello world");
+    }
+
+    #[test]
+    fn undo_reverts_checkbox_toggle_in_rendered_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "- [ ] t");
+        assert!(!app.editing);
+        let _ = app.update(Message::ToggleTask(0));
+        assert_eq!(app.store.notes()[0].content, "- [x] t");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "- [ ] t");
+        assert!(matches!(
+            app.doc.blocks[0].kind,
+            BlockKind::ListItem {
+                task: Some(false),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reopening_a_note_starts_a_fresh_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(None));
+        type_char(&mut app, 'c');
+        let _ = app.update(Message::ClosePanel);
+        settle(&mut app);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.store.notes()[0].content, "abc");
+    }
+
+    #[test]
+    fn cmd_z_in_rendered_view_checks_title_focus_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "- [ ] t");
+        let _ = app.update(Message::ToggleTask(0));
+        let task = app.update(cmd_z(false));
+        // Undo waits for the focus check, so nothing changed yet.
+        assert!(task.units() > 0);
+        assert_eq!(app.store.notes()[0].content, "- [x] t");
+    }
+
+    fn selected(app: &App) -> Option<String> {
+        app.editor_content.as_ref().unwrap().selection()
+    }
+
+    fn editor_click() -> Message {
+        Message::NoteEdited(text_editor::Action::Click(Point::ORIGIN))
+    }
+
+    #[test]
+    fn press_in_formatted_view_puts_cursor_at_that_character() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x\na **bold** c");
+        let _ = app.update(Message::BodyPressed(7));
+        assert!(app.editing);
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (1, 5));
+        assert_eq!(selected(&app), None);
+    }
+
+    #[test]
+    fn quick_clicks_after_a_press_select_word_then_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x\na **bold** c");
+        let _ = app.update(Message::BodyPressed(7));
+        // The second click lands on the editor that just appeared.
+        let _ = app.update(editor_click());
+        assert_eq!(selected(&app).as_deref(), Some("bold"));
+        // The editor sees its own first click and reports a double.
+        let _ = app.update(Message::NoteEdited(text_editor::Action::SelectWord));
+        assert_eq!(selected(&app).as_deref(), Some("a **bold** c"));
+    }
+
+    #[test]
+    fn double_click_in_formatted_view_then_bold() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hello world");
+        let _ = app.update(Message::BodyPressed(8));
+        let _ = app.update(editor_click());
+        let _ = app.update(Message::FormatApplied(rich::Format::Bold));
+        assert_eq!(app.store.notes()[0].content, "hello **world**");
+    }
+
+    #[test]
+    fn slow_second_click_is_an_ordinary_click() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hello world");
+        let _ = app.update(Message::BodyPressed(8));
+        app.rendered_click.as_mut().unwrap().at -= Duration::from_secs(1);
+        let _ = app.update(editor_click());
+        assert_eq!(selected(&app), None);
+    }
+
+    #[test]
+    fn bold_applies_to_word_selected_by_double_click() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hello world");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let _ = app.update(Message::NoteEdited(text_editor::Action::SelectWord));
+        let _ = app.update(Message::FormatApplied(rich::Format::Bold));
+        assert_eq!(app.store.notes()[0].content, "**hello** world");
+    }
+
+    #[test]
+    fn late_clipboard_text_pastes_into_its_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(None));
+        let id = app.active_note.unwrap();
+        let _ = app.update(Message::ClipboardText(id, "XY".into()));
+        assert_eq!(app.store.notes()[0].content, "abXY");
+    }
+
+    #[test]
+    fn late_clipboard_text_ignored_after_leaving_edit_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(None));
+        let id = app.active_note.unwrap();
+        let _ = app.update(Message::EditorBlurred);
+        let _ = app.update(Message::ClipboardText(id, "XY".into()));
+        assert_eq!(app.store.notes()[0].content, "ab");
+        assert!(!app.store.is_dirty());
+    }
+
+    #[test]
+    fn late_clipboard_text_for_other_note_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(None));
+        let _ = app.update(Message::ClipboardText(Uuid::new_v4(), "XY".into()));
+        assert_eq!(app.store.notes()[0].content, "ab");
+        assert!(!app.store.is_dirty());
+    }
+
+    #[test]
+    fn paste_ignored_when_not_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hi");
+        assert!(!app.editing);
+        let _ = app.update(Message::PasteRequested);
+        assert_eq!(app.store.notes()[0].content, "hi");
+    }
+
+    #[test]
+    fn dropped_non_image_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hi");
+        let txt = dir.path().join("a.txt");
+        std::fs::write(&txt, "x").unwrap();
+        let _ = app.update(Message::ImageDropped(txt));
+        assert_eq!(app.store.notes()[0].content, "hi");
+        assert!(!app.store.is_dirty());
+    }
+
+    #[test]
+    fn drop_without_open_note_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.store.add_note(&crate::note::PALETTE);
+        app.store.did_save();
+        let _ = app.update(Message::ImageDropped(png_file(&dir, "p.png")));
+        assert_eq!(app.store.notes()[0].content, "");
+        assert!(!app.store.is_dirty());
+        assert!(!dir.path().join("images").exists());
+    }
+
+    #[test]
+    fn text_and_note_color_pickers_exclude_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let _ = app.update(Message::ToggleColorPicker);
+        let _ = app.update(Message::ToggleTextColorPicker);
+        assert!(app.text_color_picker_open && !app.color_picker_open);
+        let _ = app.update(Message::ToggleColorPicker);
+        assert!(app.color_picker_open && !app.text_color_picker_open);
+    }
+
+    #[test]
+    fn blur_while_rendered_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "- [ ] t");
+        let doc = app.doc.clone();
+        let _ = app.update(Message::EditorBlurred);
+        assert!(!app.editing);
+        assert_eq!(app.doc, doc);
+        assert_eq!(app.store.notes()[0].content, "- [ ] t");
+        assert!(!app.store.is_dirty());
+        assert!(app.morph.is_opening());
+    }
+
+    #[test]
+    fn undecodable_image_is_marked_broken() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel = format!("images/{}.png", Uuid::new_v4());
+        std::fs::create_dir_all(dir.path().join("images")).unwrap();
+        std::fs::write(dir.path().join(&rel), b"not a png").unwrap();
+        let app = app_with_note(&dir, &format!("![]({rel})"));
+        assert!(app.broken_images.contains(&rel));
+    }
+
+    #[test]
+    fn valid_image_is_not_broken() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel = images::import_png(dir.path(), &[255; 16], 2, 2).unwrap();
+        let app = app_with_note(&dir, &format!("![]({rel})"));
+        assert!(matches!(app.doc.blocks[0].kind, BlockKind::Image { .. }));
+        assert!(app.broken_images.is_empty());
+    }
+
+    #[test]
+    fn failed_load_keeps_notes_file_and_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes.json");
+        std::fs::write(&notes, "{not json").unwrap();
+        let image = images::import_png(dir.path(), &[255; 16], 2, 2).unwrap();
+        let mut store = NoteStore::load(notes.clone());
+        prepare_store(&mut store, &crate::note::PALETTE);
+        assert!(dir.path().join(&image).is_file());
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "{not json");
+        assert!(store.notes().is_empty());
+    }
+
+    #[test]
+    fn fresh_store_is_seeded_and_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = images::import_png(dir.path(), &[255; 16], 2, 2).unwrap();
+        let mut store = NoteStore::load(dir.path().join("notes.json"));
+        prepare_store(&mut store, &crate::note::PALETTE);
+        assert_eq!(store.notes().len(), 3);
+        assert!(!dir.path().join(&image).exists());
+    }
+
+    #[test]
+    fn jpeg_gif_and_webp_images_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("images")).unwrap();
+        let mut content = String::new();
+        for ext in ["jpg", "gif", "webp"] {
+            let rel = format!("images/{}.{ext}", Uuid::new_v4());
+            image::RgbImage::from_pixel(2, 2, image::Rgb([200, 30, 30]))
+                .save(dir.path().join(&rel))
+                .unwrap();
+            content.push_str(&format!("![]({rel})\n\n"));
+        }
+        let app = app_with_note(&dir, &content);
+        assert_eq!(app.doc.blocks.len(), 3);
+        assert!(app.broken_images.is_empty(), "{:?}", app.broken_images);
+    }
+
+    #[test]
+    fn link_scheme_filter() {
+        use crate::rich_view::openable;
+        assert!(openable("https://a").is_some());
+        assert!(openable("http://a").is_some());
+        assert!(openable("mailto:a@b").is_some());
+        assert!(openable("file:///etc").is_none());
+        assert!(openable("javascript:x").is_none());
+    }
+
+    #[test]
+    fn openable_returns_the_trimmed_url_it_checked() {
+        use crate::rich_view::openable;
+        assert_eq!(
+            openable("  \thttps://a/?x=1&y=2 "),
+            Some("https://a/?x=1&y=2")
+        );
+        assert_eq!(openable(" javascript:x"), None);
     }
 
     #[test]

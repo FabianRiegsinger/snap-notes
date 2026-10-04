@@ -2,7 +2,7 @@ use crate::note::{Note, NoteColor};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -18,21 +18,31 @@ pub struct NoteStore {
     path: PathBuf,
     dirty: bool,
     last_mark: Option<Instant>,
+    load_failed: bool,
 }
 
 impl NoteStore {
     pub fn load(path: PathBuf) -> Self {
-        let notes = fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<StoreFile>(&s).ok())
-            .map(|f| f.notes)
-            .unwrap_or_default();
+        let (notes, load_failed) = match fs::read_to_string(&path) {
+            Ok(s) => match serde_json::from_str::<StoreFile>(&s) {
+                Ok(f) => (f.notes, false),
+                Err(_) => (Vec::new(), true),
+            },
+            Err(e) => (Vec::new(), e.kind() != io::ErrorKind::NotFound),
+        };
         Self {
             notes,
             path,
             dirty: false,
             last_mark: None,
+            load_failed,
         }
+    }
+
+    /// The notes file exists but could not be read or parsed, so the store
+    /// started empty.
+    pub fn load_failed(&self) -> bool {
+        self.load_failed
     }
 
     pub fn save(&self) -> io::Result<()> {
@@ -44,6 +54,14 @@ impl NoteStore {
         fs::write(&tmp, &json)?;
         fs::rename(&tmp, &self.path)?;
         Ok(())
+    }
+
+    /// The folder holding the notes file (and the note images).
+    pub fn dir(&self) -> &Path {
+        match self.path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        }
     }
 
     pub fn notes(&self) -> &[Note] {
@@ -123,6 +141,11 @@ impl NoteStore {
                 .unwrap_or(false)
     }
 
+    #[cfg(test)]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     pub fn did_save(&mut self) {
         self.dirty = false;
         self.last_mark = None;
@@ -139,6 +162,22 @@ mod tests {
     fn load_missing_file_returns_empty_store() {
         let store = NoteStore::load(PathBuf::from("/nonexistent/notes.json"));
         assert!(store.notes().is_empty());
+    }
+
+    #[test]
+    fn corrupt_file_sets_load_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.json");
+        fs::write(&path, "{not json").unwrap();
+        let store = NoteStore::load(path);
+        assert!(store.load_failed());
+        assert!(store.notes().is_empty());
+    }
+
+    #[test]
+    fn missing_file_does_not_set_load_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!NoteStore::load(dir.path().join("notes.json")).load_failed());
     }
 
     #[test]
@@ -221,6 +260,17 @@ mod tests {
         assert!(store.recolor_many(&[(x, y), (y, z)]));
         let colors: Vec<_> = store.notes().iter().map(|n| n.color).collect();
         assert_eq!(colors, vec![y, z]);
+    }
+
+    #[test]
+    fn dir_is_the_notes_file_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NoteStore::load(dir.path().join("n.json"));
+        assert_eq!(store.dir(), dir.path());
+        assert_eq!(
+            NoteStore::load(PathBuf::from("n.json")).dir(),
+            Path::new(".")
+        );
     }
 
     #[test]

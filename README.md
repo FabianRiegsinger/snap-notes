@@ -6,7 +6,7 @@
 
 - **Out of the way:** about 6 px of screen per note. Clicks anywhere else go straight to the apps behind it.
 - **One glance away:** peek at any note without opening it.
-- **Portable:** a single executable, no installer. Your notes are a JSON file next to it.
+- **Portable:** a single executable, no installer. Your notes are a JSON file next to it, with their images in an `images/` folder.
 - **Cross-platform:** macOS, Windows and Linux.
 
 ## What it can do
@@ -25,6 +25,33 @@
 - **Resize it:** drag any edge or corner. Each note remembers its own size.
 - **Color code it:** pick from a 20-color palette with the swatch in the header.
 - **Delete with confirmation:** the 🗑 button asks first, then folds the note away.
+- **Images:** drop a png, jpg, gif or webp file (up to 20 MB) onto an open note, paste an image-only clipboard with Cmd/Ctrl+V, or use the 🖼 button in the toolbar.
+- **Clickable links:** `http`, `https` and `mailto` links in the formatted view open in your browser.
+
+### Formatting
+Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. In edit mode a toolbar offers **B**, *I*, ~~S~~, code, text color, highlight, size (small, normal, large, huge), link and 🖼.
+
+| Effect | Syntax |
+|---|---|
+| Bold / italic / strikethrough | `**bold**`, `*italic*`, `~~struck~~` |
+| Inline code | `` `code` `` |
+| Heading | `# H1` … `### H3` (H4–H6 render as H3) |
+| Lists | `- item`, `1. item`, nested by indentation |
+| Task | `- [ ] open`, `- [x] done` (click the checkbox to toggle it) |
+| Quote / rule / code block | `> quote`, `---`, fenced ```` ``` ```` |
+| Link | `[text](https://example.com)` or `<https://example.com>` |
+| Image | `![alt](images/<uuid>.<ext>)` (PNG, JPEG, GIF or WebP) |
+| Text color | `{coral}text{/}` or `{#FF0000}text{/}` |
+| Highlight | `{bg:amber}text{/}` or `==text==` |
+| Font size | `{size:20}text{/}` (8–48) |
+| Literal brace | `\{` |
+
+- **Color names:** `coral`, `rose`, `blush`, `peach`, `tangerine`, `amber`, `lemon`, `sand`, `lime`, `sage`, `mint`, `teal`, `aqua`, `sky`, `cornflower`, `periwinkle`, `lavender`, `orchid`, `mocha`, `slate`. They follow your palette in Settings, while hex colors stay fixed.
+- **Tags nest:** `{coral}{size:20}big red{/} red{/}`. `{/}` closes the innermost tag, and an unclosed tag ends with its paragraph.
+- **Highlight with `==`:** only when it hugs the text (`==word==`), so `a == b` stays as typed.
+- **Line breaks:** a single newline stays a line break.
+- **Raw HTML:** shows as typed and is never rendered.
+- **Older notes:** keep their text, but a line indented by 4 spaces now shows as a code block, and a line followed by `---` as a heading.
 
 ### Settings
 Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group has a Reset button.
@@ -48,7 +75,8 @@ On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Se
 |---|---|
 | Cmd/Ctrl+N | New note |
 | Cmd/Ctrl+, | Open or close settings |
-| Esc | Close settings, or fold the open note |
+| Cmd/Ctrl+V | Paste an image into the open note |
+| Esc | Leave edit mode, close settings, or fold the open note |
 
 ## Platform support
 
@@ -62,9 +90,9 @@ On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Se
 
 ## Your data
 
-Notes are stored in `notes.json` and settings in `settings.json`, next to the executable. Edits save automatically, with a 500 ms debounce and atomic writes, so a crash never leaves a half-written file. A hand-edited `settings.json` with a typo keeps every valid value and falls back to defaults only for the broken ones.
+Notes are stored in `notes.json` and settings in `settings.json`, next to the executable. Images added to notes live in an `images/` folder next to them. Edits save automatically, with a 500 ms debounce and atomic writes, so a crash never leaves a half-written file. A hand-edited `settings.json` with a typo keeps every valid value and falls back to defaults only for the broken ones. At startup, images that no note references are deleted from `images/`, except when `notes.json` fails to load.
 
-To move Snap Notes to another machine, copy the executable together with both JSON files.
+To move Snap Notes to another machine, copy the executable together with both JSON files and the `images/` folder.
 
 ## Install
 
@@ -82,6 +110,7 @@ The release binary is optimized for size (`opt-level = "z"`, LTO, stripped). Lin
 - **Rust** with [iced](https://iced.rs) 0.14 (wgpu rendering)
 - A custom bar-strip widget with Gaussian magnification and critically damped springs
 - [`tray-icon`](https://crates.io/crates/tray-icon) for the menu bar/tray icon, plus native calls for click-through and Dock/taskbar visibility (AppKit on macOS, Win32 on Windows)
+- [`pulldown-cmark`](https://crates.io/crates/pulldown-cmark) for Markdown, with a small tag layer on top for color, highlight and size
 - JSON persistence with lenient loading and atomic writes
 
 ## License
