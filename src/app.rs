@@ -996,6 +996,7 @@ impl App {
             height_fraction: self.strip_fraction(),
             paper_tint: self.settings.settings().notes.paper_tint,
             peek_confirm: self.peek_confirm_delete.is_some(),
+            theme: self.theme,
         })
         .width(Fill)
         .height(Fill)

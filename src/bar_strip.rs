@@ -3,6 +3,7 @@ use crate::app::{DragState, Message};
 use crate::note::Note;
 use crate::peek::{draw_peek, peek_layout, peek_text};
 use crate::settings::BarSettings;
+use crate::theme;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
@@ -174,6 +175,7 @@ pub struct BarStrip<'a> {
     pub paper_tint: f32,
     /// The open peek asks whether to delete its note.
     pub peek_confirm: bool,
+    pub theme: theme::Theme,
 }
 
 impl<'a> BarStrip<'a> {
@@ -285,6 +287,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             note,
                             *bar_rect,
                             bounds,
+                            &self.theme,
                             CORNER_RADIUS,
                             progress,
                             self.paper_tint,
@@ -749,6 +752,7 @@ mod tests {
             height_fraction: 1.0,
             paper_tint: 0.0,
             peek_confirm: false,
+            theme: theme::Theme::default(),
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];

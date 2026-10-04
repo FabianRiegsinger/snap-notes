@@ -89,9 +89,6 @@ const FOCUS_RING: f32 = 1.5;
 /// Height of the grip along the top edge, under the adhesive band.
 const GRIP_HEIGHT: f32 = 16.0;
 
-/// Corner radius of an open note (and of a fully open peek).
-pub(crate) const NOTE_RADIUS: f32 = RADIUS_SURFACE;
-
 pub struct PostIt<'a> {
     pub note: &'a Note,
     pub theme: theme::Theme,
@@ -117,28 +114,6 @@ pub struct PostIt<'a> {
     pub text_color_picker_open: bool,
     pub hovered: bool,
     pub dragging: bool,
-}
-
-/// Light-theme shim for surfaces not yet themed (removed in Task 7).
-pub(crate) fn ink(alpha: f32) -> Color {
-    theme::Theme::default().ink(alpha)
-}
-
-/// Light-theme shim for surfaces not yet themed (removed in Task 7).
-///
-/// Mixes the note color toward black (`amount > 0`) or white (`amount < 0`).
-pub(crate) fn shade(note: &Note, amount: f32, alpha: f32) -> Color {
-    let [r, g, b, _] = note.color.rgba;
-    let base = Color::from_rgb(r, g, b);
-    let toward = if amount >= 0.0 {
-        Color::BLACK
-    } else {
-        Color::WHITE
-    };
-    Color {
-        a: alpha,
-        ..theme::mix(base, toward, amount.abs())
-    }
 }
 
 /// A button whose background darkens while pressed and whose label sinks
@@ -294,7 +269,12 @@ fn editor_min_height(available: f32) -> f32 {
 /// The paper while the note grows out of its bar: the bar's color at
 /// `progress` 0, so the morph has no seam where it meets the bar, easing
 /// into the theme's paper at 1.
-fn morph_paper(theme: &theme::Theme, color: NoteColor, tint: f32, progress: f32) -> Color {
+pub(crate) fn morph_paper(
+    theme: &theme::Theme,
+    color: NoteColor,
+    tint: f32,
+    progress: f32,
+) -> Color {
     let [r, g, b, _] = color.rgba;
     let bar = Color::from_rgb(r, g, b);
     theme::mix(bar, theme.paper(color, tint), ease_out_cubic(progress))
