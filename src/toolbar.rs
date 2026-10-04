@@ -44,6 +44,40 @@ fn button_icons() -> [Icon; 9] {
 
 /// How far the toolbar rises while it fades in.
 const SLIDE: f32 = 6.0;
+/// The toolbar's vertical padding at rest.
+const PAD_TOP: f32 = 4.0;
+const PAD_BOTTOM: f32 = 4.0;
+
+/// Vertical padding while the toolbar slides up into place. The slide moves
+/// space from below the toolbar to above it, so the total (and the body
+/// text) never moves. `bottom` goes negative while the slide is larger than
+/// the bottom padding: that share is borrowed from the space below.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlidePadding {
+    pub top: f32,
+    pub bottom: f32,
+}
+
+impl SlidePadding {
+    /// Bottom padding the toolbar itself can use.
+    pub fn toolbar_bottom(self) -> f32 {
+        self.bottom.max(0.0)
+    }
+
+    /// How much the space below the toolbar must give up.
+    pub fn borrowed(self) -> f32 {
+        (-self.bottom).max(0.0)
+    }
+}
+
+/// Padding at `fade` (eased, 0..=1); at 1 it is the resting padding.
+pub fn slide_padding(fade: f32) -> SlidePadding {
+    let offset = SLIDE * (1.0 - fade.clamp(0.0, 1.0));
+    SlidePadding {
+        top: PAD_TOP + offset,
+        bottom: PAD_BOTTOM - offset,
+    }
+}
 
 /// The formatting row shown above the editor, with the text color grid
 /// below it while `color_open`. `alpha` fades it like the header controls;
@@ -135,14 +169,14 @@ pub fn toolbar<'a>(
             .collect();
         col = col.push(container(column(rows).spacing(2)));
     }
-    // The slide moves space from above to below, so the body never jumps.
+    let slide = slide_padding(fade);
     container(col)
         .padding(
-            Padding::new(4.0)
+            Padding::ZERO
                 .left(14)
                 .right(14)
-                .top(4.0 + SLIDE * (1.0 - fade))
-                .bottom(4.0 + SLIDE * fade),
+                .top(slide.top)
+                .bottom(slide.toolbar_bottom()),
         )
         .into()
 }
@@ -150,6 +184,22 @@ pub fn toolbar<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolbar_padding_total_is_constant() {
+        for e in [0.0, 0.5, 1.0] {
+            let p = slide_padding(e);
+            assert!(
+                (p.top + p.bottom - (PAD_TOP + PAD_BOTTOM)).abs() < 1e-4,
+                "e {e}"
+            );
+            assert!(p.toolbar_bottom() >= 0.0 && p.borrowed() >= 0.0);
+        }
+        let rest = slide_padding(1.0);
+        assert_eq!(rest.top, PAD_TOP);
+        assert_eq!(rest.borrowed(), 0.0);
+        assert_eq!(slide_padding(0.0).top, PAD_TOP + SLIDE);
+    }
 
     #[test]
     fn toolbar_buttons_use_icons() {

@@ -9,7 +9,7 @@ use crate::press_through::press_through;
 use crate::rich::Doc;
 use crate::rich_view;
 use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM};
-use crate::toolbar::toolbar;
+use crate::toolbar::{slide_padding, toolbar};
 
 use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, Scrollable};
 use iced::advanced::widget::{Id, Operation};
@@ -307,6 +307,13 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     let mode_eased = ease_out_cubic(mode_fade);
     // The body that just appeared fades in after a mode switch.
     let body_a = a * mode_eased;
+    // Space the sliding toolbar takes from the top of the editor below it,
+    // so the text stays put.
+    let borrowed = if editing {
+        slide_padding(mode_eased).borrowed()
+    } else {
+        0.0
+    };
     let controls = if hovered || dragging || color_picker_open || confirm_delete {
         a
     } else {
@@ -433,10 +440,10 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                         .placeholder(PLACEHOLDER)
                         .on_action(Message::NoteEdited)
                         .key_binding(body_key_binding)
-                        .min_height(editor_min_height(available.height))
+                        .min_height(editor_min_height(available.height) + borrowed)
                         .size(TEXT_SM)
                         .line_height(text::LineHeight::Relative(theme::BODY_LINE_HEIGHT))
-                        .padding(body_padding())
+                        .padding(body_padding().top(EDITOR_PADDING_TOP - borrowed))
                         .style(move |_theme: &Theme, _status| text_editor::Style {
                             background: Color::TRANSPARENT.into(),
                             border: Border::default(),
