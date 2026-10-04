@@ -29,6 +29,15 @@ const BODY_GAP: f32 = 8.0;
 /// The divider is inset like the note's.
 const DIVIDER_INSET: f32 = 14.0;
 const MAX_LINES: usize = 3;
+/// The delete button in the header's top-right corner.
+const TRASH_SIZE: f32 = 22.0;
+const TRASH_INSET: f32 = 8.0;
+/// The "Delete this note?" question and its two buttons below it.
+const CONFIRM_BUTTON: Size = Size::new(68.0, 24.0);
+const CONFIRM_GAP: f32 = 8.0;
+const CONFIRM_HEIGHT: f32 = BODY_LINE + CONFIRM_GAP + 24.0;
+/// The open note's confirmation colors.
+const DANGER: Color = Color::from_rgba(0.75, 0.18, 0.18, 0.95);
 /// Rough glyph widths as a share of the font size, kept generous so the
 /// estimated text height never cuts text off.
 const TITLE_GLYPH: f32 = 0.62;
@@ -39,13 +48,18 @@ pub struct PeekText {
     pub lines: Vec<String>,
 }
 
-/// Where the peek and its parts are. Text positions are those of the fully
-/// open peek, so the text never moves while the peek grows.
+/// Where the peek and its parts are. Text and button positions are those of
+/// the fully open peek, so nothing moves while the peek grows.
 pub struct PeekLayout {
     pub rect: Rectangle,
     pub title: Point,
     pub divider_y: f32,
     pub body: Point,
+    /// The delete button in the header.
+    pub trash: Rectangle,
+    /// The confirmation's buttons, used while it shows.
+    pub delete: Rectangle,
+    pub cancel: Rectangle,
 }
 
 fn inner_width() -> f32 {
@@ -56,8 +70,13 @@ fn body_chars_per_line() -> usize {
     (inner_width() / (BODY_SIZE * BODY_GLYPH)).floor() as usize
 }
 
+/// The title leaves room for the delete button on its right.
+fn title_width() -> f32 {
+    inner_width() - (TRASH_SIZE + TRASH_INSET - PADDING_X).max(0.0) - 4.0
+}
+
 fn title_rows(title: &str) -> usize {
-    let per_row = (inner_width() / (TITLE_SIZE * TITLE_GLYPH))
+    let per_row = (title_width() / (TITLE_SIZE * TITLE_GLYPH))
         .floor()
         .max(1.0) as usize;
     title.chars().count().div_ceil(per_row).max(1)
@@ -92,9 +111,13 @@ fn title_height(text: &PeekText) -> f32 {
 }
 
 /// Height of the open peek: header, divider and body (at least one line,
-/// which shows a placeholder for an empty body).
-pub fn peek_height(text: &PeekText) -> f32 {
-    let body = text.lines.len().max(1) as f32 * BODY_LINE;
+/// which shows a placeholder for an empty body, and room for the delete
+/// confirmation while `confirming`).
+pub fn peek_height(text: &PeekText, confirming: bool) -> f32 {
+    let mut body = text.lines.len().max(1) as f32 * BODY_LINE;
+    if confirming {
+        body = body.max(CONFIRM_HEIGHT);
+    }
     PADDING_TOP + title_height(text) + DIVIDER_GAP + 1.0 + BODY_GAP + body + PADDING_BOTTOM
 }
 
@@ -105,9 +128,10 @@ pub fn peek_layout(
     bounds: Rectangle,
     progress: f32,
     text: &PeekText,
+    confirming: bool,
 ) -> PeekLayout {
     let full_width = PEEK_WIDTH.max(bar.width);
-    let full_height = peek_height(text).max(bar.height);
+    let full_height = peek_height(text, confirming).max(bar.height);
     let rect_at = |t: f32| {
         let width = lerp(bar.width, full_width, t);
         let height = lerp(bar.height, full_height, t);
@@ -122,11 +146,25 @@ pub fn peek_layout(
     let full = rect_at(1.0);
     let title = Point::new(full.x + PADDING_X, full.y + PADDING_TOP);
     let divider_y = title.y + title_height(text) + DIVIDER_GAP;
+    let body = Point::new(title.x, divider_y + 1.0 + BODY_GAP);
+    let buttons_y = body.y + BODY_LINE + CONFIRM_GAP;
     PeekLayout {
         rect: rect_at(ease_out_cubic(progress)),
         title,
         divider_y,
-        body: Point::new(title.x, divider_y + 1.0 + BODY_GAP),
+        body,
+        trash: Rectangle::new(
+            Point::new(
+                full.x + full.width - TRASH_INSET - TRASH_SIZE,
+                title.y + (TITLE_LINE - TRASH_SIZE) / 2.0,
+            ),
+            Size::new(TRASH_SIZE, TRASH_SIZE),
+        ),
+        delete: Rectangle::new(Point::new(body.x, buttons_y), CONFIRM_BUTTON),
+        cancel: Rectangle::new(
+            Point::new(body.x + CONFIRM_BUTTON.width + CONFIRM_GAP, buttons_y),
+            CONFIRM_BUTTON,
+        ),
     }
 }
 
@@ -135,8 +173,63 @@ fn peek_radius(bar_radius: f32, progress: f32) -> f32 {
     lerp(bar_radius, NOTE_RADIUS, ease_out_cubic(progress))
 }
 
+/// Draws `label` centered in `rect`, clipped to `clip`.
+fn draw_label(
+    renderer: &mut iced::Renderer,
+    label: &str,
+    rect: Rectangle,
+    size: f32,
+    color: Color,
+    clip: Rectangle,
+) {
+    renderer.fill_text(
+        Text {
+            content: label.to_string(),
+            bounds: rect.size(),
+            size: Pixels(size),
+            line_height: LineHeight::default(),
+            font: Font::DEFAULT,
+            align_x: alignment::Horizontal::Center.into(),
+            align_y: alignment::Vertical::Center,
+            shaping: Shaping::Advanced,
+            wrapping: Wrapping::None,
+        },
+        rect.center(),
+        color,
+        clip,
+    );
+}
+
+/// A rounded button face: `fill` behind a centered `label`.
+fn draw_button(
+    renderer: &mut iced::Renderer,
+    label: &str,
+    rect: Rectangle,
+    fill: Color,
+    text_color: Color,
+    clip: Rectangle,
+) {
+    renderer::Renderer::fill_quad(
+        renderer,
+        Quad {
+            bounds: rect,
+            border: Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            shadow: Shadow::default(),
+            snap: true,
+        },
+        fill,
+    );
+    draw_label(renderer, label, rect, 13.0, text_color, clip);
+}
+
 /// Draws the peek: the bar's color turning into paper, then the title,
-/// divider and body fading in once the peek is nearly fully open.
+/// divider and body fading in once the peek is nearly fully open. The
+/// header has a delete button; while `confirming`, the body asks first.
+/// `cursor` darkens whichever button it is over.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_peek(
     renderer: &mut iced::Renderer,
     note: &Note,
@@ -145,9 +238,11 @@ pub fn draw_peek(
     radius: f32,
     progress: f32,
     paper_tint: f32,
+    confirming: bool,
+    cursor: Option<Point>,
 ) {
     let text = peek_text(note);
-    let layout = peek_layout(bar, bounds, progress, &text);
+    let layout = peek_layout(bar, bounds, progress, &text, confirming);
     let rect = layout.rect;
     let t = ease_out_cubic(progress);
     renderer::Renderer::fill_quad(
@@ -173,12 +268,19 @@ pub fn draw_peek(
         return;
     }
 
+    let hovered = |r: Rectangle| cursor.is_some_and(|c| r.contains(c));
     let mut draw_text =
         |content: String, at: Point, font: Font, size: f32, line: f32, rows: usize, color| {
+            // The title stays clear of the delete button.
+            let width = if font == TITLE_FONT {
+                title_width()
+            } else {
+                inner_width()
+            };
             renderer.fill_text(
                 Text {
                     content,
-                    bounds: Size::new(inner_width(), rows as f32 * line),
+                    bounds: Size::new(width, rows as f32 * line),
                     size: Pixels(size),
                     line_height: LineHeight::Absolute(Pixels(line)),
                     font,
@@ -219,8 +321,18 @@ pub fn draw_peek(
         ),
     }
 
-    // Body: the first lines, or the note's placeholder.
-    if text.lines.is_empty() {
+    // Body: the delete confirmation, the first lines, or the placeholder.
+    if confirming {
+        draw_text(
+            "Delete this note?".into(),
+            layout.body,
+            Font::DEFAULT,
+            13.0,
+            BODY_LINE,
+            1,
+            ink(alpha),
+        );
+    } else if text.lines.is_empty() {
         draw_text(
             "Write something…".into(),
             layout.body,
@@ -231,7 +343,12 @@ pub fn draw_peek(
             ink(0.35 * alpha),
         );
     }
-    for (i, content) in text.lines.into_iter().enumerate() {
+    for (i, content) in text
+        .lines
+        .into_iter()
+        .enumerate()
+        .take_while(|_| !confirming)
+    {
         let at = Point::new(layout.body.x, layout.body.y + i as f32 * BODY_LINE);
         draw_text(
             content,
@@ -257,6 +374,42 @@ pub fn draw_peek(
         },
         ink(0.12 * alpha),
     );
+
+    let trash_alpha = if hovered(layout.trash) || confirming {
+        0.9
+    } else {
+        0.45
+    };
+    draw_label(
+        renderer,
+        "🗑",
+        layout.trash,
+        14.0,
+        ink(trash_alpha * alpha),
+        rect,
+    );
+    if confirming {
+        let shade_if = |r: Rectangle, base: f32| if hovered(r) { base + 0.08 } else { base };
+        draw_button(
+            renderer,
+            "Delete",
+            layout.delete,
+            Color {
+                a: shade_if(layout.delete, DANGER.a - 0.08) * alpha,
+                ..DANGER
+            },
+            Color::WHITE,
+            rect,
+        );
+        draw_button(
+            renderer,
+            "Cancel",
+            layout.cancel,
+            ink(shade_if(layout.cancel, 0.12) * alpha),
+            ink(alpha),
+            rect,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -302,8 +455,8 @@ mod tests {
 
     #[test]
     fn long_titles_get_more_height() {
-        let short = peek_height(&peek_text(&note("Short", "")));
-        let long = peek_height(&peek_text(&note(&"word ".repeat(30), "")));
+        let short = peek_height(&peek_text(&note("Short", "")), false);
+        let long = peek_height(&peek_text(&note(&"word ".repeat(30), "")), false);
         assert!(long > short);
     }
 
@@ -321,17 +474,17 @@ mod tests {
     fn peek_starts_as_the_bar() {
         let bar = Rectangle::new(Point::new(960.0, 300.0), Size::new(30.0, 150.0));
         let text = peek_text(&note("T", "a\nb"));
-        assert_eq!(peek_layout(bar, screen(), 0.0, &text).rect, bar);
+        assert_eq!(peek_layout(bar, screen(), 0.0, &text, false).rect, bar);
     }
 
     #[test]
     fn open_peek_widens_leftward_and_fits_content() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
         let text = peek_text(&note("Groceries", "milk\neggs\nbread"));
-        let l = peek_layout(bar, screen(), 1.0, &text);
+        let l = peek_layout(bar, screen(), 1.0, &text, false);
         assert!((l.rect.width - PEEK_WIDTH).abs() < 0.01);
         assert!((l.rect.x + l.rect.width - 990.0).abs() < 0.01);
-        assert!((l.rect.height - peek_height(&text)).abs() < 0.01);
+        assert!((l.rect.height - peek_height(&text, false)).abs() < 0.01);
         let center = |r: Rectangle| r.y + r.height / 2.0;
         assert!((center(l.rect) - center(bar)).abs() < 0.01);
     }
@@ -340,18 +493,51 @@ mod tests {
     fn header_sits_on_top_and_body_below() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 200.0));
         let text = peek_text(&note("Groceries", "milk\neggs"));
-        let l = peek_layout(bar, screen(), 1.0, &text);
+        let l = peek_layout(bar, screen(), 1.0, &text, false);
         assert!((l.title.y - (l.rect.y + PADDING_TOP)).abs() < 0.01);
         assert!(l.divider_y >= l.title.y + TITLE_LINE);
         assert!(l.body.y > l.divider_y);
         assert!(l.body.y + 2.0 * BODY_LINE <= l.rect.y + l.rect.height);
     }
 
+    fn inside(outer: Rectangle, inner: Rectangle) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.width <= outer.x + outer.width
+            && inner.y + inner.height <= outer.y + outer.height
+    }
+
+    #[test]
+    fn trash_sits_in_the_header_beside_the_title() {
+        let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
+        let text = peek_text(&note(&"word ".repeat(30), "milk"));
+        let l = peek_layout(bar, screen(), 1.0, &text, false);
+        assert!(inside(l.rect, l.trash));
+        assert!(l.trash.y + l.trash.height <= l.divider_y);
+        assert!(l.title.x + title_width() <= l.trash.x);
+    }
+
+    #[test]
+    fn confirmation_buttons_fit_below_the_divider() {
+        let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
+        // An empty body is one line tall; the confirmation needs more.
+        let text = peek_text(&note("T", ""));
+        let open = peek_layout(bar, screen(), 1.0, &text, false);
+        let l = peek_layout(bar, screen(), 1.0, &text, true);
+        assert!(l.rect.height > open.rect.height);
+        for button in [l.delete, l.cancel] {
+            assert!(inside(l.rect, button));
+            assert!(button.y > l.divider_y);
+        }
+        assert!(!l.delete.intersects(&l.cancel));
+        assert!(!l.delete.intersects(&l.trash));
+    }
+
     #[test]
     fn peek_stays_on_screen() {
         let bar = Rectangle::new(Point::new(960.0, 0.0), Size::new(30.0, 30.0));
         let text = peek_text(&note("T", "a\nb\nc"));
-        let l = peek_layout(bar, screen(), 1.0, &text);
+        let l = peek_layout(bar, screen(), 1.0, &text, false);
         assert!(l.rect.y >= 0.0);
     }
 }

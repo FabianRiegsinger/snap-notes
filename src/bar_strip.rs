@@ -172,6 +172,8 @@ pub struct BarStrip<'a> {
     pub height_fraction: f32,
     /// Paper tint of an open note, which the hover peek imitates.
     pub paper_tint: f32,
+    /// The open peek asks whether to delete its note.
+    pub peek_confirm: bool,
 }
 
 impl<'a> BarStrip<'a> {
@@ -191,7 +193,34 @@ impl<'a> BarStrip<'a> {
         let (i, _) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
         let note = self.notes.get(i)?;
-        peek_target(bar, bounds, note).contains(pos).then_some(i)
+        peek_target(bar, bounds, note, self.peek_confirm)
+            .contains(pos)
+            .then_some(i)
+    }
+
+    /// What a press at `pos` on the open peek does: delete-related clicks
+    /// once it is fully open, otherwise opening the note. While the
+    /// confirmation shows, other presses on the peek do nothing.
+    fn peek_press(&self, bounds: Rectangle, pos: Point) -> Option<Option<Message>> {
+        let i = self.peek_hit(bounds, pos)?;
+        let (_, progress) = self.peek?;
+        let bar = *self.layout_in(bounds).bars.get(i)?;
+        let note = self.notes.get(i)?;
+        let parts = peek_layout(bar, bounds, 1.0, &peek_text(note), self.peek_confirm);
+        let open = progress >= 0.99;
+        Some(if self.peek_confirm {
+            if parts.delete.contains(pos) {
+                Some(Message::PeekDeleteConfirmed)
+            } else if parts.cancel.contains(pos) {
+                Some(Message::PeekDeleteCancelled)
+            } else {
+                None
+            }
+        } else if open && parts.trash.contains(pos) {
+            Some(Message::PeekDeleteRequested(i))
+        } else {
+            Some(Message::BarClicked(i))
+        })
     }
 
     /// How far a slot at magnification `scale` has revealed its glyph (0..=1).
@@ -259,6 +288,8 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             CORNER_RADIUS,
                             progress,
                             self.paper_tint,
+                            self.peek_confirm,
+                            cursor.position(),
                         );
                     }
                     continue;
@@ -436,9 +467,11 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(pos) = cursor.position() {
                     let strip = self.layout_in(bounds);
-                    // Clicking the open peek opens its note.
-                    if let Some(i) = self.peek_hit(bounds, pos) {
-                        shell.publish(Message::BarClicked(i));
+                    // Clicking the open peek opens its note, or deletes it.
+                    if let Some(action) = self.peek_press(bounds, pos) {
+                        if let Some(message) = action {
+                            shell.publish(message);
+                        }
                         shell.capture_event();
                         return;
                     }
@@ -536,8 +569,8 @@ fn settings_glyph(slot: Rectangle) -> Vec<Rectangle> {
 
 /// Where the fully open peek of the note on `bar` sits: the area that
 /// keeps it open while hovered and opens the note when clicked.
-pub fn peek_target(bar: Rectangle, bounds: Rectangle, note: &Note) -> Rectangle {
-    peek_layout(bar, bounds, 1.0, &peek_text(note)).rect
+pub fn peek_target(bar: Rectangle, bounds: Rectangle, note: &Note, confirming: bool) -> Rectangle {
+    peek_layout(bar, bounds, 1.0, &peek_text(note), confirming).rect
 }
 
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
@@ -695,7 +728,7 @@ mod tests {
         let bar = Rectangle::new(Point::new(48.0, 400.0), Size::new(6.0, 30.0));
         let strip = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let note = crate::note::Note::new(crate::note::PALETTE[0]);
-        let rect = peek_target(bar, strip, &note);
+        let rect = peek_target(bar, strip, &note, false);
         assert!(rect.width > STRIP_WIDTH);
         assert!(rect.contains(Point::new(bar.x - 100.0, bar.center().y)));
     }
@@ -715,6 +748,7 @@ mod tests {
             bars: &bars,
             height_fraction: 1.0,
             paper_tint: 0.0,
+            peek_confirm: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];

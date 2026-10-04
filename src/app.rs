@@ -56,6 +56,12 @@ pub enum Message {
     BodyClicked(Option<usize>),
     /// A press on rendered text: the source offset of the character under it.
     BodyPressed(usize),
+    /// The trash button on the open peek of the note at this index.
+    PeekDeleteRequested(usize),
+    /// The peek's "Delete" answer: deletes its note.
+    PeekDeleteConfirmed,
+    /// The peek's "Cancel" answer.
+    PeekDeleteCancelled,
     /// Leave edit mode and show the note rendered again.
     EditorBlurred,
     /// Flip the task checkbox on this source line.
@@ -180,6 +186,8 @@ pub struct App {
     /// The last press on rendered text, so quick follow-up clicks (which land
     /// on the editor it opened) select the word, then the line, around it.
     rendered_click: Option<RenderedClick>,
+    /// The open peek asks whether to delete this note.
+    peek_confirm_delete: Option<Uuid>,
     morph: Morph,
     anchor_y: f32,
     pending_delete: Option<Uuid>,
@@ -318,6 +326,7 @@ impl App {
             broken_images: HashSet::new(),
             history: History::default(),
             rendered_click: None,
+            peek_confirm_delete: None,
             morph,
             anchor_y: 0.0,
             pending_delete: None,
@@ -527,6 +536,26 @@ impl App {
                             return crate::note_panel::reveal_last_line();
                         }
                     }
+                }
+            }
+            Message::PeekDeleteRequested(index) => {
+                let id = self.store.notes().get(index).map(|n| n.id);
+                if id.is_some() && id == self.peek_note {
+                    self.peek_confirm_delete = id;
+                }
+            }
+            Message::PeekDeleteCancelled => self.peek_confirm_delete = None,
+            Message::PeekDeleteConfirmed => {
+                if let Some(id) = self.peek_confirm_delete.take() {
+                    self.hide_peek();
+                    if self.active_note == Some(id) {
+                        // The note is open too: fold it away like its own 🗑 does.
+                        self.confirm_delete = Some(id);
+                        return self.update(Message::ConfirmDelete(true));
+                    }
+                    self.store.delete_note(id);
+                    self.store.mark_dirty();
+                    self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
                 }
             }
             Message::BodyPressed(offset) => {
@@ -952,6 +981,7 @@ impl App {
             bars: &self.settings.settings().bars,
             height_fraction: self.strip_fraction(),
             paper_tint: self.settings.settings().notes.paper_tint,
+            peek_confirm: self.peek_confirm_delete.is_some(),
         })
         .width(Fill)
         .height(Fill)
@@ -1515,12 +1545,18 @@ impl App {
             Point::new(self.window_size.width - STRIP_WIDTH, 0.0),
             Size::new(STRIP_WIDTH, self.window_size.height),
         );
-        Some(peek_target(bar, strip, &self.store.notes()[index]))
+        Some(peek_target(
+            bar,
+            strip,
+            &self.store.notes()[index],
+            self.peek_confirm_delete.is_some(),
+        ))
     }
 
     fn hide_peek(&mut self) {
         self.hover_bar = None;
         self.peek_note = None;
+        self.peek_confirm_delete = None;
         self.peek = Morph::peek(self.settings.settings().motion.speed);
     }
 
@@ -1711,6 +1747,54 @@ mod tests {
         let _ = app.update(Message::PeekTick(Instant::now() + Duration::from_secs(1)));
         assert!(app.peek_note.is_some() && app.peek.is_opening());
         app
+    }
+
+    #[test]
+    fn peek_delete_asks_first_then_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        let id = app.store.notes()[0].id;
+        let _ = app.update(Message::PeekDeleteRequested(0));
+        assert_eq!(app.peek_confirm_delete, Some(id));
+        assert_eq!(app.store.notes().len(), 1);
+        let _ = app.update(Message::PeekDeleteConfirmed);
+        assert!(app.store.notes().is_empty());
+        assert!(app.store.is_dirty());
+        assert_eq!(app.peek_note, None);
+        assert_eq!(app.peek_confirm_delete, None);
+    }
+
+    #[test]
+    fn peek_delete_cancel_keeps_the_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        let _ = app.update(Message::PeekDeleteRequested(0));
+        let _ = app.update(Message::PeekDeleteCancelled);
+        assert_eq!(app.peek_confirm_delete, None);
+        assert_eq!(app.store.notes().len(), 1);
+        assert!(app.peek_note.is_some());
+    }
+
+    #[test]
+    fn peek_delete_only_for_the_peeked_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        app.store.add_note(&crate::note::PALETTE);
+        let _ = app.update(Message::PeekDeleteRequested(1));
+        assert_eq!(app.peek_confirm_delete, None);
+        let _ = app.update(Message::PeekDeleteConfirmed);
+        assert_eq!(app.store.notes().len(), 2);
+    }
+
+    #[test]
+    fn closing_the_peek_drops_its_delete_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        let _ = app.update(Message::PeekDeleteRequested(0));
+        app.hide_peek();
+        assert_eq!(app.peek_confirm_delete, None);
+        let _ = app.update(Message::PeekDeleteConfirmed);
+        assert_eq!(app.store.notes().len(), 1);
     }
 
     #[test]
