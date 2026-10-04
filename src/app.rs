@@ -76,6 +76,9 @@ pub enum Message {
     ImageDropped(PathBuf),
     /// Cmd/Ctrl+V in the editor: pastes the clipboard's text or image.
     PasteRequested,
+    /// Text from the system clipboard, read for the note with this id;
+    /// ignored unless that note is still open and being edited.
+    ClipboardText(Uuid, String),
     /// The toolbar's image button: opens the file dialog.
     PickImage,
     /// The file dialog opened for the note with this id returned; ignored
@@ -620,6 +623,12 @@ impl App {
                 return self.apply_paste(read_clipboard());
             }
             Message::PasteRequested => {}
+            Message::ClipboardText(id, text)
+                if self.editing && self.active_note == Some(id) && self.morph.is_opening() =>
+            {
+                return self.apply_paste(ClipboardContent::Text(text));
+            }
+            Message::ClipboardText(..) => {}
             Message::PickImage => {
                 let Some(id) = self.active_note else {
                     return Task::none();
@@ -1074,14 +1083,18 @@ impl App {
                     Task::none()
                 }
             },
-            ClipboardContent::Empty => iced::clipboard::read().and_then(|text| {
-                if text.is_empty() {
+            ClipboardContent::Empty => {
+                // The read finishes later, so the result names its note.
+                let Some(id) = self.active_note else {
                     return Task::none();
-                }
-                Task::done(Message::NoteEdited(text_editor::Action::Edit(
-                    text_editor::Edit::Paste(Arc::new(text)),
-                )))
-            }),
+                };
+                iced::clipboard::read().and_then(move |text| {
+                    if text.is_empty() {
+                        return Task::none();
+                    }
+                    Task::done(Message::ClipboardText(id, text))
+                })
+            }
         }
     }
 
@@ -1902,6 +1915,38 @@ mod tests {
         let task = app.apply_paste(classify(None, None));
         assert!(task.units() > 0, "no clipboard read was started");
         assert_eq!(app.store.notes()[0].content, "ab");
+    }
+
+    #[test]
+    fn late_clipboard_text_pastes_into_its_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(None));
+        let id = app.active_note.unwrap();
+        let _ = app.update(Message::ClipboardText(id, "XY".into()));
+        assert_eq!(app.store.notes()[0].content, "abXY");
+    }
+
+    #[test]
+    fn late_clipboard_text_ignored_after_leaving_edit_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(None));
+        let id = app.active_note.unwrap();
+        let _ = app.update(Message::EditorBlurred);
+        let _ = app.update(Message::ClipboardText(id, "XY".into()));
+        assert_eq!(app.store.notes()[0].content, "ab");
+        assert!(!app.store.is_dirty());
+    }
+
+    #[test]
+    fn late_clipboard_text_for_other_note_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(None));
+        let _ = app.update(Message::ClipboardText(Uuid::new_v4(), "XY".into()));
+        assert_eq!(app.store.notes()[0].content, "ab");
+        assert!(!app.store.is_dirty());
     }
 
     #[test]
