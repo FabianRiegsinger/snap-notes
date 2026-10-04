@@ -28,6 +28,14 @@
 - **Images:** drop a png, jpg, gif or webp file (up to 20 MB) onto an open note, paste an image-only clipboard with Cmd/Ctrl+V, or use the 🖼 button in the toolbar.
 - **Clickable links:** `http`, `https` and `mailto` links in the formatted view open in your browser.
 
+### Look and feel
+- **Inter and Lucide:** the interface uses the Inter typeface and a Lucide icon set, so text and icons look the same on every platform.
+- **Dark mode:** follows the system appearance and switches live while the app runs.
+- **Paper notes:** a softer paper tone derived from the bar color, with layered shadows, a top highlight and an adhesive band. Text keeps WCAG AA contrast in light and dark.
+- **Tab-like bars:** bars have a gradient and a highlight, and the open note's bar is wider, like a tab.
+- **Motion:** a deleted note's bar collapses, the toolbar fades and slides in, the body fades when you switch modes, and buttons have pressed states.
+- **Details:** a focus ring, a hint in empty notes ("Start typing… Markdown works.") and slimmer scrollbars.
+
 ### Formatting
 Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. In edit mode a toolbar offers **B**, *I*, ~~S~~, code, text color, highlight, size (small, normal, large, huge), link and 🖼.
 
@@ -54,7 +62,7 @@ Notes are written in Markdown plus a few color and size tags. An open note shows
 - **Older notes:** keep their text, but a line indented by 4 spaces now shows as a code block, and a line followed by `---` as a heading.
 
 ### Settings
-Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group has a Reset button.
+Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group has a Reset button. There is no theme setting: dark mode follows the system.
 
 | Group | What you can adjust |
 |---|---|
@@ -111,6 +119,7 @@ The release binary is optimized for size (`opt-level = "z"`, LTO, stripped). Lin
 - A custom bar-strip widget with Gaussian magnification and critically damped springs
 - [`tray-icon`](https://crates.io/crates/tray-icon) for the menu bar/tray icon, plus native calls for click-through and Dock/taskbar visibility (AppKit on macOS, Win32 on Windows)
 - [`pulldown-cmark`](https://crates.io/crates/pulldown-cmark) for Markdown, with a small tag layer on top for color, highlight and size
+- [Inter](https://rsms.me/inter/) 4.1 (SIL OFL 1.1) and [Lucide](https://lucide.dev) icons (ISC), both bundled as subsets. `assets/fonts/subset.sh` regenerates the subsets.
 - JSON persistence with lenient loading and atomic writes
 
 ## License
