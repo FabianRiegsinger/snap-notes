@@ -21,6 +21,7 @@ use iced::{
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -73,11 +74,13 @@ pub enum Message {
     FormatApplied(rich::Format),
     /// A file was dropped on the window; images are added to the open note.
     ImageDropped(PathBuf),
-    /// Cmd/Ctrl+V in the editor: adds a clipboard image, if there is one.
-    ImagePasted,
+    /// Cmd/Ctrl+V in the editor: pastes the clipboard's text or image.
+    PasteRequested,
     /// The toolbar's image button: opens the file dialog.
     PickImage,
-    ImagePicked(Option<PathBuf>),
+    /// The file dialog opened for the note with this id returned; ignored
+    /// unless that note is still the open one.
+    ImagePicked(Uuid, Option<PathBuf>),
     ColorChosen(NoteColor),
     DragStart(usize, f32),
     DragMove(f32),
@@ -100,6 +103,51 @@ pub enum Message {
     PollCursor,
     PeekTick(Instant),
     CursorPolled(Option<Point>),
+}
+
+/// What a paste found on the clipboard.
+#[derive(Debug, PartialEq)]
+enum ClipboardContent {
+    Text(String),
+    Image {
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+    Empty,
+}
+
+/// Text wins over an image: copied web content often carries both, while a
+/// screenshot is image-only.
+fn classify(text: Option<String>, image: Option<(Vec<u8>, u32, u32)>) -> ClipboardContent {
+    match (text.filter(|t| !t.is_empty()), image) {
+        (Some(text), _) => ClipboardContent::Text(text),
+        (None, Some((rgba, width, height))) => ClipboardContent::Image {
+            rgba,
+            width,
+            height,
+        },
+        (None, None) => ClipboardContent::Empty,
+    }
+}
+
+fn read_clipboard() -> ClipboardContent {
+    let Ok(mut clipboard) = arboard::Clipboard::new() else {
+        return ClipboardContent::Empty;
+    };
+    let text = clipboard.get_text().ok();
+    let image = if text.as_ref().is_some_and(|t| !t.is_empty()) {
+        None
+    } else {
+        clipboard.get_image().ok().and_then(|img| {
+            Some((
+                img.bytes.into_owned(),
+                u32::try_from(img.width).ok()?,
+                u32::try_from(img.height).ok()?,
+            ))
+        })
+    };
+    classify(text, image)
 }
 
 pub struct App {
@@ -561,24 +609,28 @@ impl App {
                 self.color_picker_open = false;
             }
             Message::FormatApplied(format) => return self.apply_format(format),
-            Message::ImageDropped(path) | Message::ImagePicked(Some(path)) => {
-                if self.active_note.is_some() {
-                    match images::import(&self.data_dir, &path) {
-                        Ok(rel) => return self.insert_image(&rel),
-                        Err(e) => eprintln!("image import failed: {e}"),
-                    }
-                }
+            Message::ImageDropped(path) => return self.import_image(&path),
+            Message::ImagePicked(id, Some(path))
+                if self.active_note == Some(id) && self.morph.is_opening() =>
+            {
+                return self.import_image(&path)
             }
-            Message::ImagePicked(None) => {}
-            Message::ImagePasted => return self.paste_image(),
+            Message::ImagePicked(..) => {}
+            Message::PasteRequested if self.editing => {
+                return self.apply_paste(read_clipboard());
+            }
+            Message::PasteRequested => {}
             Message::PickImage => {
+                let Some(id) = self.active_note else {
+                    return Task::none();
+                };
                 // The dialog steals focus, which must not fold the note.
                 self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
                 let dialog = rfd::AsyncFileDialog::new()
                     .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
                     .pick_file();
-                return Task::perform(dialog, |file| {
-                    Message::ImagePicked(file.map(|f| f.path().to_path_buf()))
+                return Task::perform(dialog, move |file| {
+                    Message::ImagePicked(id, file.map(|f| f.path().to_path_buf()))
                 });
             }
             Message::ColorChosen(color) => {
@@ -732,10 +784,6 @@ impl App {
                     }
                     keyboard::Key::Character("n") if modifiers.command() => {
                         return self.update(Message::AddNote)
-                    }
-                    // The editor still gets the key for a text paste.
-                    keyboard::Key::Character("v") if modifiers.command() && self.editing => {
-                        return self.update(Message::ImagePasted)
                     }
                     _ => {}
                 }
@@ -991,28 +1039,41 @@ impl App {
         focus_body()
     }
 
-    /// Adds a clipboard image to the open note. Text on the clipboard wins:
-    /// then nothing happens and the editor pastes it. Reads and encodes
-    /// synchronously, which is fine for screenshots.
-    fn paste_image(&mut self) -> Task<Message> {
-        let Ok(mut clipboard) = arboard::Clipboard::new() else {
-            return Task::none();
-        };
-        if clipboard.get_text().is_ok_and(|t| !t.is_empty()) {
+    /// Copies an image file into the open note's folder and references it;
+    /// does nothing without an open note and logs files that don't import.
+    fn import_image(&mut self, path: &std::path::Path) -> Task<Message> {
+        if self.active_note.is_none() {
             return Task::none();
         }
-        let Ok(img) = clipboard.get_image() else {
-            return Task::none();
-        };
-        let (Ok(width), Ok(height)) = (u32::try_from(img.width), u32::try_from(img.height)) else {
-            return Task::none();
-        };
-        match images::import_png(&self.data_dir, &img.bytes, width, height) {
+        match images::import(&self.data_dir, path) {
             Ok(rel) => self.insert_image(&rel),
             Err(e) => {
-                eprintln!("image paste failed: {e}");
+                eprintln!("image import failed: {e}");
                 Task::none()
             }
+        }
+    }
+
+    /// Pastes what the clipboard held: text through the editor's own edit
+    /// path, or an image as a new file. Encodes synchronously, which is fine
+    /// for screenshots.
+    fn apply_paste(&mut self, content: ClipboardContent) -> Task<Message> {
+        match content {
+            ClipboardContent::Text(text) => self.update(Message::NoteEdited(
+                text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(text))),
+            )),
+            ClipboardContent::Image {
+                rgba,
+                width,
+                height,
+            } => match images::import_png(&self.data_dir, &rgba, width, height) {
+                Ok(rel) => self.insert_image(&rel),
+                Err(e) => {
+                    eprintln!("image paste failed: {e}");
+                    Task::none()
+                }
+            },
+            ClipboardContent::Empty => Task::none(),
         }
     }
 
@@ -1710,6 +1771,87 @@ mod tests {
         let _ = app.update(Message::ImageDropped(png_file(&dir, "p.png")));
         let content = app.store.notes()[0].content.clone();
         assert_eq!(content, format!("a\n{}\nb", image_ref(&content)));
+    }
+
+    #[test]
+    fn picked_image_for_other_note_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "a");
+        let first = app.active_note.unwrap();
+        let _ = app.update(Message::ClosePanel);
+        settle(&mut app);
+        let second = app.store.add_note(&crate::note::PALETTE);
+        app.store.did_save();
+        let _ = app.update(Message::BarClicked(1));
+        settle(&mut app);
+        assert_eq!(app.active_note, Some(second));
+        let _ = app.update(Message::ImagePicked(first, Some(png_file(&dir, "p.png"))));
+        assert_eq!(app.store.notes()[0].content, "a");
+        assert_eq!(app.store.notes()[1].content, "");
+        assert!(!app.store.is_dirty());
+    }
+
+    fn rgba_1x1() -> (Vec<u8>, u32, u32) {
+        (vec![0, 0, 0, 255], 1, 1)
+    }
+
+    #[test]
+    fn classify_prefers_text_over_image() {
+        assert_eq!(
+            classify(Some("t".into()), Some(rgba_1x1())),
+            ClipboardContent::Text("t".into())
+        );
+        assert!(matches!(
+            classify(Some(String::new()), Some(rgba_1x1())),
+            ClipboardContent::Image { .. }
+        ));
+        assert_eq!(classify(None, None), ClipboardContent::Empty);
+    }
+
+    #[test]
+    fn paste_text_inserts_text_at_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        app.editor_content
+            .as_mut()
+            .unwrap()
+            .move_to(text_editor::Cursor {
+                position: text_editor::Position { line: 0, column: 1 },
+                selection: None,
+            });
+        let _ = app.apply_paste(ClipboardContent::Text("XY".into()));
+        assert_eq!(app.store.notes()[0].content, "aXYb");
+        assert!(app.store.is_dirty());
+    }
+
+    #[test]
+    fn paste_image_only_inserts_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "a");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let (rgba, width, height) = rgba_1x1();
+        let _ = app.apply_paste(classify(None, Some((rgba, width, height))));
+        let content = app.store.notes()[0].content.clone();
+        assert!(content.starts_with("![](images/") && content.ends_with(".png)\na"));
+    }
+
+    #[test]
+    fn paste_with_text_and_image_prefers_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "");
+        let _ = app.apply_paste(classify(Some("hello".into()), Some(rgba_1x1())));
+        assert_eq!(app.store.notes()[0].content, "hello");
+        assert!(!dir.path().join("images").exists());
+    }
+
+    #[test]
+    fn paste_ignored_when_not_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hi");
+        assert!(!app.editing);
+        let _ = app.update(Message::PasteRequested);
+        assert_eq!(app.store.notes()[0].content, "hi");
     }
 
     #[test]

@@ -20,7 +20,7 @@ use iced::widget::{
 use iced::{
     font, gradient, Background, Border, Color, Element, Fill, Font, Length, Padding, Shadow, Size,
 };
-use iced::{mouse, Theme, Vector};
+use iced::{keyboard, mouse, Theme, Vector};
 
 /// Named explicitly: with the generic family, the bold face can fall back to a
 /// monospace font.
@@ -339,6 +339,12 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                     .id(BODY_EDITOR_ID)
                     .placeholder("Write something…")
                     .on_action(Message::NoteEdited)
+                    .key_binding(|press| match press.key.as_ref() {
+                        keyboard::Key::Character("v") if press.modifiers.command() => {
+                            Some(text_editor::Binding::Custom(Message::PasteRequested))
+                        }
+                        _ => text_editor::Binding::from_key_press(press),
+                    })
                     .min_height(editor_min_height(available.height))
                     .size(14)
                     .padding(body_padding())
