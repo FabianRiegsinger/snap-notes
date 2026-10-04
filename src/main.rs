@@ -8,6 +8,8 @@ mod pass_wheel;
 mod peek;
 mod platform;
 mod resize;
+#[allow(dead_code)] // used from Task 4 on
+mod rich;
 mod settings;
 mod settings_panel;
 mod store;
