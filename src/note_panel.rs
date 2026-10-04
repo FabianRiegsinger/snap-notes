@@ -141,29 +141,6 @@ pub(crate) fn shade(note: &Note, amount: f32, alpha: f32) -> Color {
     }
 }
 
-pub(crate) fn icon_button<'a>(
-    label: &'a str,
-    message: Message,
-    alpha: f32,
-) -> Element<'a, Message> {
-    button(text(label).size(14))
-        .on_press(message)
-        .padding(Padding::new(3.0).left(7).right(7))
-        .style(move |_theme: &Theme, status| button::Style {
-            background: match status {
-                button::Status::Hovered | button::Status::Pressed => Some(ink(0.12 * alpha).into()),
-                _ => None,
-            },
-            text_color: ink(0.65 * alpha),
-            border: Border {
-                radius: 4.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into()
-}
-
 /// A button whose background darkens while pressed and whose label sinks
 /// 1 px. `padding` goes around the label, inside the press area.
 pub(crate) fn pressable<'a>(
@@ -537,7 +514,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             );
         }
         if editing {
-            col = col.push(toolbar(palette, text_color_picker_open, controls));
+            col = col.push(toolbar(palette, text_color_picker_open, controls, theme));
         }
         col = col.push(body);
 

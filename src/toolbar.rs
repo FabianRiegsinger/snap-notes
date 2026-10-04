@@ -1,11 +1,13 @@
 use crate::app::Message;
 use crate::color_picker::swatch;
+use crate::icons::{icon, Icon, ICON_FONT};
 use crate::note::NoteColor;
-use crate::note_panel::{icon_button, ink};
+use crate::note_panel::pressable;
 use crate::rich::Format;
+use crate::theme::{self, space, RADIUS_CONTROL, TEXT_SM};
 
-use iced::widget::{column, container, pick_list, row};
-use iced::{Border, Element, Padding, Theme};
+use iced::widget::{button, column, container, pick_list, row, text};
+use iced::{border, Element, Padding, Theme};
 use std::fmt;
 
 /// A font size offered by the size list.
@@ -25,37 +27,80 @@ impl fmt::Display for SizeChoice {
     }
 }
 
+/// The toolbar's icons, in button order.
+fn button_icons() -> [Icon; 9] {
+    [
+        Icon::Bold,
+        Icon::Italic,
+        Icon::Strike,
+        Icon::Code,
+        Icon::Palette,
+        Icon::Highlight,
+        Icon::Size,
+        Icon::Link,
+        Icon::Image,
+    ]
+}
+
 /// The formatting row shown above the editor, with the text color grid
 /// below it while `color_open`. `alpha` fades it like the header controls.
-pub fn toolbar<'a>(palette: &'a [NoteColor], color_open: bool, alpha: f32) -> Element<'a, Message> {
-    let apply = |label: &'a str, format| icon_button(label, Message::FormatApplied(format), alpha);
+pub fn toolbar<'a>(
+    palette: &'a [NoteColor],
+    color_open: bool,
+    alpha: f32,
+    theme: theme::Theme,
+) -> Element<'a, Message> {
+    let tool = |glyph: Icon, message: Message| -> Element<'a, Message> {
+        pressable(
+            icon(glyph, TEXT_SM),
+            Padding::new(space(1)).left(space(2)).right(space(2)),
+            message,
+        )
+        .style(move |_theme: &Theme, status| button::Style {
+            background: match status {
+                button::Status::Hovered => Some(theme.ink(0.12 * alpha).into()),
+                button::Status::Pressed => Some(theme.ink(0.22 * alpha).into()),
+                _ => None,
+            },
+            text_color: theme.ink(0.65 * alpha),
+            border: border::rounded(RADIUS_CONTROL),
+            ..Default::default()
+        })
+        .into()
+    };
+    let apply = |glyph: Icon, format| tool(glyph, Message::FormatApplied(format));
     let sizes = pick_list(SIZES, None::<SizeChoice>, |choice: SizeChoice| {
         Message::FormatApplied(Format::Size(choice.1))
     })
     .placeholder("size")
     .text_size(13)
     .padding(Padding::new(2.0).left(6).right(6))
+    .handle(pick_list::Handle::Static(pick_list::Icon {
+        font: ICON_FONT,
+        code_point: Icon::Size.codepoint(),
+        size: Some(TEXT_SM.into()),
+        line_height: text::LineHeight::default(),
+        shaping: text::Shaping::Basic,
+    }))
     .style(move |_theme: &Theme, _status| pick_list::Style {
-        text_color: ink(0.65 * alpha),
-        placeholder_color: ink(0.65 * alpha),
-        handle_color: ink(0.5 * alpha),
-        background: ink(0.06 * alpha).into(),
-        border: Border {
-            radius: 4.0.into(),
-            ..Default::default()
-        },
+        text_color: theme.ink(0.65 * alpha),
+        placeholder_color: theme.ink(0.65 * alpha),
+        handle_color: theme.ink(0.5 * alpha),
+        background: theme.ink(0.06 * alpha).into(),
+        border: border::rounded(RADIUS_CONTROL),
     });
 
+    let [bold, italic, strike, code, palette_icon, highlight, _size, link, image] = button_icons();
     let buttons = row![
-        apply("B", Format::Bold),
-        apply("I", Format::Italic),
-        apply("S", Format::Strike),
-        apply("</>", Format::Code),
-        icon_button("🎨", Message::ToggleTextColorPicker, alpha),
-        apply("H", Format::Highlight),
+        apply(bold, Format::Bold),
+        apply(italic, Format::Italic),
+        apply(strike, Format::Strike),
+        apply(code, Format::Code),
+        tool(palette_icon, Message::ToggleTextColorPicker),
+        apply(highlight, Format::Highlight),
         sizes,
-        apply("🔗", Format::Link),
-        icon_button("🖼", Message::PickImage, alpha),
+        apply(link, Format::Link),
+        tool(image, Message::PickImage),
     ]
     .spacing(2)
     .align_y(iced::Alignment::Center)
@@ -86,4 +131,27 @@ pub fn toolbar<'a>(palette: &'a [NoteColor], color_open: bool, alpha: f32) -> El
     container(col)
         .padding(Padding::new(4.0).left(14).right(14))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toolbar_buttons_use_icons() {
+        assert_eq!(
+            button_icons(),
+            [
+                Icon::Bold,
+                Icon::Italic,
+                Icon::Strike,
+                Icon::Code,
+                Icon::Palette,
+                Icon::Highlight,
+                Icon::Size,
+                Icon::Link,
+                Icon::Image,
+            ]
+        );
+    }
 }
