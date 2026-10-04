@@ -13,7 +13,7 @@
 
 ### The bar strip
 - **Dock-style magnification:** move the cursor along the strip and nearby bars grow with smooth spring physics.
-- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. Move onto the preview to keep it open, and click it to open the note.
+- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. Move onto the preview to keep it open, and click it to open the note. Its 🗑 deletes the note after asking first.
 - **Quick add:** click the `+` slot below the bars (the whole strip width counts), or press Cmd/Ctrl+N.
 - **Reorder:** drag a bar up or down to move the note.
 - **Scroll:** with more notes than fit on screen, scroll the strip with the mouse wheel.
