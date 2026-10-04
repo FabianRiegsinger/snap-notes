@@ -6,7 +6,7 @@
 
 - **Out of the way:** about 6 px of screen per note. Clicks anywhere else go straight to the apps behind it.
 - **One glance away:** peek at any note without opening it.
-- **Portable:** a single executable, no installer. Your notes are a JSON file next to it.
+- **Portable:** a single executable, no installer. Your notes are a JSON file next to it, with their images in an `images/` folder.
 - **Cross-platform:** macOS, Windows and Linux.
 
 ## What it can do
@@ -40,16 +40,18 @@ Notes are written in Markdown plus a few color and size tags. An open note shows
 | Task | `- [ ] open`, `- [x] done` (click the checkbox to toggle it) |
 | Quote / rule / code block | `> quote`, `---`, fenced ```` ``` ```` |
 | Link | `[text](https://example.com)` or `<https://example.com>` |
-| Image | `![alt](images/<uuid>.png)` |
+| Image | `![alt](images/<uuid>.<ext>)` (PNG, JPEG, GIF or WebP) |
 | Text color | `{coral}text{/}` or `{#FF0000}text{/}` |
 | Highlight | `{bg:amber}text{/}` or `==text==` |
 | Font size | `{size:20}text{/}` (8–48) |
 | Literal brace | `\{` |
 
-- **Color names:** `coral`, `rose`, `blush`, `peach`, `tangerine`, `amber`, `lemon`, `sand`, `lime`, `sage`, `mint`, `teal`, `aqua`, `sky`, `cornflower`, `periwinkle`, `lavender`, `orchid`, `mocha`, `slate`. They follow your palette in Settings, hex colors stay fixed.
+- **Color names:** `coral`, `rose`, `blush`, `peach`, `tangerine`, `amber`, `lemon`, `sand`, `lime`, `sage`, `mint`, `teal`, `aqua`, `sky`, `cornflower`, `periwinkle`, `lavender`, `orchid`, `mocha`, `slate`. They follow your palette in Settings, while hex colors stay fixed.
 - **Tags nest:** `{coral}{size:20}big red{/} red{/}`. `{/}` closes the innermost tag, and an unclosed tag ends with its paragraph.
 - **Highlight with `==`:** only when it hugs the text (`==word==`), so `a == b` stays as typed.
 - **Line breaks:** a single newline stays a line break.
+- **Raw HTML:** shows as typed and is never rendered.
+- **Older notes:** keep their text, but a line indented by 4 spaces now shows as a code block, and a line followed by `---` as a heading.
 
 ### Settings
 Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group has a Reset button.

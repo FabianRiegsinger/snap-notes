@@ -58,7 +58,10 @@ pub fn toolbar<'a>(palette: &'a [NoteColor], color_open: bool, alpha: f32) -> El
         icon_button("🖼", Message::PickImage, alpha),
     ]
     .spacing(2)
-    .align_y(iced::Alignment::Center);
+    .align_y(iced::Alignment::Center)
+    // Narrow notes wrap the row, so the link and image buttons stay visible.
+    .wrap()
+    .vertical_spacing(2);
 
     let mut col = column![buttons].spacing(4);
     if color_open {
