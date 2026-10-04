@@ -1028,8 +1028,9 @@ impl App {
         let offset = |p: text_editor::Position| rich::offset_of(&text, p.line, p.column);
         let head = offset(cursor.position);
         let anchor = cursor.selection.map_or(head, offset);
-        let (wrapped, start, end) =
-            rich::wrap_selection(&text, head.min(anchor), head.max(anchor), format);
+        let selected = content.selection();
+        let (from, to) = rich::selection_range(&text, head, anchor, selected.as_deref());
+        let (wrapped, start, end) = rich::wrap_selection(&text, from, to, format);
         let position = |o| {
             let (line, column) = rich::position_of(&wrapped, o);
             text_editor::Position { line, column }
@@ -1915,6 +1916,16 @@ mod tests {
         let task = app.apply_paste(classify(None, None));
         assert!(task.units() > 0, "no clipboard read was started");
         assert_eq!(app.store.notes()[0].content, "ab");
+    }
+
+    #[test]
+    fn bold_applies_to_word_selected_by_double_click() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hello world");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let _ = app.update(Message::NoteEdited(text_editor::Action::SelectWord));
+        let _ = app.update(Message::FormatApplied(rich::Format::Bold));
+        assert_eq!(app.store.notes()[0].content, "**hello** world");
     }
 
     #[test]

@@ -670,6 +670,31 @@ fn snap(content: &str, offset: usize) -> usize {
     offset
 }
 
+/// The selected byte range, given the editor's cursor (`head`) and selection
+/// anchor (`anchor`) as offsets and its selected text. A double- or
+/// triple-click selection is reported by iced as its anchor only, so when
+/// the two offsets meet, the range is the occurrence of `selected` around
+/// the cursor.
+pub fn selection_range(
+    content: &str,
+    head: usize,
+    anchor: usize,
+    selected: Option<&str>,
+) -> (usize, usize) {
+    if head != anchor {
+        return (head.min(anchor), head.max(anchor));
+    }
+    selected
+        .filter(|s| !s.is_empty())
+        .and_then(|s| {
+            content
+                .match_indices(s)
+                .map(|(start, _)| (start, start + s.len()))
+                .find(|&(start, end)| start <= head && head <= end)
+        })
+        .unwrap_or((head, head))
+}
+
 /// Wraps `start..end` (byte offsets, clamped and snapped to char boundaries)
 /// in the markup for `format`. Returns the new text and the new selection:
 /// the wrapped text, or for a link the spot inside `()`. With an empty
@@ -1005,6 +1030,30 @@ mod tests {
             toggle_task("a\r\n- [ ] b\r\nc", 1).as_deref(),
             Some("a\r\n- [x] b\r\nc")
         );
+    }
+
+    #[test]
+    fn selection_range_uses_cursor_range_when_present() {
+        assert_eq!(selection_range("a word b", 6, 2, Some("word")), (2, 6));
+    }
+
+    #[test]
+    fn selection_range_finds_word_selection_around_cursor() {
+        // A double-click reports only its anchor; the word comes from the text.
+        assert_eq!(selection_range("hello world", 0, 0, Some("hello")), (0, 5));
+        assert_eq!(selection_range("hello world", 8, 8, Some("world")), (6, 11));
+        assert_eq!(selection_range("ab ab ab", 4, 4, Some("ab")), (3, 5));
+        assert_eq!(
+            selection_range("x\nline two\n", 4, 4, Some("line two\n")),
+            (2, 11)
+        );
+    }
+
+    #[test]
+    fn selection_range_without_selection_is_the_cursor() {
+        assert_eq!(selection_range("abc", 1, 1, None), (1, 1));
+        assert_eq!(selection_range("abc", 1, 1, Some("")), (1, 1));
+        assert_eq!(selection_range("abc", 1, 1, Some("zz")), (1, 1));
     }
 
     #[test]
