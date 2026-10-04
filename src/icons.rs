@@ -3,11 +3,9 @@ use iced::widget::{text, Text};
 use iced::Font;
 
 /// Default text face.
-#[allow(dead_code)] // used from Task 3 on
 pub const BODY_FONT: Font = Font::with_name("Inter");
 
 /// Semibold face for note titles and headings.
-#[allow(dead_code)] // used from Task 3 on
 pub const TITLE_FONT: Font = Font {
     weight: Weight::Semibold,
     ..Font::with_name("Inter")
@@ -27,7 +25,7 @@ pub static FONTS: [&[u8]; 6] = [
 ];
 
 /// Icons available in the bundled Lucide subset.
-#[allow(dead_code)] // used from Task 3 on
+#[allow(dead_code)] // the rest are used by the later surfaces
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Trash,
@@ -49,7 +47,7 @@ pub enum Icon {
 
 impl Icon {
     /// Every icon in the subset.
-    #[allow(dead_code)] // used from Task 3 on
+    #[allow(dead_code)] // used by tests only
     pub const ALL: [Icon; 15] = [
         Icon::Trash,
         Icon::Close,
@@ -91,7 +89,6 @@ impl Icon {
 }
 
 /// A Lucide glyph as text at the given size.
-#[allow(dead_code)] // used from Task 3 on
 pub fn icon<'a>(icon: Icon, size: f32) -> Text<'a> {
     text(icon.codepoint().to_string())
         .font(ICON_FONT)

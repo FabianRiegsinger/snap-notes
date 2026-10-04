@@ -4,8 +4,9 @@
 
 use crate::animation::{ease_out_cubic, lerp};
 use crate::note::Note;
-use crate::note_panel::{ink, shade, NOTE_RADIUS, TITLE_FONT};
+use crate::note_panel::{ink, shade, NOTE_RADIUS};
 use crate::rich;
+use crate::theme::TITLE_FONT;
 
 use iced::advanced::renderer::{self, Quad};
 use iced::advanced::text::Renderer as _;

@@ -2,6 +2,8 @@
 //! press lands on. iced's `rich_text` only reports presses on links, so this
 //! lays out the same spans again (only on a press) and hit-tests them.
 
+use crate::rich_view::LINE_HEIGHT;
+
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::text::{self, Paragraph as _, Renderer as _};
 use iced::advanced::widget::{Operation, Tree};
@@ -19,8 +21,9 @@ pub struct HitText<'a, Message> {
     on_press: Box<dyn Fn(usize) -> Message + 'a>,
 }
 
-/// `content` must be a `rich_text` of `spans` with default size, font, line
-/// height, alignment and wrapping, at the full available width.
+/// `content` must be a `rich_text` of `spans` with default size, font,
+/// alignment and wrapping and `rich_view::LINE_HEIGHT`, at the full
+/// available width.
 pub fn hit_text<'a, Message>(
     content: impl Into<Element<'a, Message>>,
     spans: Vec<Span<'a, String>>,
@@ -39,7 +42,7 @@ impl<'a, Message> HitText<'a, Message> {
             content: &self.spans[..],
             bounds: Size::new(bounds.width, f32::INFINITY),
             size: renderer.default_size(),
-            line_height: text::LineHeight::default(),
+            line_height: LINE_HEIGHT,
             font: renderer.default_font(),
             align_x: text::Alignment::Default,
             align_y: alignment::Vertical::Top,

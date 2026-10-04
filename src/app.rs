@@ -1018,6 +1018,7 @@ impl App {
                     );
                     let note_view = post_it(PostIt {
                         note,
+                        theme: self.theme,
                         palette: &self.settings.settings().palette,
                         paper_tint: self.settings.settings().notes.paper_tint,
                         idle_control_alpha: self.settings.settings().notes.idle_control_alpha,

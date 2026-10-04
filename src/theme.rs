@@ -2,7 +2,6 @@ use crate::note::NoteColor;
 use iced::gradient::Linear;
 use iced::{Color, Gradient, Shadow, Vector};
 
-#[allow(unused_imports)] // used from Task 3 on
 pub use crate::icons::{BODY_FONT, TITLE_FONT};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -26,28 +25,19 @@ pub struct Theme {
     pub mode: Mode,
 }
 
-#[allow(dead_code)] // used from Task 3 on
 pub const RADIUS_BAR: f32 = 3.0;
-#[allow(dead_code)] // used from Task 3 on
 pub const RADIUS_CONTROL: f32 = 4.0;
-#[allow(dead_code)] // used from Task 3 on
 pub const RADIUS_SURFACE: f32 = 10.0;
 
-#[allow(dead_code)] // used from Task 3 on
+#[allow(dead_code)] // part of the type scale; no surface uses it yet
 pub const TEXT_XS: f32 = 12.0;
-#[allow(dead_code)] // used from Task 3 on
 pub const TEXT_SM: f32 = 14.0;
-#[allow(dead_code)] // used from Task 3 on
 pub const TEXT_MD: f32 = 16.0;
-#[allow(dead_code)] // used from Task 3 on
 pub const TEXT_LG: f32 = 20.0;
-#[allow(dead_code)] // used from Task 3 on
 pub const TEXT_XL: f32 = 24.0;
-#[allow(dead_code)] // used from Task 3 on
 pub const BODY_LINE_HEIGHT: f32 = 1.45;
 
 /// Spacing scale: `n` steps of 4 px.
-#[allow(dead_code)] // used from Task 3 on
 pub const fn space(n: u16) -> f32 {
     4.0 * n as f32
 }
@@ -56,7 +46,6 @@ const LIGHT_INK: Color = Color::from_rgb(0.13, 0.12, 0.10);
 const DARK_INK: Color = Color::from_rgb(0.93, 0.92, 0.89);
 const DARK_BASE: Color = Color::from_rgb(0.11, 0.105, 0.10);
 
-#[allow(dead_code)] // used from Task 3 on
 impl Theme {
     pub fn new(mode: Mode) -> Self {
         Self { mode }
@@ -101,6 +90,7 @@ impl Theme {
         p
     }
 
+    #[allow(dead_code)] // used from Task 6 on
     /// A docked bar's fill: the note color, 6 % lighter at the top.
     pub fn bar_gradient(&self, color: NoteColor, alpha: f32) -> Gradient {
         let [r, g, b, _] = color.rgba;
@@ -124,6 +114,7 @@ impl Theme {
         self.ink(if active { 0.45 } else { 0.25 })
     }
 
+    #[allow(dead_code)] // used from Task 7 on
     pub fn card(&self) -> Color {
         if self.is_dark() {
             Color::from_rgb(0.16, 0.155, 0.15)
