@@ -11,6 +11,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.9"
 pulldown-cmark = { version = "0.13.4", default-features = false }
+png = "0.18.1"
 
 [target.'cfg(windows)'.dependencies]
 single-instance = "0.3"

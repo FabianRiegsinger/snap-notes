@@ -2,6 +2,8 @@ mod animation;
 mod app;
 mod bar_strip;
 mod color_picker;
+#[allow(dead_code)] // used from Task 4 on
+mod images;
 mod note;
 mod note_panel;
 mod pass_wheel;

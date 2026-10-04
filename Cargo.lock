@@ -3343,6 +3343,7 @@ dependencies = [
  "iced",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "png",
  "pulldown-cmark",
  "rand",
  "raw-window-handle",
