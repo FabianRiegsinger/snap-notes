@@ -80,11 +80,8 @@ pub fn peek_text(note: &Note) -> PeekText {
     let max_chars = body_chars_per_line();
     PeekText {
         title,
-        lines: rich::plain_text(&note.content)
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .take(MAX_LINES)
+        lines: rich::plain_lines(&note.content, MAX_LINES)
+            .iter()
             .map(|l| truncate(l, max_chars))
             .collect(),
     }

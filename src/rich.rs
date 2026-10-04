@@ -1,5 +1,5 @@
 use crate::note::NoteColor;
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 
 /// Palette slot used by the `==text==` highlight shorthand.
 const HIGHLIGHT_SLOT: usize = 5;
@@ -98,6 +98,8 @@ enum OpenTag {
 
 struct Builder<'a> {
     content: &'a str,
+    /// Byte offset where each source line starts, for `line_at`.
+    line_starts: Vec<usize>,
     palette: &'a [NoteColor],
     blocks: Vec<Block>,
     cur: Option<Block>,
@@ -109,17 +111,16 @@ struct Builder<'a> {
     list_stack: Vec<Option<u64>>,
     quote_depth: u32,
     image: Option<(String, String, usize)>,
+    /// An image just split its block; the line break after it belongs to it.
+    after_image: bool,
     in_code_block: bool,
 }
 
 impl<'a> Builder<'a> {
     fn line_at(&self, offset: usize) -> usize {
-        self.content
-            .as_bytes()
-            .iter()
-            .take(offset)
-            .filter(|&&b| b == b'\n')
-            .count()
+        self.line_starts
+            .partition_point(|&start| start <= offset)
+            .saturating_sub(1)
     }
 
     /// Ends the current block and drops any open tags.
@@ -137,6 +138,7 @@ impl<'a> Builder<'a> {
 
     fn start(&mut self, kind: BlockKind, offset: usize) {
         self.flush();
+        self.after_image = false;
         self.cur = Some(Block {
             kind,
             spans: Vec::new(),
@@ -146,13 +148,43 @@ impl<'a> Builder<'a> {
 
     fn ensure_block(&mut self, offset: usize) {
         if self.cur.is_none() {
-            let kind = if self.quote_depth > 0 {
-                BlockKind::Quote
-            } else {
-                BlockKind::Paragraph
-            };
-            self.start(kind, offset);
+            self.start(self.text_kind(), offset);
         }
+    }
+
+    fn text_kind(&self) -> BlockKind {
+        if self.quote_depth > 0 {
+            BlockKind::Quote
+        } else {
+            BlockKind::Paragraph
+        }
+    }
+
+    /// Starts a paragraph (or quote) block, unless it continues a list item.
+    fn start_paragraph(&mut self, offset: usize) {
+        let in_item = matches!(
+            self.cur.as_ref().map(|c| &c.kind),
+            Some(BlockKind::ListItem { .. })
+        );
+        if !in_item {
+            self.start(self.text_kind(), offset);
+        }
+    }
+
+    /// Ends the current block at an image, without the line break that led
+    /// up to the image.
+    fn split_at_image(&mut self) {
+        if let Some(block) = self.cur.as_mut() {
+            if let Some(last) = block.spans.last_mut() {
+                if last.text.ends_with('\n') {
+                    last.text.pop();
+                    if last.text.is_empty() {
+                        block.spans.pop();
+                    }
+                }
+            }
+        }
+        self.flush();
     }
 
     fn style(&self) -> Span {
@@ -175,6 +207,15 @@ impl<'a> Builder<'a> {
     }
 
     fn push_span(&mut self, mut span: Span, text: &str, offset: usize) {
+        let mut text = text;
+        let mut offset = offset;
+        if self.cur.is_none() && std::mem::take(&mut self.after_image) {
+            // The text after an image starts on the line below it.
+            if let Some(rest) = text.strip_prefix('\n') {
+                text = rest;
+                offset += 1;
+            }
+        }
         if text.is_empty() {
             return;
         }
@@ -324,8 +365,12 @@ impl<'a> Builder<'a> {
 /// Palette lookups are by slot, so a short palette yields no color rather than an error.
 pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let line_starts = std::iter::once(0)
+        .chain(content.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
     let mut b = Builder {
         content,
+        line_starts,
         palette,
         blocks: Vec::new(),
         cur: None,
@@ -337,27 +382,16 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
         list_stack: Vec::new(),
         quote_depth: 0,
         image: None,
+        after_image: false,
         in_code_block: false,
     };
 
     for (event, range) in Parser::new_ext(content, options).into_offset_iter() {
         match event {
             Event::Start(tag) => match tag {
-                Tag::Paragraph => {
-                    // Paragraphs inside a list item continue that item.
-                    let in_item = matches!(
-                        b.cur.as_ref().map(|c| &c.kind),
-                        Some(BlockKind::ListItem { .. })
-                    );
-                    if !in_item {
-                        let kind = if b.quote_depth > 0 {
-                            BlockKind::Quote
-                        } else {
-                            BlockKind::Paragraph
-                        };
-                        b.start(kind, range.start);
-                    }
-                }
+                // Paragraphs inside a list item continue that item; raw HTML
+                // shows as typed in a paragraph of its own.
+                Tag::Paragraph | Tag::HtmlBlock => b.start_paragraph(range.start),
                 Tag::Heading { level, .. } => {
                     b.start(BlockKind::Heading((level as u8).min(3)), range.start)
                 }
@@ -395,16 +429,21 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
                 Tag::Emphasis => b.italic += 1,
                 Tag::Strong => b.bold += 1,
                 Tag::Strikethrough => b.strike += 1,
+                Tag::Link {
+                    link_type: LinkType::Email,
+                    dest_url,
+                    ..
+                } => b.links.push(format!("mailto:{dest_url}")),
                 Tag::Link { dest_url, .. } => b.links.push(dest_url.to_string()),
                 Tag::Image { dest_url, .. } => {
-                    b.flush();
+                    b.split_at_image();
                     b.image = Some((dest_url.to_string(), String::new(), b.line_at(range.start)));
                 }
                 _ => {}
             },
             Event::End(tag) => match tag {
                 TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item => b.flush(),
-                TagEnd::CodeBlock => {
+                TagEnd::CodeBlock | TagEnd::HtmlBlock => {
                     b.in_code_block = false;
                     if let Some(block) = b.cur.as_mut() {
                         if let Some(last) = block.spans.last_mut() {
@@ -436,6 +475,7 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
                             spans: Vec::new(),
                             source_line: line,
                         });
+                        b.after_image = true;
                     }
                 }
                 _ => {}
@@ -460,6 +500,8 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
                 };
                 b.push_span(span, &text, range.start);
             }
+            // Markup the parser doesn't render stays as typed.
+            Event::Html(html) | Event::InlineHtml(html) => b.push_plain(&html, range.start),
             Event::SoftBreak | Event::HardBreak => b.push_plain("\n", range.start),
             Event::TaskListMarker(done) => {
                 if let Some(Block {
@@ -508,13 +550,45 @@ pub fn plain_text(content: &str) -> String {
                     }
                     _ => "",
                 };
-                // An image next to text leaves the line break before it behind.
                 let text: String = block.spans.iter().map(|s| s.text.as_str()).collect();
-                format!("{prefix}{}", text.trim_end_matches('\n'))
+                format!("{prefix}{text}")
             }
         })
         .collect();
     lines.join("\n")
+}
+
+/// The first `max` non-blank lines of [`plain_text`], trimmed. Parses only
+/// the start of the note, so long notes stay cheap.
+pub fn plain_lines(content: &str, max: usize) -> Vec<String> {
+    // Source lines parsed past the last one shown, so markup that looks
+    // ahead (a setext underline, a closing `**`) renders as in the whole note.
+    const MARGIN: usize = 8;
+    let mut want = max.saturating_add(MARGIN);
+    loop {
+        let mut taken = 0;
+        let end = content
+            .split_inclusive('\n')
+            .scan(0, |len, line| {
+                *len += line.len();
+                Some((*len, line))
+            })
+            .find(|(_, line)| {
+                taken += usize::from(!line.trim().is_empty());
+                taken >= want
+            })
+            .map_or(content.len(), |(len, _)| len);
+        let text = plain_text(&content[..end]);
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if end == content.len() || lines.len() >= max.saturating_add(MARGIN) {
+            return lines.into_iter().take(max).map(str::to_string).collect();
+        }
+        want = want.saturating_mul(2);
+    }
 }
 
 /// Byte offset of the task checkbox's inner character in `line`, if it is a task item.
@@ -693,11 +767,12 @@ mod tests {
         assert_eq!(insert_block("ab", 0, "X"), ("X\nab".into(), 1));
     }
 
+    fn texts_of(block: &Block) -> String {
+        block.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
     fn texts(doc: &Doc) -> Vec<String> {
-        doc.blocks
-            .iter()
-            .map(|b| b.spans.iter().map(|s| s.text.as_str()).collect())
-            .collect()
+        doc.blocks.iter().map(texts_of).collect()
     }
 
     fn span<'a>(doc: &'a Doc, text: &str) -> &'a Span {
@@ -892,6 +967,13 @@ mod tests {
             "\u{0}",
             "é{coral}é{/}é",
             "\r\n# a\r\n",
+            "<",
+            "<!--",
+            "- <div>\n  x",
+            "> a\n> ![](x)\n> b",
+            "a\r\n![](x)\r\nb",
+            "![](x)\n![](y)\n",
+            "<a@b>",
         ] {
             parse(input, &PALETTE);
             parse(input, &[]);
@@ -975,6 +1057,68 @@ mod tests {
         assert_eq!(offset_of("ab\ncd", 0, 99), 2);
         assert_eq!(offset_of("é", 0, 1), 0);
         assert_eq!(position_of("ab", 99), (0, 2));
+    }
+
+    #[test]
+    fn inline_html_stays_literal() {
+        let doc = parse("Meet <Anna> at 5", &PALETTE);
+        assert_eq!(texts(&doc), ["Meet <Anna> at 5"]);
+        assert_eq!(plain_text("Meet <Anna> at 5"), "Meet <Anna> at 5");
+    }
+
+    #[test]
+    fn html_block_stays_literal() {
+        let doc = parse("<div>hi</div>", &PALETTE);
+        assert_eq!(texts(&doc), ["<div>hi</div>"]);
+        assert_eq!(doc.blocks[0].kind, BlockKind::Paragraph);
+        assert_eq!(plain_text("<div>hi</div>\n\nafter"), "<div>hi</div>\nafter");
+    }
+
+    #[test]
+    fn html_comment_stays_literal() {
+        let doc = parse("<!-- todo -->\nnext", &PALETTE);
+        assert_eq!(texts(&doc), ["<!-- todo -->", "next"]);
+        let lines: Vec<_> = doc.blocks.iter().map(|b| b.source_line).collect();
+        assert_eq!(lines, [0, 1]);
+        assert_eq!(plain_text("<!-- todo -->"), "<!-- todo -->");
+    }
+
+    #[test]
+    fn image_between_lines_has_no_blank_lines() {
+        let doc = parse("a\n![](images/x.png)\nb", &PALETTE);
+        let got: Vec<_> = doc
+            .blocks
+            .iter()
+            .map(|b| (b.kind.clone(), texts_of(b), b.source_line))
+            .collect();
+        let image = BlockKind::Image {
+            path: "images/x.png".into(),
+            alt: String::new(),
+        };
+        assert_eq!(
+            got,
+            [
+                (BlockKind::Paragraph, "a".to_string(), 0),
+                (image, String::new(), 1),
+                (BlockKind::Paragraph, "b".to_string(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn email_autolink_opens_as_mailto() {
+        let doc = parse("<a@b.com>", &PALETTE);
+        assert_eq!(
+            span(&doc, "a@b.com").link.as_deref(),
+            Some("mailto:a@b.com")
+        );
+    }
+
+    #[test]
+    fn plain_lines_stops_early() {
+        let content: String = (0..10_000).map(|i| format!("line {i}\n")).collect();
+        assert_eq!(plain_lines(&content, 3), ["line 0", "line 1", "line 2"]);
+        assert_eq!(plain_lines("\n\n  # T\n\n- [ ] x", 3), ["T", "☐ x"]);
     }
 
     #[test]
