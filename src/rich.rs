@@ -573,6 +573,96 @@ pub fn toggle_task(content: &str, line: usize) -> Option<String> {
     toggled.then_some(out)
 }
 
+/// A formatting action the toolbar applies to the selected text.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Format {
+    Bold,
+    Italic,
+    Strike,
+    Code,
+    /// Palette slot, written as its `COLOR_NAMES` tag.
+    Color(usize),
+    Highlight,
+    Size(f32),
+    Link,
+}
+
+/// Snaps `offset` down to a char boundary within `content`.
+fn snap(content: &str, offset: usize) -> usize {
+    let mut offset = offset.min(content.len());
+    while !content.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// Wraps `start..end` (byte offsets, clamped and snapped to char boundaries)
+/// in the markup for `format`. Returns the new text and the new selection:
+/// the wrapped text, or for a link the spot inside `()`. With an empty
+/// selection the cursor lands between the markers.
+pub fn wrap_selection(
+    content: &str,
+    start: usize,
+    end: usize,
+    format: Format,
+) -> (String, usize, usize) {
+    let (a, b) = (snap(content, start), snap(content, end));
+    let (start, end) = (a.min(b), a.max(b));
+    let (open, close) = match format {
+        Format::Bold => ("**".to_string(), "**".to_string()),
+        Format::Italic => ("*".to_string(), "*".to_string()),
+        Format::Strike => ("~~".to_string(), "~~".to_string()),
+        Format::Code => ("`".to_string(), "`".to_string()),
+        Format::Highlight => ("==".to_string(), "==".to_string()),
+        Format::Color(slot) => (
+            format!("{{{}}}", COLOR_NAMES[slot.min(COLOR_NAMES.len() - 1)]),
+            "{/}".to_string(),
+        ),
+        Format::Size(size) => (format!("{{size:{size}}}"), "{/}".to_string()),
+        Format::Link => ("[".to_string(), "]()".to_string()),
+    };
+    let mut out = String::with_capacity(content.len() + open.len() + close.len());
+    out.push_str(&content[..start]);
+    out.push_str(&open);
+    out.push_str(&content[start..end]);
+    out.push_str(&close);
+    out.push_str(&content[end..]);
+    let inner = (start + open.len(), end + open.len());
+    if format == Format::Link {
+        // Between the parentheses, ready for the address.
+        let at = inner.1 + close.len() - 1;
+        (out, at, at)
+    } else {
+        (out, inner.0, inner.1)
+    }
+}
+
+/// Byte offset in `content` of an editor position. The editor counts
+/// `column` in bytes within the line; out-of-range values are clamped.
+pub fn offset_of(content: &str, line: usize, column: usize) -> usize {
+    let mut line_start = 0;
+    for _ in 0..line {
+        match content[line_start..].find('\n') {
+            Some(i) => line_start += i + 1,
+            None => return content.len(),
+        }
+    }
+    let line_end = content[line_start..]
+        .find('\n')
+        .map_or(content.len(), |i| line_start + i);
+    line_start + snap(&content[line_start..line_end], column)
+}
+
+/// The editor position `(line, column)` of a byte offset, the inverse of
+/// [`offset_of`].
+pub fn position_of(content: &str, offset: usize) -> (usize, usize) {
+    let offset = snap(content, offset);
+    let before = &content[..offset];
+    let line = before.matches('\n').count();
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    (line, offset - line_start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -808,5 +898,66 @@ mod tests {
             toggle_task("a\r\n- [ ] b\r\nc", 1).as_deref(),
             Some("a\r\n- [x] b\r\nc")
         );
+    }
+
+    #[test]
+    fn wrap_bold_selection() {
+        assert_eq!(
+            wrap_selection("a word b", 2, 6, Format::Bold),
+            ("a **word** b".to_string(), 4, 8)
+        );
+    }
+
+    #[test]
+    fn wrap_empty_selection_places_cursor_inside() {
+        assert_eq!(
+            wrap_selection("ab", 1, 1, Format::Italic),
+            ("a**b".to_string(), 2, 2)
+        );
+    }
+
+    #[test]
+    fn wrap_color_size_link() {
+        let wrapped = |f| wrap_selection("x", 0, 1, f);
+        assert_eq!(wrapped(Format::Color(0)).0, "{coral}x{/}");
+        assert_eq!(wrapped(Format::Size(20.0)).0, "{size:20}x{/}");
+        assert_eq!(wrapped(Format::Highlight).0, "==x==");
+        assert_eq!(wrapped(Format::Strike).0, "~~x~~");
+        assert_eq!(wrapped(Format::Code).0, "`x`");
+        let (text, a, b) = wrapped(Format::Link);
+        assert_eq!(text, "[x]()");
+        assert_eq!((a, b), (4, 4));
+    }
+
+    #[test]
+    fn wrap_selection_with_multibyte_text() {
+        // The editor's column counts bytes: é is 2, the emoji 4.
+        let text = "é😀z";
+        let end = offset_of(text, 0, 6);
+        assert_eq!(wrap_selection(text, 0, end, Format::Bold).0, "**é😀**z");
+    }
+
+    #[test]
+    fn wrap_clamps_and_snaps_bad_offsets() {
+        assert_eq!(wrap_selection("é", 1, 99, Format::Bold).0, "**é**");
+        assert_eq!(wrap_selection("", 5, 2, Format::Link).0, "[]()");
+        assert_eq!(wrap_selection("ab", 2, 0, Format::Bold).0, "**ab**");
+        assert_eq!(
+            wrap_selection("a", 0, 1, Format::Color(99)).0,
+            "{slate}a{/}"
+        );
+        assert_eq!(offset_of("ab\ncd", 9, 0), 5);
+        assert_eq!(offset_of("ab\ncd", 0, 99), 2);
+        assert_eq!(offset_of("é", 0, 1), 0);
+        assert_eq!(position_of("ab", 99), (0, 2));
+    }
+
+    #[test]
+    fn offset_position_roundtrip() {
+        let text = "ab\ncé\n😀";
+        for o in (0..=text.len()).filter(|&o| text.is_char_boundary(o)) {
+            let (line, column) = position_of(text, o);
+            assert_eq!(offset_of(text, line, column), o);
+        }
     }
 }

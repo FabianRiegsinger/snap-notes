@@ -67,6 +67,10 @@ pub enum Message {
     DeleteRequested,
     ConfirmDelete(bool),
     ToggleColorPicker,
+    /// Open or close the toolbar's text color grid.
+    ToggleTextColorPicker,
+    /// Wrap the editor selection in this format's markup.
+    FormatApplied(rich::Format),
     ColorChosen(NoteColor),
     DragStart(usize, f32),
     DragMove(f32),
@@ -110,6 +114,7 @@ pub struct App {
     anchor_y: f32,
     pending_delete: Option<Uuid>,
     color_picker_open: bool,
+    text_color_picker_open: bool,
     note_hovered: bool,
     drag: Option<DragState>,
     scroll_offset: f32,
@@ -233,6 +238,7 @@ impl App {
             anchor_y: 0.0,
             pending_delete: None,
             color_picker_open: false,
+            text_color_picker_open: false,
             note_hovered: false,
             drag: None,
             scroll_offset: 0.0,
@@ -436,6 +442,7 @@ impl App {
             Message::EditorBlurred => {
                 if self.editing {
                     self.editing = false;
+                    self.text_color_picker_open = false;
                     self.reparse();
                 }
             }
@@ -470,6 +477,7 @@ impl App {
                     self.morph.close();
                     self.animating = true;
                     self.color_picker_open = false;
+                    self.text_color_picker_open = false;
                     self.confirm_delete = None;
                 }
             }
@@ -539,7 +547,13 @@ impl App {
             }
             Message::ToggleColorPicker => {
                 self.color_picker_open = !self.color_picker_open;
+                self.text_color_picker_open = false;
             }
+            Message::ToggleTextColorPicker => {
+                self.text_color_picker_open = !self.text_color_picker_open;
+                self.color_picker_open = false;
+            }
+            Message::FormatApplied(format) => return self.apply_format(format),
             Message::ColorChosen(color) => {
                 if let Some(id) = self.active_note {
                     if let Some(note) = self.store.note_mut(id) {
@@ -800,6 +814,7 @@ impl App {
                         content_alpha: frame.content_alpha,
                         confirm_delete: self.confirm_delete.is_some(),
                         color_picker_open: self.color_picker_open,
+                        text_color_picker_open: self.text_color_picker_open,
                         hovered: self.note_hovered,
                         dragging: self.note_drag.is_some(),
                     });
@@ -893,6 +908,7 @@ impl App {
         self.reparse();
         self.pending_delete = None;
         self.color_picker_open = false;
+        self.text_color_picker_open = false;
         self.confirm_delete = None;
         if let Some(bar) = self.strip_layout().bars.get(index) {
             self.anchor_y = bar.y + bar.height / 2.0;
@@ -904,6 +920,41 @@ impl App {
         }
         self.animating = true;
         self.dock_window()
+    }
+
+    /// Wraps the editor selection in `format`'s markup, writes the result
+    /// back to the note and leaves the wrapped text selected.
+    fn apply_format(&mut self, format: rich::Format) -> Task<Message> {
+        self.text_color_picker_open = false;
+        let (Some(id), true, Some(content)) =
+            (self.active_note, self.editing, &mut self.editor_content)
+        else {
+            return Task::none();
+        };
+        let cursor = content.cursor();
+        let text = content.text();
+        let text = text.trim_end_matches('\n');
+        let offset = |p: text_editor::Position| rich::offset_of(text, p.line, p.column);
+        let head = offset(cursor.position);
+        let anchor = cursor.selection.map_or(head, offset);
+        let (wrapped, start, end) =
+            rich::wrap_selection(text, head.min(anchor), head.max(anchor), format);
+        let position = |o| {
+            let (line, column) = rich::position_of(&wrapped, o);
+            text_editor::Position { line, column }
+        };
+        let mut rebuilt = text_editor::Content::with_text(&wrapped);
+        rebuilt.move_to(text_editor::Cursor {
+            position: position(end),
+            selection: (start != end).then(|| position(start)),
+        });
+        *content = rebuilt;
+        if let Some(note) = self.store.note_mut(id) {
+            note.content = wrapped;
+            note.updated_at = chrono::Utc::now();
+        }
+        self.store.mark_dirty();
+        focus_body()
     }
 
     /// Re-parses the open note for the rendered view and checks its images
@@ -940,6 +991,7 @@ impl App {
         self.doc = Doc { blocks: Vec::new() };
         self.broken_images.clear();
         self.color_picker_open = false;
+        self.text_color_picker_open = false;
         self.confirm_delete = None;
         self.note_resize = None;
         if let Some(id) = self.pending_delete.take() {
@@ -1456,6 +1508,47 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn bold_wraps_selection_and_keeps_it_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "a word b");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        app.editor_content
+            .as_mut()
+            .unwrap()
+            .move_to(text_editor::Cursor {
+                position: text_editor::Position { line: 0, column: 6 },
+                selection: Some(text_editor::Position { line: 0, column: 2 }),
+            });
+        let _ = app.update(Message::FormatApplied(crate::rich::Format::Bold));
+        assert_eq!(app.store.notes()[0].content, "a **word** b");
+        assert!(app.store.is_dirty());
+        let content = app.editor_content.as_ref().unwrap();
+        assert_eq!(content.text().trim_end(), "a **word** b");
+        assert_eq!(content.selection().as_deref(), Some("word"));
+    }
+
+    #[test]
+    fn format_is_a_no_op_outside_edit_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "word");
+        assert!(!app.editing);
+        let _ = app.update(Message::FormatApplied(crate::rich::Format::Bold));
+        assert_eq!(app.store.notes()[0].content, "word");
+        assert!(!app.store.is_dirty());
+    }
+
+    #[test]
+    fn text_and_note_color_pickers_exclude_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let _ = app.update(Message::ToggleColorPicker);
+        let _ = app.update(Message::ToggleTextColorPicker);
+        assert!(app.text_color_picker_open && !app.color_picker_open);
+        let _ = app.update(Message::ToggleColorPicker);
+        assert!(app.color_picker_open && !app.text_color_picker_open);
     }
 
     #[test]

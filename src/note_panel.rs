@@ -5,6 +5,7 @@ use crate::pass_wheel::pass_wheel;
 use crate::press_through::press_through;
 use crate::rich::Doc;
 use crate::rich_view;
+use crate::toolbar::toolbar;
 
 use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, Scrollable};
 use iced::advanced::widget::{Id, Operation};
@@ -111,6 +112,8 @@ pub struct PostIt<'a> {
     pub content_alpha: f32,
     pub confirm_delete: bool,
     pub color_picker_open: bool,
+    /// The toolbar's text color grid is open.
+    pub text_color_picker_open: bool,
     pub hovered: bool,
     pub dragging: bool,
 }
@@ -132,7 +135,11 @@ pub(crate) fn shade(note: &Note, amount: f32, alpha: f32) -> Color {
     Color::from_rgba(mix(r), mix(g), mix(b), alpha)
 }
 
-fn icon_button<'a>(label: &'a str, message: Message, alpha: f32) -> Element<'a, Message> {
+pub(crate) fn icon_button<'a>(
+    label: &'a str,
+    message: Message,
+    alpha: f32,
+) -> Element<'a, Message> {
     button(text(label).size(14))
         .on_press(message)
         .padding(Padding::new(3.0).left(7).right(7))
@@ -228,6 +235,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         content_alpha: a,
         confirm_delete,
         color_picker_open,
+        text_color_picker_open,
         hovered,
         dragging,
     } = p;
@@ -387,6 +395,9 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 container(color_picker(&note.color, palette))
                     .padding(Padding::ZERO.left(14).bottom(6)),
             );
+        }
+        if editing {
+            col = col.push(toolbar(palette, text_color_picker_open, controls));
         }
         col = col.push(body);
 

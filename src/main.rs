@@ -15,6 +15,7 @@ mod rich_view;
 mod settings;
 mod settings_panel;
 mod store;
+mod toolbar;
 mod tray;
 
 use app::App;
