@@ -1437,9 +1437,12 @@ impl App {
             return;
         };
         let index = self.store.notes().iter().position(|n| n.id == id);
-        // A bar dragged below the removed one moves up a slot.
+        // A bar dragged below the removed one moves up a slot; a drag on
+        // the removed bar itself is dropped.
         if let (Some(drag), Some(index)) = (&mut self.drag, index) {
-            if drag.bar_index > index {
+            if drag.bar_index == index {
+                self.drag = None;
+            } else if drag.bar_index > index {
                 drag.bar_index -= 1;
             }
         }
@@ -2044,6 +2047,49 @@ mod tests {
         // The other bar still opens.
         let _ = app.update(Message::BarClicked(1));
         assert!(app.active_note.is_some());
+    }
+
+    /// An app with `n` docked notes and their ids, top to bottom.
+    fn app_with_bars(dir: &tempfile::TempDir, n: usize) -> (App, Vec<Uuid>) {
+        let mut app = app_in(dir);
+        let ids = (0..n)
+            .map(|_| app.store.add_note(&crate::note::PALETTE))
+            .collect();
+        app.window_size = Size::new(1200.0, 900.0);
+        (app, ids)
+    }
+
+    #[test]
+    fn drag_on_deleted_bar_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 3);
+        let bar = app.strip_layout().bars[1];
+        let _ = app.update(Message::DragStart(1, bar.center().y));
+        app.start_collapse(ids[1]);
+        settle(&mut app);
+        assert!(app.drag.is_none());
+        // The press is released on the bar that slid into its place.
+        let _ = app.update(Message::DragEnd);
+        assert_eq!(app.active_note, None);
+        let order: Vec<Uuid> = app.store.notes().iter().map(|n| n.id).collect();
+        assert_eq!(order, vec![ids[0], ids[2]]);
+    }
+
+    #[test]
+    fn drag_on_deleted_last_bar_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 2);
+        let bar = app.strip_layout().bars[1];
+        let _ = app.update(Message::DragStart(1, bar.center().y));
+        // Dragged to the top: dropping it would reorder past the end.
+        let _ = app.update(Message::DragMove(0.0));
+        app.start_collapse(ids[1]);
+        settle(&mut app);
+        assert!(app.drag.is_none());
+        let _ = app.update(Message::DragEnd);
+        assert_eq!(app.active_note, None);
+        let order: Vec<Uuid> = app.store.notes().iter().map(|n| n.id).collect();
+        assert_eq!(order, vec![ids[0]]);
     }
 
     #[test]
