@@ -997,6 +997,9 @@ impl App {
             paper_tint: self.settings.settings().notes.paper_tint,
             peek_confirm: self.peek_confirm_delete.is_some(),
             theme: self.theme,
+            open_index: self
+                .active_note
+                .and_then(|id| self.store.notes().iter().position(|n| n.id == id)),
         })
         .width(Fill)
         .height(Fill)

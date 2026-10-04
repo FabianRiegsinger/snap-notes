@@ -90,7 +90,6 @@ impl Theme {
         p
     }
 
-    #[allow(dead_code)] // used from Task 6 on
     /// A docked bar's fill: the note color, 6 % lighter at the top.
     pub fn bar_gradient(&self, color: NoteColor, alpha: f32) -> Gradient {
         let [r, g, b, _] = color.rgba;

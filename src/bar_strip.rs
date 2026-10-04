@@ -23,7 +23,22 @@ const ADD_MAX_HEIGHT_SCALE: f32 = 1.4;
 /// Magnification at which the "+" inside the add bar is fully visible.
 const ADD_PLUS_SCALE: f32 = 3.0;
 const EDGE_PADDING: f32 = 16.0;
-const CORNER_RADIUS: f32 = 3.0;
+const CORNER_RADIUS: f32 = theme::RADIUS_BAR;
+/// The open note's bar is this much wider than a docked one.
+const OPEN_BAR_SCALE: f32 = 1.5;
+
+/// The bar's rectangle: the open note's bar grows to the left from its right edge.
+pub fn bar_rect_for(open: bool, rect: Rectangle) -> Rectangle {
+    if !open {
+        return rect;
+    }
+    let width = rect.width * OPEN_BAR_SCALE;
+    Rectangle {
+        x: rect.x + rect.width - width,
+        width,
+        ..rect
+    }
+}
 
 pub struct StripLayout {
     pub bars: Vec<Rectangle>,
@@ -176,6 +191,8 @@ pub struct BarStrip<'a> {
     /// The open peek asks whether to delete its note.
     pub peek_confirm: bool,
     pub theme: theme::Theme,
+    /// Index of the open (or opening) note's bar.
+    pub open_index: Option<usize>,
 }
 
 impl<'a> BarStrip<'a> {
@@ -304,24 +321,50 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 } else {
                     note.color.rgba[3]
                 };
-                let color = Color::from_rgba(
-                    note.color.rgba[0],
-                    note.color.rgba[1],
-                    note.color.rgba[2],
-                    alpha,
-                );
+                let rect = bar_rect_for(self.open_index == Some(i), *bar_rect);
+                let corner = CORNER_RADIUS;
+                if self.open_index == Some(i) {
+                    let [_, ambient] = self.theme.shadows(1.0);
+                    let [r, g, b, _] = note.color.rgba;
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: rect,
+                            border: iced::Border {
+                                radius: corner.into(),
+                                ..Default::default()
+                            },
+                            shadow: ambient,
+                            snap: true,
+                        },
+                        Color::from_rgba(r, g, b, alpha),
+                    );
+                }
                 renderer::Renderer::fill_quad(
                     renderer,
                     renderer::Quad {
-                        bounds: *bar_rect,
+                        bounds: rect,
                         border: iced::Border {
-                            radius: CORNER_RADIUS.into(),
+                            radius: corner.into(),
                             ..Default::default()
                         },
                         shadow: Default::default(),
                         snap: true,
                     },
-                    color,
+                    self.theme.bar_gradient(note.color, alpha),
+                );
+                renderer::Renderer::fill_quad(
+                    renderer,
+                    renderer::Quad {
+                        bounds: Rectangle::new(
+                            Point::new(rect.x + corner, rect.y),
+                            Size::new((rect.width - 2.0 * corner).max(0.0), 1.0),
+                        ),
+                        border: Default::default(),
+                        shadow: Default::default(),
+                        snap: true,
+                    },
+                    self.theme.highlight(),
                 );
             }
         }
@@ -338,6 +381,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             add,
             idle && cursor.is_over(strip.add_hit_area),
             add_reveal,
+            &self.theme,
         );
         if add_reveal > 0.0 {
             let thickness = 2.0;
@@ -359,7 +403,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                         shadow: Default::default(),
                         snap: true,
                     },
-                    Color::from_rgba(1.0, 1.0, 1.0, 0.95 * add_reveal),
+                    self.theme.card().scale_alpha(0.95 * add_reveal),
                 );
             }
         }
@@ -371,6 +415,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 gear,
                 idle && cursor.is_over(gear_hit),
                 gear_reveal,
+                &self.theme,
             );
             if gear_reveal > 0.0 {
                 for quad in settings_glyph(gear) {
@@ -385,7 +430,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             shadow: Default::default(),
                             snap: true,
                         },
-                        Color::from_rgba(1.0, 1.0, 1.0, 0.95 * gear_reveal),
+                        self.theme.card().scale_alpha(0.95 * gear_reveal),
                     );
                 }
             }
@@ -436,7 +481,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             shadow: Default::default(),
                             snap: true,
                         },
-                        Color::from_rgba(1.0, 1.0, 1.0, 0.8),
+                        self.theme.ink(0.8),
                     );
                 }
             }
@@ -578,9 +623,14 @@ pub fn peek_target(bar: Rectangle, bounds: Rectangle, note: &Note, confirming: b
 
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
 /// grows, darker while hovered.
-fn draw_slot(renderer: &mut iced::Renderer, rect: Rectangle, hovered: bool, reveal: f32) {
-    let fill_alpha = if hovered { 0.9 } else { 0.15 + 0.5 * reveal };
-    let shade = if hovered { 0.3 } else { 0.45 };
+fn draw_slot(
+    renderer: &mut iced::Renderer,
+    rect: Rectangle,
+    hovered: bool,
+    reveal: f32,
+    theme: &theme::Theme,
+) {
+    let fill_alpha = if hovered { 0.8 } else { 0.1 + 0.4 * reveal };
     renderer::Renderer::fill_quad(
         renderer,
         renderer::Quad {
@@ -588,12 +638,12 @@ fn draw_slot(renderer: &mut iced::Renderer, rect: Rectangle, hovered: bool, reve
             border: iced::Border {
                 radius: CORNER_RADIUS.into(),
                 width: 1.5 * (1.0 - reveal),
-                color: Color::from_rgba(0.45, 0.46, 0.5, 0.75),
+                color: theme.ink(0.4),
             },
             shadow: Default::default(),
             snap: true,
         },
-        Color::from_rgba(shade, shade + 0.01, shade + 0.05, fill_alpha),
+        theme.ink(fill_alpha),
     );
 }
 
@@ -624,6 +674,16 @@ mod tests {
 
     fn center(r: &Rectangle) -> Point {
         Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0)
+    }
+
+    #[test]
+    fn open_bar_is_wider_and_keeps_its_right_edge() {
+        let r = Rectangle::new(Point::new(40.0, 100.0), Size::new(6.0, 30.0));
+        let open = bar_rect_for(true, r);
+        assert_eq!(open.width, r.width * 1.5);
+        assert_eq!(open.x + open.width, r.x + r.width);
+        assert_eq!((open.y, open.height), (r.y, r.height));
+        assert_eq!(bar_rect_for(false, r), r);
     }
 
     #[test]
@@ -753,6 +813,7 @@ mod tests {
             paper_tint: 0.0,
             peek_confirm: false,
             theme: theme::Theme::default(),
+            open_index: None,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
