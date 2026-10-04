@@ -219,7 +219,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Scans a Markdown text event for `{...}` tags and `==` highlights.
-    fn push_text(&mut self, text: &str, range_start: usize) {
+    fn push_text(&mut self, text: &str, range_start: usize, range_end: usize) {
         let escaped = text.starts_with('{') && {
             let backslashes = self.content.as_bytes()[..range_start]
                 .iter()
@@ -252,20 +252,38 @@ impl<'a> Builder<'a> {
                 }
             }
             if rest.starts_with("==") {
-                self.flush_literal(&mut literal, range_start);
-                match self
+                let consumed = text.len() - rest.len();
+                let prev = text[..consumed]
+                    .chars()
+                    .next_back()
+                    .or_else(|| self.content[..range_start].chars().next_back());
+                let open = self
                     .tags
                     .iter()
-                    .rposition(|t| matches!(t, OpenTag::Highlight))
-                {
-                    Some(i) => {
-                        self.tags.remove(i);
+                    .rposition(|t| matches!(t, OpenTag::Highlight));
+                let flanks = match open {
+                    Some(_) => prev.is_some_and(|c| !c.is_whitespace()),
+                    None => {
+                        let next = rest[2..]
+                            .chars()
+                            .next()
+                            .or_else(|| self.content[range_end..].chars().next());
+                        next.is_some_and(|c| !c.is_whitespace())
+                            && self.has_closing_highlight(range_start + consumed + 2)
                     }
-                    None => self.tags.push(OpenTag::Highlight),
+                };
+                if flanks {
+                    self.flush_literal(&mut literal, range_start);
+                    match open {
+                        Some(i) => {
+                            self.tags.remove(i);
+                        }
+                        None => self.tags.push(OpenTag::Highlight),
+                    }
+                    rest = &rest[2..];
+                    first = false;
+                    continue;
                 }
-                rest = &rest[2..];
-                first = false;
-                continue;
             }
             let ch = rest.chars().next().unwrap_or('\0');
             literal.push(ch);
@@ -273,6 +291,25 @@ impl<'a> Builder<'a> {
             first = false;
         }
         self.flush_literal(&mut literal, range_start);
+    }
+
+    /// Whether a `==` preceded by non-whitespace follows `from` within the same block.
+    fn has_closing_highlight(&self, from: usize) -> bool {
+        let Some(tail) = self.content.get(from..) else {
+            return false;
+        };
+        let block = tail.split("\n\n").next().unwrap_or(tail);
+        block.match_indices("==").any(|(i, _)| {
+            let before = if i == 0 {
+                &self.content[..from]
+            } else {
+                &block[..i]
+            };
+            before
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_whitespace())
+        })
     }
 
     fn flush_literal(&mut self, literal: &mut String, offset: usize) {
@@ -413,7 +450,7 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
                     };
                     b.push_span(span, &text, range.start);
                 } else {
-                    b.push_text(&text, range.start);
+                    b.push_text(&text, range.start, range.end);
                 }
             }
             Event::Code(text) => {
@@ -574,6 +611,20 @@ mod tests {
     fn highlight_shorthand() {
         let doc = parse("==hi==", &PALETTE);
         assert_eq!(span(&doc, "hi").background, Some(PALETTE[5]));
+    }
+
+    #[test]
+    fn equals_with_spaces_stay_literal() {
+        let doc = parse("a == b", &PALETTE);
+        assert_eq!(texts(&doc), ["a == b"]);
+        assert_eq!(doc.blocks[0].spans[0].background, None);
+    }
+
+    #[test]
+    fn unmatched_highlight_stays_literal() {
+        let doc = parse("x ==y", &PALETTE);
+        assert_eq!(texts(&doc), ["x ==y"]);
+        assert_eq!(doc.blocks[0].spans[0].background, None);
     }
 
     #[test]
