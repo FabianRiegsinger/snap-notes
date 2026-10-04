@@ -13,6 +13,7 @@ use crate::rich_view;
 use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore};
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::NoteStore;
+use crate::theme;
 use crate::tray;
 
 use iced::widget::{container, mouse_area, opaque, pin, stack, text_editor, Space};
@@ -37,6 +38,7 @@ const FOCUS_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    ThemeChanged(theme::Mode),
     StripHover(Option<f32>),
     BarClicked(usize),
     AddNote,
@@ -167,6 +169,7 @@ fn read_clipboard() -> ClipboardContent {
 }
 
 pub struct App {
+    pub(crate) theme: theme::Theme,
     store: NoteStore,
     settings: SettingsStore,
     magnification: MagnificationState,
@@ -298,10 +301,13 @@ impl App {
         prepare_store(&mut store, &settings.settings().palette);
         (
             Self::new(store, settings),
-            window::oldest().then(|id| match id {
-                Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
-                None => Task::none(),
-            }),
+            Task::batch([
+                window::oldest().then(|id| match id {
+                    Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
+                    None => Task::none(),
+                }),
+                iced::system::theme().map(|m| Message::ThemeChanged(m.into())),
+            ]),
         )
     }
 
@@ -314,6 +320,7 @@ impl App {
         let window_size = Size::new(Self::docked_width(s, false), 600.0);
         let data_dir = store.dir().to_path_buf();
         Self {
+            theme: theme::Theme::default(),
             store,
             settings,
             magnification: MagnificationState::new(),
@@ -361,8 +368,15 @@ impl App {
         }
     }
 
+    pub fn theme_mode(&self) -> theme::Mode {
+        self.theme.mode
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ThemeChanged(mode) => {
+                self.theme = theme::Theme::new(mode);
+            }
             Message::StripHover(None) if self.cursor_on_peek() => {
                 // Moving from the bar onto its open peek keeps it open.
             }
@@ -1075,7 +1089,8 @@ impl App {
             _ => None,
         });
 
-        let mut subs = vec![save, resized, keys, pointer];
+        let system_theme = iced::system::theme_changes().map(|m| Message::ThemeChanged(m.into()));
+        let mut subs = vec![save, resized, keys, pointer, system_theme];
         if self.animating {
             // Frame-synced ticks keep the morph in step with the display.
             subs.push(window::frames().map(Message::Tick));
@@ -1747,6 +1762,15 @@ mod tests {
         let _ = app.update(Message::PeekTick(Instant::now() + Duration::from_secs(1)));
         assert!(app.peek_note.is_some() && app.peek.is_opening());
         app
+    }
+
+    #[test]
+    fn theme_change_updates_app_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        assert_eq!(app.theme.mode, theme::Mode::Light);
+        let _ = app.update(Message::ThemeChanged(theme::Mode::Dark));
+        assert_eq!(app.theme.mode, theme::Mode::Dark);
     }
 
     #[test]

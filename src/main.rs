@@ -18,6 +18,7 @@ mod rich_view;
 mod settings;
 mod settings_panel;
 mod store;
+mod theme;
 mod toolbar;
 mod tray;
 
@@ -46,8 +47,11 @@ fn main() -> iced::Result {
         .run()
 }
 
-fn theme(_app: &App) -> Theme {
-    Theme::Dark
+fn theme(app: &App) -> Theme {
+    match app.theme_mode() {
+        theme::Mode::Light => Theme::Light,
+        theme::Mode::Dark => Theme::Dark,
+    }
 }
 
 fn style(_app: &App, theme: &Theme) -> iced::theme::Style {
