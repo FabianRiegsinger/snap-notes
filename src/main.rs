@@ -8,6 +8,7 @@ mod note_panel;
 mod pass_wheel;
 mod peek;
 mod platform;
+mod press_through;
 mod resize;
 mod rich;
 mod rich_view;

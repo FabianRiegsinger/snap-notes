@@ -1,12 +1,12 @@
 //! Draws a parsed note (`rich::Doc`) as styled, clickable blocks.
 
 use crate::app::Message;
-use crate::images;
 use crate::note::NoteColor;
 use crate::rich::{Block, BlockKind, Doc, Span};
 
 use iced::widget::{button, column, container, image, mouse_area, rich_text, row, text, Space};
 use iced::{font, Border, Color, ContentFit, Element, Fill, Font, Padding, Theme};
+use std::collections::HashSet;
 use std::path::Path;
 
 const BODY_SIZE: f32 = 14.0;
@@ -36,9 +36,12 @@ fn note_color(color: NoteColor, alpha: f32) -> Color {
 }
 
 /// The rendered note body: one clickable element per block.
+/// Image references in `broken` (missing or undecodable, checked when the
+/// note was parsed) show a placeholder; nothing here touches the disk.
 pub fn view<'a>(
     doc: &'a Doc,
     dir: &'a Path,
+    broken: &'a HashSet<String>,
     ink: impl Fn(f32) -> Color + Copy + 'a,
     alpha: f32,
 ) -> Element<'a, Message> {
@@ -49,7 +52,7 @@ pub fn view<'a>(
             .color(ink(0.35 * alpha))
             .into();
     }
-    column(doc.blocks.iter().map(|b| block(b, dir, ink, alpha)))
+    column(doc.blocks.iter().map(|b| block(b, dir, broken, ink, alpha)))
         .width(Fill)
         .into()
 }
@@ -57,6 +60,7 @@ pub fn view<'a>(
 fn block<'a>(
     block: &'a Block,
     dir: &'a Path,
+    broken: &'a HashSet<String>,
     ink: impl Fn(f32) -> Color + Copy + 'a,
     alpha: f32,
 ) -> Element<'a, Message> {
@@ -127,13 +131,13 @@ fn block<'a>(
                 ..Default::default()
             })
             .into(),
-        BlockKind::Image { path, .. } => match images::resolve(dir, path) {
-            Some(file) => image(file).content_fit(ContentFit::ScaleDown).into(),
-            None => text("image not found")
-                .size(BODY_SIZE)
-                .color(ink(0.45 * alpha))
-                .into(),
-        },
+        BlockKind::Image { path, .. } if broken.contains(path) => text("image not found")
+            .size(BODY_SIZE)
+            .color(ink(0.45 * alpha))
+            .into(),
+        BlockKind::Image { path, .. } => image(dir.join(path))
+            .content_fit(ContentFit::ScaleDown)
+            .into(),
         BlockKind::Rule => container(container(Space::new().width(Fill).height(1)).style(
             move |_theme: &Theme| container::Style {
                 background: Some(ink(0.2 * alpha).into()),

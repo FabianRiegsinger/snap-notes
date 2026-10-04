@@ -68,6 +68,12 @@ pub fn resolve(dir: &Path, rel: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Whether `rel` resolves to an image file that can be decoded (its header
+/// is read, not the whole image).
+pub fn is_usable(dir: &Path, rel: &str) -> bool {
+    resolve(dir, rel).is_some_and(|path| image::image_dimensions(path).is_ok())
+}
+
 /// Deletes `<uuid>.<ext>` files in `images/` that no note references; returns how many.
 pub fn sweep(dir: &Path, notes: &[Note]) -> io::Result<usize> {
     let entries = match fs::read_dir(dir.join(DIR)) {

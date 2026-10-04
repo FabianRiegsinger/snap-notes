@@ -19,6 +19,7 @@ use iced::{
     event, keyboard, mouse, window, Element, Fill, Point, Rectangle, Size, Subscription, Task,
     Vector,
 };
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -103,6 +104,8 @@ pub struct App {
     doc: Doc,
     /// Folder of the notes file; note images live in `images/` inside it.
     data_dir: PathBuf,
+    /// Image references in `doc` that are missing or can't be decoded.
+    broken_images: HashSet<String>,
     morph: Morph,
     anchor_y: f32,
     pending_delete: Option<Uuid>,
@@ -226,6 +229,7 @@ impl App {
             editing: false,
             doc: Doc { blocks: Vec::new() },
             data_dir,
+            broken_images: HashSet::new(),
             morph,
             anchor_y: 0.0,
             pending_delete: None,
@@ -791,6 +795,7 @@ impl App {
                         editing: self.editing,
                         doc: &self.doc,
                         data_dir: &self.data_dir,
+                        broken_images: &self.broken_images,
                         size: rect.size(),
                         morph_progress: self.morph.progress(),
                         content_alpha: frame.content_alpha,
@@ -880,13 +885,13 @@ impl App {
         let switching = self.active_note.is_some_and(|active| active != id);
         self.editor_content = Some(text_editor::Content::with_text(&note.content));
         self.editing = note.content.trim().is_empty();
-        self.doc = rich::parse(&note.content, &self.settings.settings().palette);
         self.hide_peek();
         // A note and the settings never show at the same time.
         if self.settings_open {
             self.settings_morph.close();
         }
         self.active_note = Some(id);
+        self.reparse();
         self.pending_delete = None;
         self.color_picker_open = false;
         self.confirm_delete = None;
@@ -902,7 +907,8 @@ impl App {
         self.dock_window()
     }
 
-    /// Re-parses the open note for the rendered view.
+    /// Re-parses the open note for the rendered view and checks its images
+    /// once, so the view itself never touches the disk.
     fn reparse(&mut self) {
         let Some(note) = self
             .active_note
@@ -911,6 +917,17 @@ impl App {
             return;
         };
         self.doc = rich::parse(&note.content, &self.settings.settings().palette);
+        self.broken_images = self
+            .doc
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                BlockKind::Image { path, .. } if !images::is_usable(&self.data_dir, path) => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .collect();
     }
 
     fn finish_close(&mut self) -> Task<Message> {
@@ -922,6 +939,7 @@ impl App {
         self.editor_content = None;
         self.editing = false;
         self.doc = Doc { blocks: Vec::new() };
+        self.broken_images.clear();
         self.color_picker_open = false;
         self.confirm_delete = None;
         self.note_resize = None;
@@ -1439,6 +1457,38 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn blur_while_rendered_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "- [ ] t");
+        let doc = app.doc.clone();
+        let _ = app.update(Message::EditorBlurred);
+        assert!(!app.editing);
+        assert_eq!(app.doc, doc);
+        assert_eq!(app.store.notes()[0].content, "- [ ] t");
+        assert!(!app.store.is_dirty());
+        assert!(app.morph.is_opening());
+    }
+
+    #[test]
+    fn undecodable_image_is_marked_broken() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel = format!("images/{}.png", Uuid::new_v4());
+        std::fs::create_dir_all(dir.path().join("images")).unwrap();
+        std::fs::write(dir.path().join(&rel), b"not a png").unwrap();
+        let app = app_with_note(&dir, &format!("![]({rel})"));
+        assert!(app.broken_images.contains(&rel));
+    }
+
+    #[test]
+    fn valid_image_is_not_broken() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel = images::import_png(dir.path(), &[255; 16], 2, 2).unwrap();
+        let app = app_with_note(&dir, &format!("![]({rel})"));
+        assert!(matches!(app.doc.blocks[0].kind, BlockKind::Image { .. }));
+        assert!(app.broken_images.is_empty());
     }
 
     #[test]

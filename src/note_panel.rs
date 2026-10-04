@@ -2,12 +2,14 @@ use crate::app::Message;
 use crate::color_picker::color_picker;
 use crate::note::{Note, NoteColor};
 use crate::pass_wheel::pass_wheel;
+use crate::press_through::press_through;
 use crate::rich::Doc;
 use crate::rich_view;
 
 use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, Scrollable};
 use iced::advanced::widget::{Id, Operation};
 use iced::Rectangle;
+use std::collections::HashSet;
 use std::path::Path;
 
 use iced::widget::{
@@ -102,6 +104,8 @@ pub struct PostIt<'a> {
     pub doc: &'a Doc,
     /// Folder the note's `images/` references resolve against.
     pub data_dir: &'a Path,
+    /// Image references in `doc` that can't be shown.
+    pub broken_images: &'a HashSet<String>,
     pub size: Size,
     pub morph_progress: f32,
     pub content_alpha: f32,
@@ -218,6 +222,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         editing,
         doc,
         data_dir,
+        broken_images,
         size,
         morph_progress,
         content_alpha: a,
@@ -272,8 +277,9 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 ..Default::default()
             });
 
-        // Clicking the header (outside its controls) leaves edit mode.
-        let header = mouse_area(
+        // Any press on the header, title and buttons included, leaves edit
+        // mode; the press still reaches them.
+        let header = press_through(
             container(
                 row![
                     title,
@@ -285,8 +291,8 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 .align_y(iced::Alignment::Center),
             )
             .padding(Padding::new(2.0).left(18).right(10).bottom(6)),
-        )
-        .on_press(Message::EditorBlurred);
+            Message::EditorBlurred,
+        );
 
         // Grip along the top edge: drag to move the note, double-click to
         // send it back next to the dock.
@@ -341,8 +347,8 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         } else {
             // Content inside a scrollable can't fill its height, so the
             // click target for the space below the text sits behind it.
-            let rendered =
-                container(rich_view::view(doc, data_dir, ink, a)).padding(body_padding());
+            let rendered = container(rich_view::view(doc, data_dir, broken_images, ink, a))
+                .padding(body_padding());
             stack![
                 mouse_area(Space::new().width(Fill).height(Fill))
                     .on_press(Message::BodyClicked(None)),
