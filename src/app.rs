@@ -2,10 +2,13 @@ use crate::animation::{morph_frame, MagnificationState, Morph, MorphFrame};
 use crate::bar_strip::{
     band, compute_layout, peek_target, BarStrip, StripLayout, SETTINGS_SLOT, STRIP_WIDTH,
 };
+use crate::images;
 use crate::note::NoteColor;
-use crate::note_panel::{post_it, PostIt};
+use crate::note_panel::{focus_body, post_it, PostIt};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
 use crate::resize::{resize_frame, resized, Edges, MIN_SIZE};
+use crate::rich::{self, BlockKind, Doc};
+use crate::rich_view;
 use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore};
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::NoteStore;
@@ -45,6 +48,14 @@ pub enum Message {
     PaletteSlotSelected(Option<usize>),
     PaletteColorChosen(NoteColor),
     NoteEdited(text_editor::Action),
+    /// A click on the rendered body: the block's source line, or `None`
+    /// below the last block.
+    BodyClicked(Option<usize>),
+    /// Leave edit mode and show the note rendered again.
+    EditorBlurred,
+    /// Flip the task checkbox on this source line.
+    ToggleTask(usize),
+    LinkClicked(String),
     TitleEdited(String),
     NoteHovered(bool),
     NoteDragStart,
@@ -86,6 +97,12 @@ pub struct App {
     cursor_y: Option<f32>,
     active_note: Option<Uuid>,
     editor_content: Option<text_editor::Content>,
+    /// The open note shows its editor rather than its rendered `doc`.
+    editing: bool,
+    /// The open note's content, parsed for the rendered view.
+    doc: Doc,
+    /// Folder of the notes file; note images live in `images/` inside it.
+    data_dir: PathBuf,
     morph: Morph,
     anchor_y: f32,
     pending_delete: Option<Uuid>,
@@ -155,6 +172,18 @@ fn data_dir() -> PathBuf {
         .to_path_buf()
 }
 
+/// Hands `url` to the system's default opener; failures are ignored.
+fn open_url(url: &str) {
+    use std::process::Command;
+    #[cfg(target_os = "macos")]
+    let spawned = Command::new("open").arg(url).spawn();
+    #[cfg(windows)]
+    let spawned = Command::new("cmd").args(["/c", "start", "", url]).spawn();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let spawned = Command::new("xdg-open").arg(url).spawn();
+    drop(spawned);
+}
+
 impl App {
     pub fn boot() -> (Self, Task<Message>) {
         let settings = SettingsStore::load(data_dir().join("settings.json"));
@@ -166,6 +195,9 @@ impl App {
         if store.notes().is_empty() {
             store.seed_templates(&settings.settings().palette);
             let _ = store.save();
+        }
+        if let Err(e) = images::sweep(store.dir(), store.notes()) {
+            eprintln!("could not clean up note images: {e}");
         }
         (
             Self::new(store, settings),
@@ -183,6 +215,7 @@ impl App {
         let peek = Morph::peek(s.motion.speed);
         let settings_morph = Morph::new(s.motion.speed);
         let window_size = Size::new(Self::docked_width(s, false), 600.0);
+        let data_dir = store.dir().to_path_buf();
         Self {
             store,
             settings,
@@ -190,6 +223,9 @@ impl App {
             cursor_y: None,
             active_note: None,
             editor_content: None,
+            editing: false,
+            doc: Doc { blocks: Vec::new() },
+            data_dir,
             morph,
             anchor_y: 0.0,
             pending_delete: None,
@@ -284,6 +320,7 @@ impl App {
                     if self.store.recolor_many(&changes) {
                         self.store.mark_dirty();
                     }
+                    self.reparse();
                 } else {
                     self.settings.settings_mut().reset(group);
                 }
@@ -306,6 +343,7 @@ impl App {
                         if self.store.recolor(old, color) {
                             self.store.mark_dirty();
                         }
+                        self.reparse();
                     }
                 }
             }
@@ -373,6 +411,55 @@ impl App {
                             return crate::note_panel::reveal_last_line();
                         }
                     }
+                }
+            }
+            Message::BodyClicked(line) => {
+                if let Some(content) = &mut self.editor_content {
+                    self.editing = true;
+                    match line {
+                        Some(line) => content.move_to(text_editor::Cursor {
+                            position: text_editor::Position {
+                                line: line.min(content.line_count().saturating_sub(1)),
+                                column: 0,
+                            },
+                            selection: None,
+                        }),
+                        None => content
+                            .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd)),
+                    }
+                    return focus_body();
+                }
+            }
+            Message::EditorBlurred => {
+                if self.editing {
+                    self.editing = false;
+                    self.reparse();
+                }
+            }
+            Message::ToggleTask(line) => {
+                // Only real task items: `toggle_task` would also flip a
+                // look-alike line inside a code block.
+                let is_task = self.doc.blocks.iter().any(|b| {
+                    b.source_line == line
+                        && matches!(b.kind, BlockKind::ListItem { task: Some(_), .. })
+                });
+                if !is_task {
+                    return Task::none();
+                }
+                let Some(note) = self.active_note.and_then(|id| self.store.note_mut(id)) else {
+                    return Task::none();
+                };
+                if let Some(content) = rich::toggle_task(&note.content, line) {
+                    self.editor_content = Some(text_editor::Content::with_text(&content));
+                    note.content = content;
+                    note.updated_at = chrono::Utc::now();
+                    self.store.mark_dirty();
+                    self.reparse();
+                }
+            }
+            Message::LinkClicked(url) => {
+                if rich_view::is_openable(&url) {
+                    open_url(&url);
                 }
             }
             Message::ClosePanel => {
@@ -592,6 +679,9 @@ impl App {
                     keyboard::Key::Named(Named::Escape) if self.settings_open => {
                         return self.update(Message::CloseSettings)
                     }
+                    keyboard::Key::Named(Named::Escape) if self.editing => {
+                        return self.update(Message::EditorBlurred)
+                    }
                     keyboard::Key::Named(Named::Escape) => return self.update(Message::ClosePanel),
                     keyboard::Key::Character(",") if modifiers.command() => {
                         return self.update(Message::ToggleSettings)
@@ -698,6 +788,9 @@ impl App {
                         paper_tint: self.settings.settings().notes.paper_tint,
                         idle_control_alpha: self.settings.settings().notes.idle_control_alpha,
                         content,
+                        editing: self.editing,
+                        doc: &self.doc,
+                        data_dir: &self.data_dir,
                         size: rect.size(),
                         morph_progress: self.morph.progress(),
                         content_alpha: frame.content_alpha,
@@ -786,6 +879,8 @@ impl App {
 
         let switching = self.active_note.is_some_and(|active| active != id);
         self.editor_content = Some(text_editor::Content::with_text(&note.content));
+        self.editing = note.content.trim().is_empty();
+        self.doc = rich::parse(&note.content, &self.settings.settings().palette);
         self.hide_peek();
         // A note and the settings never show at the same time.
         if self.settings_open {
@@ -807,6 +902,17 @@ impl App {
         self.dock_window()
     }
 
+    /// Re-parses the open note for the rendered view.
+    fn reparse(&mut self) {
+        let Some(note) = self
+            .active_note
+            .and_then(|id| self.store.notes().iter().find(|n| n.id == id))
+        else {
+            return;
+        };
+        self.doc = rich::parse(&note.content, &self.settings.settings().palette);
+    }
+
     fn finish_close(&mut self) -> Task<Message> {
         if self.note_drag.is_some() {
             self.finish_note_drag();
@@ -814,6 +920,8 @@ impl App {
         self.active_note = None;
         self.note_hovered = false;
         self.editor_content = None;
+        self.editing = false;
+        self.doc = Doc { blocks: Vec::new() };
         self.color_picker_open = false;
         self.confirm_delete = None;
         self.note_resize = None;
@@ -1227,6 +1335,120 @@ mod tests {
         let _ = app.update(Message::BarClicked(0));
         settle(&mut app);
         app
+    }
+
+    /// An app with one fully open note holding `content`.
+    fn app_with_note(dir: &tempfile::TempDir, content: &str) -> App {
+        let mut app = app_in(dir);
+        let id = app.store.add_note(&crate::note::PALETTE);
+        app.store.note_mut(id).unwrap().content = content.into();
+        app.store.did_save();
+        app.window_size = Size::new(1400.0, 900.0);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        app
+    }
+
+    fn escape() -> Message {
+        use keyboard::key::{Code, Named, Physical};
+        Message::Key(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(Named::Escape),
+            modified_key: keyboard::Key::Named(Named::Escape),
+            physical_key: Physical::Code(Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        })
+    }
+
+    fn cursor_of(app: &App) -> text_editor::Position {
+        app.editor_content.as_ref().unwrap().cursor().position
+    }
+
+    #[test]
+    fn opening_empty_note_starts_in_edit_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_note(&dir, "  \n");
+        assert!(app.editing);
+    }
+
+    #[test]
+    fn opening_note_with_text_starts_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with_note(&dir, "# Hi\nthere");
+        assert!(!app.editing);
+        assert_eq!(app.doc.blocks[0].kind, crate::rich::BlockKind::Heading(1));
+    }
+
+    #[test]
+    fn body_click_enters_edit_mode_at_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "a\nb\nc");
+        let _ = app.update(Message::BodyClicked(Some(2)));
+        assert!(app.editing);
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (2, 0));
+
+        let _ = app.update(Message::EditorBlurred);
+        let _ = app.update(Message::BodyClicked(None));
+        assert!(app.editing);
+        assert_eq!(cursor_of(&app).line, 2);
+    }
+
+    #[test]
+    fn blur_reparses_and_leaves_edit_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "plain");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let _ = app.update(Message::NoteEdited(text_editor::Action::SelectAll));
+        let _ = app.update(Message::NoteEdited(text_editor::Action::Edit(
+            text_editor::Edit::Paste(std::sync::Arc::new("# x".into())),
+        )));
+        assert_eq!(app.store.notes()[0].content, "# x");
+        let _ = app.update(Message::EditorBlurred);
+        assert!(!app.editing);
+        assert_eq!(app.doc.blocks[0].kind, crate::rich::BlockKind::Heading(1));
+    }
+
+    #[test]
+    fn escape_leaves_edit_mode_before_folding() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "text");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let _ = app.update(escape());
+        assert!(!app.editing);
+        assert!(app.active_note.is_some() && app.morph.is_opening());
+        let _ = app.update(escape());
+        assert!(!app.morph.is_opening());
+    }
+
+    #[test]
+    fn toggle_task_updates_note_and_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "- [ ] t");
+        let _ = app.update(Message::ToggleTask(0));
+        assert_eq!(app.store.notes()[0].content, "- [x] t");
+        assert!(app.store.is_dirty());
+        assert!(!app.editing);
+        assert_eq!(app.editor_content.as_ref().unwrap().text(), "- [x] t");
+        assert!(matches!(
+            app.doc.blocks[0].kind,
+            crate::rich::BlockKind::ListItem {
+                task: Some(true),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn link_scheme_filter() {
+        use crate::rich_view::is_openable;
+        assert!(is_openable("https://a"));
+        assert!(is_openable("http://a"));
+        assert!(is_openable("mailto:a@b"));
+        assert!(!is_openable("file:///etc"));
+        assert!(!is_openable("javascript:x"));
     }
 
     #[test]

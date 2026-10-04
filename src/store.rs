@@ -2,7 +2,7 @@ use crate::note::{Note, NoteColor};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -44,6 +44,14 @@ impl NoteStore {
         fs::write(&tmp, &json)?;
         fs::rename(&tmp, &self.path)?;
         Ok(())
+    }
+
+    /// The folder holding the notes file (and the note images).
+    pub fn dir(&self) -> &Path {
+        match self.path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        }
     }
 
     pub fn notes(&self) -> &[Note] {
@@ -121,6 +129,11 @@ impl NoteStore {
                 .last_mark
                 .map(|t| t.elapsed() >= DEBOUNCE)
                 .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
     }
 
     pub fn did_save(&mut self) {
@@ -221,6 +234,17 @@ mod tests {
         assert!(store.recolor_many(&[(x, y), (y, z)]));
         let colors: Vec<_> = store.notes().iter().map(|n| n.color).collect();
         assert_eq!(colors, vec![y, z]);
+    }
+
+    #[test]
+    fn dir_is_the_notes_file_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NoteStore::load(dir.path().join("n.json"));
+        assert_eq!(store.dir(), dir.path());
+        assert_eq!(
+            NoteStore::load(PathBuf::from("n.json")).dir(),
+            Path::new(".")
+        );
     }
 
     #[test]
