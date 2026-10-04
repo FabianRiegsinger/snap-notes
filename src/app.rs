@@ -1014,13 +1014,13 @@ impl App {
             return Task::none();
         };
         let cursor = content.cursor();
+        // The untrimmed text, so markup typed on a fresh last line lands there.
         let text = content.text();
-        let text = text.trim_end_matches('\n');
-        let offset = |p: text_editor::Position| rich::offset_of(text, p.line, p.column);
+        let offset = |p: text_editor::Position| rich::offset_of(&text, p.line, p.column);
         let head = offset(cursor.position);
         let anchor = cursor.selection.map_or(head, offset);
         let (wrapped, start, end) =
-            rich::wrap_selection(text, head.min(anchor), head.max(anchor), format);
+            rich::wrap_selection(&text, head.min(anchor), head.max(anchor), format);
         let position = |o| {
             let (line, column) = rich::position_of(&wrapped, o);
             text_editor::Position { line, column }
@@ -1032,7 +1032,7 @@ impl App {
         });
         *content = rebuilt;
         if let Some(note) = self.store.note_mut(id) {
-            note.content = wrapped;
+            note.content = wrapped.trim_end_matches('\n').to_string();
             note.updated_at = chrono::Utc::now();
         }
         self.store.mark_dirty();
@@ -1056,7 +1056,8 @@ impl App {
 
     /// Pastes what the clipboard held: text through the editor's own edit
     /// path, or an image as a new file. Encodes synchronously, which is fine
-    /// for screenshots.
+    /// for screenshots. When arboard found nothing (or failed, as on Wayland
+    /// without XWayland), iced's own clipboard supplies the text.
     fn apply_paste(&mut self, content: ClipboardContent) -> Task<Message> {
         match content {
             ClipboardContent::Text(text) => self.update(Message::NoteEdited(
@@ -1073,7 +1074,14 @@ impl App {
                     Task::none()
                 }
             },
-            ClipboardContent::Empty => Task::none(),
+            ClipboardContent::Empty => iced::clipboard::read().and_then(|text| {
+                if text.is_empty() {
+                    return Task::none();
+                }
+                Task::done(Message::NoteEdited(text_editor::Action::Edit(
+                    text_editor::Edit::Paste(Arc::new(text)),
+                )))
+            }),
         }
     }
 
@@ -1086,10 +1094,10 @@ impl App {
         let block = format!("![]({rel})");
         let (text, end) = match (&self.editor_content, self.editing) {
             (Some(content), true) => {
+                // The untrimmed text, so a block typed below blank lines stays there.
                 let text = content.text();
-                let text = text.trim_end_matches('\n');
                 let at = content.cursor().position;
-                rich::insert_block(text, rich::offset_of(text, at.line, at.column), &block)
+                rich::insert_block(&text, rich::offset_of(&text, at.line, at.column), &block)
             }
             _ => {
                 let Some(note) = self.store.notes().iter().find(|n| n.id == id) else {
@@ -1106,7 +1114,7 @@ impl App {
         });
         self.editor_content = Some(rebuilt);
         if let Some(note) = self.store.note_mut(id) {
-            note.content = text;
+            note.content = text.trim_end_matches('\n').to_string();
             note.updated_at = chrono::Utc::now();
         }
         self.store.mark_dirty();
@@ -1691,6 +1699,31 @@ mod tests {
         assert_eq!(content.selection().as_deref(), Some("word"));
     }
 
+    /// Opens "Title" for editing and presses Enter `times` at its end.
+    fn title_then_enter(dir: &tempfile::TempDir, times: usize) -> App {
+        let mut app = app_with_note(dir, "Title");
+        let _ = app.update(Message::BodyClicked(None));
+        for _ in 0..times {
+            let _ = app.update(Message::NoteEdited(text_editor::Action::Edit(
+                text_editor::Edit::Enter,
+            )));
+        }
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (times, 0));
+        app
+    }
+
+    #[test]
+    fn bold_after_enter_goes_on_new_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = title_then_enter(&dir, 1);
+        let _ = app.update(Message::FormatApplied(crate::rich::Format::Bold));
+        assert_eq!(app.editor_content.as_ref().unwrap().text(), "Title\n****");
+        assert_eq!(app.store.notes()[0].content, "Title\n****");
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (1, 2));
+    }
+
     #[test]
     fn format_is_a_no_op_outside_edit_mode() {
         let dir = tempfile::tempdir().unwrap();
@@ -1754,6 +1787,22 @@ mod tests {
         assert!(app.editing);
         let at = cursor_of(&app);
         assert_eq!((at.line, at.column), (1, r.len()));
+    }
+
+    #[test]
+    fn dropped_image_after_blank_line_stays_below_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = title_then_enter(&dir, 2);
+        let _ = app.update(Message::ImageDropped(png_file(&dir, "p.png")));
+        let content = app.store.notes()[0].content.clone();
+        let r = image_ref(&content).to_string();
+        assert_eq!(content, format!("Title\n\n{r}"));
+        assert_eq!(
+            app.editor_content.as_ref().unwrap().text(),
+            format!("Title\n\n{r}")
+        );
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (2, r.len()));
     }
 
     #[test]
@@ -1843,6 +1892,16 @@ mod tests {
         let _ = app.apply_paste(classify(Some("hello".into()), Some(rgba_1x1())));
         assert_eq!(app.store.notes()[0].content, "hello");
         assert!(!dir.path().join("images").exists());
+    }
+
+    #[test]
+    fn paste_falls_back_to_system_clipboard_without_arboard_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        let task = app.apply_paste(classify(None, None));
+        assert!(task.units() > 0, "no clipboard read was started");
+        assert_eq!(app.store.notes()[0].content, "ab");
     }
 
     #[test]
