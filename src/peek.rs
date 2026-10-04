@@ -5,6 +5,7 @@
 use crate::animation::{ease_out_cubic, lerp};
 use crate::note::Note;
 use crate::note_panel::{ink, shade, NOTE_RADIUS, TITLE_FONT};
+use crate::rich;
 
 use iced::advanced::renderer::{self, Quad};
 use iced::advanced::text::Renderer as _;
@@ -79,8 +80,7 @@ pub fn peek_text(note: &Note) -> PeekText {
     let max_chars = body_chars_per_line();
     PeekText {
         title,
-        lines: note
-            .content
+        lines: rich::plain_text(&note.content)
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
@@ -286,6 +286,12 @@ mod tests {
         let t = peek_text(&note("  ", "Call Anna\nre: offsite\nbook room"));
         assert_eq!(t.title, None);
         assert_eq!(t.lines, ["Call Anna", "re: offsite", "book room"]);
+    }
+
+    #[test]
+    fn markup_is_stripped_in_peek() {
+        let t = peek_text(&note("", "**Buy**\n- [ ] milk"));
+        assert_eq!(t.lines, ["Buy", "☐ milk"]);
     }
 
     #[test]

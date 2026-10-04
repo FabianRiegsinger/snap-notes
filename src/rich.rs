@@ -486,6 +486,93 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
     Doc { blocks: b.blocks }
 }
 
+/// The note as plain text: markers and tags removed, one line per block
+/// (plus one per line break inside a block).
+pub fn plain_text(content: &str) -> String {
+    let doc = parse(content, &[]);
+    let lines: Vec<String> = doc
+        .blocks
+        .iter()
+        .map(|block| match &block.kind {
+            BlockKind::Image { .. } => "🖼".to_string(),
+            kind => {
+                let prefix = match kind {
+                    BlockKind::ListItem {
+                        task: Some(done), ..
+                    } => {
+                        if *done {
+                            "☑ "
+                        } else {
+                            "☐ "
+                        }
+                    }
+                    _ => "",
+                };
+                // An image next to text leaves the line break before it behind.
+                let text: String = block.spans.iter().map(|s| s.text.as_str()).collect();
+                format!("{prefix}{}", text.trim_end_matches('\n'))
+            }
+        })
+        .collect();
+    lines.join("\n")
+}
+
+/// Byte offset of the task checkbox's inner character in `line`, if it is a task item.
+fn task_box(line: &str) -> Option<usize> {
+    let rest = line.trim_start();
+    let mut chars = rest.char_indices();
+    let marker_end = match chars.next()? {
+        (_, '-' | '*' | '+') => 1,
+        (_, c) if c.is_ascii_digit() => {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            match rest[digits..].chars().next()? {
+                '.' | ')' => digits + 1,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let after = &rest[marker_end..];
+    let spaced = after.trim_start();
+    if spaced.len() == after.len() {
+        return None;
+    }
+    let bytes = spaced.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0] == b'['
+        && matches!(bytes[1], b' ' | b'x' | b'X')
+        && bytes[2] == b']'
+    {
+        Some(line.len() - spaced.len() + 1)
+    } else {
+        None
+    }
+}
+
+/// Flips the task checkbox on 0-based source `line`; `None` if that line
+/// is not a task item.
+pub fn toggle_task(content: &str, line: usize) -> Option<String> {
+    let mut out = String::with_capacity(content.len());
+    let mut toggled = false;
+    for (i, text) in content.split_inclusive('\n').enumerate() {
+        match task_box(text).filter(|_| i == line) {
+            Some(at) => {
+                let flipped = if text.as_bytes()[at] == b' ' {
+                    'x'
+                } else {
+                    ' '
+                };
+                out.push_str(&text[..at]);
+                out.push(flipped);
+                out.push_str(&text[at + 1..]);
+                toggled = true;
+            }
+            None => out.push_str(text),
+        }
+    }
+    toggled.then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +781,32 @@ mod tests {
             parse(input, &PALETTE);
             parse(input, &[]);
         }
+    }
+
+    #[test]
+    fn plain_text_strips_markup() {
+        let got = plain_text("# T\n**b** {coral}c{/}\n- [ ] x\n- [x] y\n![a](images/a.png)");
+        assert_eq!(got, "T\nb c\n☐ x\n☑ y\n🖼");
+    }
+
+    #[test]
+    fn toggle_task_flips_marker() {
+        let c = "a\n  - [ ] b\n3. [x] c";
+        assert_eq!(toggle_task(c, 1).as_deref(), Some("a\n  - [x] b\n3. [x] c"));
+        assert_eq!(toggle_task(c, 2).as_deref(), Some("a\n  - [ ] b\n3. [ ] c"));
+    }
+
+    #[test]
+    fn toggle_task_ignores_non_tasks() {
+        assert_eq!(toggle_task("plain\n- [ ] t", 0), None);
+        assert_eq!(toggle_task("plain\n- [ ] t", 9), None);
+    }
+
+    #[test]
+    fn toggle_task_preserves_crlf() {
+        assert_eq!(
+            toggle_task("a\r\n- [ ] b\r\nc", 1).as_deref(),
+            Some("a\r\n- [x] b\r\nc")
+        );
     }
 }
