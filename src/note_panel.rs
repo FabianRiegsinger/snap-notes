@@ -1,3 +1,4 @@
+use crate::animation::ease_out_cubic;
 use crate::app::Message;
 use crate::color_picker::color_picker;
 use crate::icons::{icon, Icon};
@@ -285,8 +286,19 @@ fn body_scrollable<'a>(
 }
 
 /// Holds the body's scrollable `BODY_INSET` in from the note's edges.
-fn body_inset<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    container(content)
+/// While `ring`, it draws the focus ring around the scroll area; it stays
+/// put while the text scrolls.
+fn body_inset<'a>(
+    content: impl Into<Element<'a, Message>>,
+    theme: theme::Theme,
+    ring: bool,
+    a: f32,
+) -> Element<'a, Message> {
+    let frame = container(content).style(move |_theme: &Theme| container::Style {
+        border: focus_border(theme, ring, a),
+        ..Default::default()
+    });
+    container(frame)
         .padding(
             Padding::ZERO
                 .left(BODY_INSET)
@@ -300,6 +312,15 @@ fn body_inset<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Messa
 /// body `available` px tall: short text then needs no scrollbar.
 fn editor_min_height(available: f32) -> f32 {
     (available - EDITOR_PADDING_Y).max(0.0)
+}
+
+/// The paper while the note grows out of its bar: the bar's color at
+/// `progress` 0, so the morph has no seam where it meets the bar, easing
+/// into the theme's paper at 1.
+fn morph_paper(theme: &theme::Theme, color: NoteColor, tint: f32, progress: f32) -> Color {
+    let [r, g, b, _] = color.rgba;
+    let bar = Color::from_rgb(r, g, b);
+    theme::mix(bar, theme.paper(color, tint), ease_out_cubic(progress))
 }
 
 pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
@@ -329,7 +350,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         a * idle_control_alpha
     };
 
-    let paper = theme.paper(note.color, paper_tint * morph_progress);
+    let paper = morph_paper(&theme, note.color, paper_tint, morph_progress);
     let [contact, ambient] = theme.shadows(morph_progress);
 
     let inner: Element<'_, Message> = if a < 0.01 {
@@ -442,29 +463,30 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         // fills exactly the space the body gets (measured, not estimated),
         // so clicks below short text still land in the editor.
         let body: Element<'_, Message> = if editing {
-            body_inset(responsive(move |available| {
-                let editor = text_editor(content)
-                    .id(BODY_EDITOR_ID)
-                    .placeholder(PLACEHOLDER)
-                    .on_action(Message::NoteEdited)
-                    .key_binding(body_key_binding)
-                    .min_height(editor_min_height(available.height))
-                    .size(TEXT_SM)
-                    .line_height(text::LineHeight::Relative(theme::BODY_LINE_HEIGHT))
-                    .padding(body_padding())
-                    .style(move |_theme: &Theme, status| text_editor::Style {
-                        background: Color::TRANSPARENT.into(),
-                        border: focus_border(
-                            theme,
-                            matches!(status, text_editor::Status::Focused { .. }),
-                            a,
-                        ),
-                        placeholder: theme.ink(0.35 * a),
-                        value: theme.ink(0.9 * a),
-                        selection: theme.ink(0.18 * a),
-                    });
-                body_scrollable(pass_wheel(editor), theme, hovered, a)
-            }))
+            body_inset(
+                responsive(move |available| {
+                    let editor = text_editor(content)
+                        .id(BODY_EDITOR_ID)
+                        .placeholder(PLACEHOLDER)
+                        .on_action(Message::NoteEdited)
+                        .key_binding(body_key_binding)
+                        .min_height(editor_min_height(available.height))
+                        .size(TEXT_SM)
+                        .line_height(text::LineHeight::Relative(theme::BODY_LINE_HEIGHT))
+                        .padding(body_padding())
+                        .style(move |_theme: &Theme, _status| text_editor::Style {
+                            background: Color::TRANSPARENT.into(),
+                            border: Border::default(),
+                            placeholder: theme.ink(0.35 * a),
+                            value: theme.ink(0.9 * a),
+                            selection: theme.ink(0.18 * a),
+                        });
+                    body_scrollable(pass_wheel(editor), theme, hovered, a)
+                }),
+                theme,
+                true,
+                a,
+            )
         } else {
             // Content inside a scrollable can't fill its height, so the
             // click target for the space below the text sits behind it.
@@ -473,7 +495,12 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             stack![
                 mouse_area(Space::new().width(Fill).height(Fill))
                     .on_press(Message::BodyClicked(None)),
-                body_inset(body_scrollable(rendered, theme, hovered, a)),
+                body_inset(
+                    body_scrollable(rendered, theme, hovered, a),
+                    theme,
+                    false,
+                    a
+                ),
             ]
             .width(Fill)
             .height(Fill)
@@ -701,6 +728,27 @@ mod tests {
     #[test]
     fn empty_placeholder_text() {
         assert_eq!(PLACEHOLDER, "Start typing… Markdown works.");
+    }
+
+    #[test]
+    fn paper_starts_as_the_bar() {
+        let close = |a: Color, b: Color| {
+            [a.r - b.r, a.g - b.g, a.b - b.b, a.a - b.a]
+                .iter()
+                .all(|d| d.abs() < 1e-5)
+        };
+        for mode in [theme::Mode::Light, theme::Mode::Dark] {
+            let theme = theme::Theme::new(mode);
+            for color in crate::note::PALETTE {
+                let [r, g, b, _] = color.rgba;
+                let bar = Color::from_rgb(r, g, b);
+                assert!(close(morph_paper(&theme, color, 0.2, 0.0), bar));
+                assert!(close(
+                    morph_paper(&theme, color, 0.2, 1.0),
+                    theme.paper(color, 0.2)
+                ));
+            }
+        }
     }
 
     #[test]
