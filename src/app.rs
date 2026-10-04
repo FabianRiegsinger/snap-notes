@@ -575,7 +575,7 @@ impl App {
                 if let Some(id) = self.peek_confirm_delete.take() {
                     self.hide_peek();
                     if self.active_note == Some(id) {
-                        // The note is open too: fold it away like its own 🗑 does.
+                        // The note is open too: fold it away like its own trash button does.
                         self.confirm_delete = Some(id);
                         return self.update(Message::ConfirmDelete(true));
                     }
@@ -1022,9 +1022,10 @@ impl App {
             paper_tint: self.settings.settings().notes.paper_tint,
             peek_confirm: self.peek_confirm_delete.is_some(),
             theme: self.theme,
-            open_index: self
+            open: self
                 .active_note
-                .and_then(|id| self.store.notes().iter().position(|n| n.id == id)),
+                .and_then(|id| self.store.notes().iter().position(|n| n.id == id))
+                .map(|index| (index, self.morph.progress())),
             collapse: self.collapse(),
         })
         .width(Fill)

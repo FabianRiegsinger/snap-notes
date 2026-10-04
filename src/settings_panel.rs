@@ -17,6 +17,8 @@ use iced::{border, Color, Element, Fill, Length, Padding, Shadow, Size, Theme};
 
 pub const PANEL_WIDTH: f32 = 360.0;
 pub const PANEL_MAX_HEIGHT: f32 = 600.0;
+/// The adhesive band across the card's top, as tall as the note's.
+const BAND_HEIGHT: f32 = 16.0;
 
 pub struct SettingsView<'a> {
     pub theme: theme::Theme,
@@ -285,7 +287,23 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
     ))
     .padding(Padding::ZERO.left(radius).right(radius))
     .width(Length::Fixed(size.width));
-    let top = iced::widget::stack![sheet, highlight];
+    // The adhesive band across the top, as on the note; it fades in with
+    // the morph like the highlight.
+    let band = container(Space::new().width(Fill).height(Fill))
+        .width(Length::Fixed(size.width))
+        .height(BAND_HEIGHT)
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(
+                Color {
+                    a: theme.band().a * t,
+                    ..theme.band()
+                }
+                .into(),
+            ),
+            border: border::rounded(border::top(radius)),
+            ..Default::default()
+        });
+    let top = iced::widget::stack![sheet, band, highlight];
     solid_layer(
         solid_layer(top, card, radius, contact),
         card,

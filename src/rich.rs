@@ -600,7 +600,7 @@ pub fn plain_text(content: &str) -> String {
         .blocks
         .iter()
         .map(|block| match &block.kind {
-            BlockKind::Image { .. } => "🖼".to_string(),
+            BlockKind::Image { .. } => "Image".to_string(),
             kind => {
                 let prefix = match kind {
                     BlockKind::ListItem {
@@ -1124,7 +1124,7 @@ mod tests {
     #[test]
     fn plain_text_strips_markup() {
         let got = plain_text("# T\n**b** {coral}c{/}\n- [ ] x\n- [x] y\n![a](images/a.png)");
-        assert_eq!(got, "T\nb c\n☐ x\n☑ y\n🖼");
+        assert_eq!(got, "T\nb c\n☐ x\n☑ y\nImage");
     }
 
     #[test]

@@ -27,12 +27,10 @@ const CORNER_RADIUS: f32 = theme::RADIUS_BAR;
 /// The open note's bar is this much wider than a docked one.
 const OPEN_BAR_SCALE: f32 = 1.5;
 
-/// The bar's rectangle: the open note's bar grows to the left from its right edge.
-pub fn bar_rect_for(open: bool, rect: Rectangle) -> Rectangle {
-    if !open {
-        return rect;
-    }
-    let width = rect.width * OPEN_BAR_SCALE;
+/// The bar's rectangle: the open note's bar grows to the left from its right
+/// edge as the note unfolds (`progress` 0 is docked, 1 fully open).
+pub fn bar_rect_for(progress: f32, rect: Rectangle) -> Rectangle {
+    let width = rect.width * (1.0 + (OPEN_BAR_SCALE - 1.0) * progress);
     Rectangle {
         x: rect.x + rect.width - width,
         width,
@@ -206,8 +204,9 @@ pub struct BarStrip<'a> {
     /// The open peek asks whether to delete its note.
     pub peek_confirm: bool,
     pub theme: theme::Theme,
-    /// Index of the open (or opening) note's bar.
-    pub open_index: Option<usize>,
+    /// Index of the open (or opening) note's bar and the note's morph
+    /// progress.
+    pub open: Option<(usize, f32)>,
     /// Bar index of a deleted note and how far its bar has collapsed.
     pub collapse: Option<(usize, f32)>,
 }
@@ -339,9 +338,10 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 } else {
                     note.color.rgba[3]
                 };
-                let rect = bar_rect_for(self.open_index == Some(i), *bar_rect);
+                let open = self.open.filter(|(o, _)| *o == i);
+                let rect = bar_rect_for(open.map_or(0.0, |(_, p)| p), *bar_rect);
                 let corner = CORNER_RADIUS;
-                if self.open_index == Some(i) {
+                if open.is_some() {
                     let [_, ambient] = self.theme.shadows(1.0);
                     let [r, g, b, _] = note.color.rgba;
                     renderer::Renderer::fill_quad(
@@ -702,11 +702,15 @@ mod tests {
     #[test]
     fn open_bar_is_wider_and_keeps_its_right_edge() {
         let r = Rectangle::new(Point::new(40.0, 100.0), Size::new(6.0, 30.0));
-        let open = bar_rect_for(true, r);
+        let open = bar_rect_for(1.0, r);
         assert_eq!(open.width, r.width * 1.5);
         assert_eq!(open.x + open.width, r.x + r.width);
         assert_eq!((open.y, open.height), (r.y, r.height));
-        assert_eq!(bar_rect_for(false, r), r);
+        assert_eq!(bar_rect_for(0.0, r), r);
+        // It widens with the note's morph instead of jumping.
+        let half = bar_rect_for(0.5, r);
+        assert_eq!(half.width, r.width * 1.25);
+        assert_eq!(half.x + half.width, r.x + r.width);
     }
 
     #[test]
@@ -852,7 +856,7 @@ mod tests {
             paper_tint: 0.0,
             peek_confirm: false,
             theme: theme::Theme::default(),
-            open_index: None,
+            open: None,
             collapse: None,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));

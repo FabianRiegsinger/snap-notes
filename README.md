@@ -13,19 +13,19 @@
 
 ### The bar strip
 - **Dock-style magnification:** move the cursor along the strip and nearby bars grow with smooth spring physics.
-- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. Move onto the preview to keep it open, and click it to open the note. Its 🗑 deletes the note after asking first.
+- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. Move onto the preview to keep it open, and click it to open the note. Its trash button deletes the note after asking first.
 - **Quick add:** click the `+` slot below the bars (the whole strip width counts), or press Cmd/Ctrl+N.
 - **Reorder:** drag a bar up or down to move the note.
 - **Scroll:** with more notes than fit on screen, scroll the strip with the mouse wheel.
 
 ### Notes
-- **Unfold and fold:** a click morphs the bar into a sticky note. Esc, ✕, a click outside the note or a click on its bar folds it back.
+- **Unfold and fold:** a click morphs the bar into a sticky note. Esc, the close button, a click outside the note or a click on its bar folds it back.
 - **Title and body:** each note has a title header and a scrolling body. The scrollbar only appears once the text overflows.
 - **Move it anywhere:** drag the grip at the top. The note reopens where you left it, and double-clicking the grip docks it again.
 - **Resize it:** drag any edge or corner. Each note remembers its own size.
 - **Color code it:** pick from a 20-color palette with the swatch in the header.
-- **Delete with confirmation:** the 🗑 button asks first, then folds the note away.
-- **Images:** drop a png, jpg, gif or webp file (up to 20 MB) onto an open note, paste an image-only clipboard with Cmd/Ctrl+V, or use the 🖼 button in the toolbar.
+- **Delete with confirmation:** the trash button asks first, then folds the note away.
+- **Images:** drop a png, jpg, gif or webp file (up to 20 MB) onto an open note, paste an image-only clipboard with Cmd/Ctrl+V, or use the image button in the toolbar.
 - **Clickable links:** `http`, `https` and `mailto` links in the formatted view open in your browser.
 
 ### Look and feel
@@ -37,7 +37,7 @@
 - **Details:** a focus ring, a hint in empty notes ("Start typing… Markdown works.") and slimmer scrollbars.
 
 ### Formatting
-Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. In edit mode a toolbar offers **B**, *I*, ~~S~~, code, text color, highlight, size (small, normal, large, huge), link and 🖼.
+Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. In edit mode the toolbar's bold, italic, strikethrough, code, text color, highlight, size (small, normal, large, huge), link and image buttons apply the markup.
 
 | Effect | Syntax |
 |---|---|
