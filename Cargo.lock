@@ -3507,6 +3507,7 @@ dependencies = [
  "single-instance",
  "tempfile",
  "tray-icon",
+ "ttf-parser",
  "uuid",
  "windows-sys 0.59.0",
  "winres",

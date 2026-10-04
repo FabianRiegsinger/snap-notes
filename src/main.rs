@@ -4,6 +4,7 @@ mod bar_strip;
 mod color_picker;
 mod history;
 mod hit_text;
+mod icons;
 mod images;
 mod note;
 mod note_panel;
@@ -27,7 +28,11 @@ use iced::{Color, Point, Size, Theme};
 fn main() -> iced::Result {
     platform::enforce_single_instance();
 
-    iced::application(App::boot, App::update, App::view)
+    let mut app = iced::application(App::boot, App::update, App::view);
+    for font in icons::FONTS {
+        app = app.font(font);
+    }
+    app.default_font(icons::BODY_FONT)
         .subscription(App::subscription)
         .title("Snap Notes")
         .transparent(true)
