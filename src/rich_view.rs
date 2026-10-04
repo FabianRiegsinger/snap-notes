@@ -1,8 +1,9 @@
 //! Draws a parsed note (`rich::Doc`) as styled, clickable blocks.
 
 use crate::app::Message;
+use crate::hit_text::hit_text;
 use crate::note::NoteColor;
-use crate::rich::{Block, BlockKind, Doc, Span};
+use crate::rich::{self, Block, BlockKind, Doc, Span};
 
 use iced::widget::{button, column, container, image, mouse_area, rich_text, row, text, Space};
 use iced::{font, Border, Color, ContentFit, Element, Fill, Font, Padding, Theme};
@@ -73,7 +74,7 @@ fn block<'a>(
     };
     let bold = matches!(block.kind, BlockKind::Heading(_));
     let mono = block.kind == BlockKind::CodeBlock;
-    let styled = || spans(&block.spans, size, bold, mono, ink, alpha);
+    let styled = || lines(block, size, bold, mono, ink, alpha);
 
     let content: Element<'a, Message> = match &block.kind {
         BlockKind::Paragraph | BlockKind::Heading(_) => styled(),
@@ -160,55 +161,140 @@ fn block<'a>(
     .into()
 }
 
-fn spans<'a>(
-    spans: &'a [Span],
+/// A piece of one span on a line: the span's index and a byte range of its text.
+type Piece = (usize, std::ops::Range<usize>);
+
+/// A block's text split at its line breaks: each line's start (as a byte
+/// offset into the block's joined text) and its pieces.
+fn line_pieces(spans: &[Span]) -> Vec<(usize, Vec<Piece>)> {
+    let mut lines = vec![(0, Vec::new())];
+    let mut rendered = 0;
+    for (i, span) in spans.iter().enumerate() {
+        let mut from = 0;
+        for (at, _) in span.text.match_indices('\n') {
+            if at > from {
+                lines.last_mut().unwrap().1.push((i, from..at));
+            }
+            lines.push((rendered + at + 1, Vec::new()));
+            from = at + 1;
+        }
+        if span.text.len() > from {
+            lines.last_mut().unwrap().1.push((i, from..span.text.len()));
+        }
+        rendered += span.text.len();
+    }
+    lines
+}
+
+/// The block's text, one hit-tested line each, so a press tells the app the
+/// exact source offset under it.
+fn lines<'a>(
+    block: &'a Block,
     size: f32,
     bold: bool,
     mono: bool,
     ink: impl Fn(f32) -> Color + Copy + 'a,
     alpha: f32,
 ) -> Element<'a, Message> {
-    let spans: Vec<text::Span<'a, String>> = spans
-        .iter()
-        .map(|s| {
-            let font = Font {
-                family: if mono || s.code {
-                    font::Family::Monospace
-                } else {
-                    Font::DEFAULT.family
-                },
-                weight: if bold || s.bold {
-                    font::Weight::Bold
-                } else {
-                    font::Weight::Normal
-                },
-                style: if s.italic {
-                    font::Style::Italic
-                } else {
-                    font::Style::Normal
-                },
-                ..Font::DEFAULT
-            };
-            let color = s
-                .color
-                .map(|c| note_color(c, alpha))
-                .unwrap_or_else(|| ink(0.9 * alpha));
-            let background = s
-                .background
-                .map(|c| note_color(c, alpha))
-                .or_else(|| (s.code && !mono).then(|| ink(0.08 * alpha)));
-            text::Span::new(s.text.as_str())
-                .size(s.size.unwrap_or(size))
-                .font(font)
-                .color(color)
-                .background_maybe(background)
-                .strikethrough(s.strike)
-                .underline(s.link.is_some())
-                .link_maybe(s.link.clone())
-        })
-        .collect();
-    rich_text(spans)
-        .on_link_click(Message::LinkClicked)
-        .width(Fill)
-        .into()
+    column(
+        line_pieces(&block.spans)
+            .into_iter()
+            .map(|(start, pieces)| {
+                let mut spans: Vec<text::Span<'a, String>> = pieces
+                    .into_iter()
+                    .map(|(i, range)| {
+                        let s = &block.spans[i];
+                        styled(s, &s.text[range], size, bold, mono, ink, alpha)
+                    })
+                    .collect();
+                if spans.is_empty() {
+                    // An empty line still takes a line's height.
+                    spans.push(text::Span::new(" ").size(size));
+                }
+                let line = rich_text(spans.clone())
+                    .on_link_click(Message::LinkClicked)
+                    .width(Fill);
+                hit_text(line, spans, move |offset| {
+                    Message::BodyPressed(rich::source_offset(block, start + offset))
+                })
+                .into()
+            }),
+    )
+    .width(Fill)
+    .into()
+}
+
+fn styled<'a>(
+    s: &'a Span,
+    content: &'a str,
+    size: f32,
+    bold: bool,
+    mono: bool,
+    ink: impl Fn(f32) -> Color,
+    alpha: f32,
+) -> text::Span<'a, String> {
+    let font = Font {
+        family: if mono || s.code {
+            font::Family::Monospace
+        } else {
+            Font::DEFAULT.family
+        },
+        weight: if bold || s.bold {
+            font::Weight::Bold
+        } else {
+            font::Weight::Normal
+        },
+        style: if s.italic {
+            font::Style::Italic
+        } else {
+            font::Style::Normal
+        },
+        ..Font::DEFAULT
+    };
+    let color = s
+        .color
+        .map(|c| note_color(c, alpha))
+        .unwrap_or_else(|| ink(0.9 * alpha));
+    let background = s
+        .background
+        .map(|c| note_color(c, alpha))
+        .or_else(|| (s.code && !mono).then(|| ink(0.08 * alpha)));
+    text::Span::new(content)
+        .size(s.size.unwrap_or(size))
+        .font(font)
+        .color(color)
+        .background_maybe(background)
+        .strikethrough(s.strike)
+        .underline(s.link.is_some())
+        .link_maybe(s.link.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn span(text: &str) -> Span {
+        Span {
+            text: text.into(),
+            ..Span::default()
+        }
+    }
+
+    #[test]
+    fn line_pieces_split_at_line_breaks() {
+        let pieces = line_pieces(&[span("a\nb"), span("c")]);
+        assert_eq!(
+            pieces,
+            vec![(0, vec![(0, 0..1)]), (2, vec![(0, 2..3), (1, 0..1)])]
+        );
+    }
+
+    #[test]
+    fn line_pieces_keep_empty_lines() {
+        let pieces = line_pieces(&[span("a\n\nb")]);
+        assert_eq!(
+            pieces,
+            vec![(0, vec![(0, 0..1)]), (2, vec![]), (3, vec![(0, 3..4)])]
+        );
+    }
 }

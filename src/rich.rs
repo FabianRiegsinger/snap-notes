@@ -60,6 +60,10 @@ pub struct Block {
     pub kind: BlockKind,
     pub spans: Vec<Span>,
     pub source_line: usize,
+    /// `(rendered offset, source offset)` pairs, one per piece of text added
+    /// to the block, in order: where the block's text (its spans joined)
+    /// comes from in the note. See [`source_offset`].
+    pub map: Vec<(usize, usize)>,
 }
 
 /// A run of text with uniform styling.
@@ -143,6 +147,7 @@ impl<'a> Builder<'a> {
             kind,
             spans: Vec::new(),
             source_line: self.line_at(offset),
+            map: Vec::new(),
         });
     }
 
@@ -224,6 +229,8 @@ impl<'a> Builder<'a> {
         let Some(block) = self.cur.as_mut() else {
             return;
         };
+        let rendered: usize = block.spans.iter().map(|s| s.text.len()).sum();
+        block.map.push((rendered, offset));
         match block.spans.last_mut() {
             Some(last) if last.same_style(&span) => last.text.push_str(text),
             _ => block.spans.push(span),
@@ -270,6 +277,8 @@ impl<'a> Builder<'a> {
             backslashes % 2 == 1
         };
         let mut literal = String::new();
+        // Where the pending literal starts in the source.
+        let mut literal_at = range_start;
         let mut rest = text;
         let mut first = true;
         while !rest.is_empty() {
@@ -277,14 +286,14 @@ impl<'a> Builder<'a> {
                 if let Some(end) = rest.find('}') {
                     let inner = &rest[1..end];
                     if inner == "/" {
-                        self.flush_literal(&mut literal, range_start);
+                        self.flush_literal(&mut literal, literal_at);
                         self.tags.pop();
                         rest = &rest[end + 1..];
                         first = false;
                         continue;
                     }
                     if let Some(tag) = self.parse_tag(inner) {
-                        self.flush_literal(&mut literal, range_start);
+                        self.flush_literal(&mut literal, literal_at);
                         self.tags.push(tag);
                         rest = &rest[end + 1..];
                         first = false;
@@ -314,7 +323,7 @@ impl<'a> Builder<'a> {
                     }
                 };
                 if flanks {
-                    self.flush_literal(&mut literal, range_start);
+                    self.flush_literal(&mut literal, literal_at);
                     match open {
                         Some(i) => {
                             self.tags.remove(i);
@@ -327,11 +336,14 @@ impl<'a> Builder<'a> {
                 }
             }
             let ch = rest.chars().next().unwrap_or('\0');
+            if literal.is_empty() {
+                literal_at = range_start + (text.len() - rest.len());
+            }
             literal.push(ch);
             rest = &rest[ch.len_utf8().max(1)..];
             first = false;
         }
-        self.flush_literal(&mut literal, range_start);
+        self.flush_literal(&mut literal, literal_at);
     }
 
     /// Whether a `==` preceded by non-whitespace follows `from` within the same block.
@@ -474,6 +486,7 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
                             kind: BlockKind::Image { path, alt },
                             spans: Vec::new(),
                             source_line: line,
+                            map: Vec::new(),
                         });
                         b.after_image = true;
                     }
@@ -519,6 +532,7 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
                     kind: BlockKind::Rule,
                     spans: Vec::new(),
                     source_line: line,
+                    map: Vec::new(),
                 });
             }
             _ => {}
@@ -526,6 +540,56 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
     }
     b.flush();
     Doc { blocks: b.blocks }
+}
+
+/// The source offset of the character at byte `text_offset` of `block`'s
+/// rendered text (its spans joined), clamped to the end of the block.
+pub fn source_offset(block: &Block, text_offset: usize) -> usize {
+    let rendered: usize = block.spans.iter().map(|s| s.text.len()).sum();
+    let text_offset = text_offset.min(rendered);
+    let at = block
+        .map
+        .partition_point(|&(rendered, _)| rendered <= text_offset);
+    match at.checked_sub(1).and_then(|i| block.map.get(i)) {
+        Some(&(rendered, source)) => source + (text_offset - rendered),
+        None => block.map.first().map_or(0, |&(_, source)| source),
+    }
+}
+
+/// The word (letters, digits and `_`) at byte `offset` of `content`, as a
+/// byte range; empty at `offset` when no word starts or continues there.
+pub fn word_at(content: &str, offset: usize) -> (usize, usize) {
+    let offset = snap(content, offset);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    if !content[offset..].chars().next().is_some_and(is_word) {
+        return (offset, offset);
+    }
+    let start = content[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| is_word(c))
+        .last()
+        .map_or(offset, |(i, _)| i);
+    let end = content[offset..]
+        .char_indices()
+        .find(|&(_, c)| !is_word(c))
+        .map_or(content.len(), |(i, _)| offset + i);
+    (start, end)
+}
+
+/// The line holding byte `offset` of `content`, without its line break.
+pub fn line_bounds(content: &str, offset: usize) -> (usize, usize) {
+    let offset = snap(content, offset);
+    let start = content[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let end = content[offset..]
+        .find('\n')
+        .map_or(content.len(), |i| offset + i);
+    let end = if content[..end].ends_with('\r') {
+        end - 1
+    } else {
+        end
+    };
+    (start, end.max(start))
 }
 
 /// The note as plain text: markers and tags removed, one line per block
@@ -806,6 +870,58 @@ mod tests {
             .flat_map(|b| &b.spans)
             .find(|s| s.text == text)
             .unwrap_or_else(|| panic!("no span {text:?} in {doc:?}"))
+    }
+
+    /// The source offset of the rendered character at `text_offset` in the
+    /// first block, checked against where `expect` sits in `content`.
+    fn maps(content: &str, text_offset: usize, expect: &str) {
+        let doc = parse(content, &PALETTE);
+        let block = &doc.blocks[0];
+        let at = source_offset(block, text_offset);
+        assert!(
+            content[at..].starts_with(expect),
+            "{content:?}: rendered {text_offset} -> {at}, expected {expect:?}"
+        );
+    }
+
+    #[test]
+    fn source_offsets_skip_markup() {
+        // Rendered text: "a bold red c"
+        maps("a **bold** {coral}red{/} c", 2, "bold");
+        maps("a **bold** {coral}red{/} c", 7, "red");
+        maps("a **bold** {coral}red{/} c", 11, "c");
+        maps("x ==hi== y", 2, "hi");
+        maps("x ==hi== y", 5, "y");
+    }
+
+    #[test]
+    fn source_offsets_in_headings_lists_and_lines() {
+        maps("# Title", 0, "Title");
+        maps("- [ ] task", 0, "task");
+        maps("1. first", 0, "first");
+        maps("one\ntwo", 4, "two");
+        maps("> quoted", 0, "quoted");
+    }
+
+    #[test]
+    fn source_offset_clamps_past_the_end() {
+        let doc = parse("ab", &PALETTE);
+        assert_eq!(source_offset(&doc.blocks[0], 99), 2);
+    }
+
+    #[test]
+    fn word_at_finds_word_without_markup() {
+        assert_eq!(word_at("a **bold** c", 5), (4, 8));
+        assert_eq!(word_at("a **bold** c", 4), (4, 8));
+        assert_eq!(word_at("héllo wörld", 8), (7, 13));
+        assert_eq!(word_at("a  b", 2), (2, 2));
+    }
+
+    #[test]
+    fn line_bounds_exclude_the_line_break() {
+        assert_eq!(line_bounds("x\nabc\ny", 3), (2, 5));
+        assert_eq!(line_bounds("abc", 1), (0, 3));
+        assert_eq!(line_bounds("a\r\nb", 0), (0, 1));
     }
 
     #[test]

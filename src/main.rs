@@ -3,6 +3,7 @@ mod app;
 mod bar_strip;
 mod color_picker;
 mod history;
+mod hit_text;
 mod images;
 mod note;
 mod note_panel;

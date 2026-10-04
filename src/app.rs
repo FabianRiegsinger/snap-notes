@@ -54,6 +54,8 @@ pub enum Message {
     /// A click on the rendered body: the block's source line, or `None`
     /// below the last block.
     BodyClicked(Option<usize>),
+    /// A press on rendered text: the source offset of the character under it.
+    BodyPressed(usize),
     /// Leave edit mode and show the note rendered again.
     EditorBlurred,
     /// Flip the task checkbox on this source line.
@@ -175,6 +177,9 @@ pub struct App {
     broken_images: HashSet<String>,
     /// Undo/redo for the open note's body: its text and cursor.
     history: History<(String, text_editor::Cursor)>,
+    /// The last press on rendered text, so quick follow-up clicks (which land
+    /// on the editor it opened) select the word, then the line, around it.
+    rendered_click: Option<RenderedClick>,
     morph: Morph,
     anchor_y: f32,
     pending_delete: Option<Uuid>,
@@ -219,6 +224,18 @@ pub struct App {
     /// window; until then losing focus doesn't close the note or settings.
     keep_open_until: Option<Instant>,
 }
+
+/// Clicks counted from a press on the rendered note.
+struct RenderedClick {
+    at: Instant,
+    /// Source offset of the first press.
+    offset: usize,
+    count: u8,
+}
+
+/// How long after a click the next one still counts as the same series
+/// (iced's own double-click window).
+const MULTI_CLICK: Duration = Duration::from_millis(300);
 
 /// A resize of the open note in progress.
 struct NoteResize {
@@ -300,6 +317,7 @@ impl App {
             data_dir,
             broken_images: HashSet::new(),
             history: History::default(),
+            rendered_click: None,
             morph,
             anchor_y: 0.0,
             pending_delete: None,
@@ -467,7 +485,19 @@ impl App {
                     self.store.mark_dirty();
                 }
             }
+            Message::NoteEdited(
+                text_editor::Action::Click(_)
+                | text_editor::Action::SelectWord
+                | text_editor::Action::SelectLine,
+            ) if self
+                .rendered_click
+                .as_ref()
+                .is_some_and(|c| c.at.elapsed() <= MULTI_CLICK) =>
+            {
+                self.extend_rendered_click();
+            }
             Message::NoteEdited(action) => {
+                self.rendered_click = None;
                 if let Some(content) = &mut self.editor_content {
                     let is_edit = action.is_edit();
                     if is_edit {
@@ -497,6 +527,23 @@ impl App {
                             return crate::note_panel::reveal_last_line();
                         }
                     }
+                }
+            }
+            Message::BodyPressed(offset) => {
+                if let Some(content) = &mut self.editor_content {
+                    self.editing = true;
+                    let (line, column) = rich::position_of(&content.text(), offset);
+                    content.move_to(text_editor::Cursor {
+                        position: text_editor::Position { line, column },
+                        selection: None,
+                    });
+                    self.history.break_step();
+                    self.rendered_click = Some(RenderedClick {
+                        at: Instant::now(),
+                        offset,
+                        count: 1,
+                    });
+                    return focus_body();
                 }
             }
             Message::BodyClicked(line) => {
@@ -1028,6 +1075,7 @@ impl App {
         let switching = self.active_note.is_some_and(|active| active != id);
         self.editor_content = Some(text_editor::Content::with_text(&note.content));
         self.history.clear();
+        self.rendered_click = None;
         self.editing = note.content.trim().is_empty();
         self.hide_peek();
         // A note and the settings never show at the same time.
@@ -1140,6 +1188,34 @@ impl App {
         }
     }
 
+    /// Counts one more quick click after a press on the rendered note and
+    /// selects the word (second click) or line (third and later) around the
+    /// press. The editor's own idea of the click spot is ignored: it lays
+    /// the raw text out differently from the rendered view.
+    fn extend_rendered_click(&mut self) {
+        let (Some(click), Some(content)) = (&mut self.rendered_click, &mut self.editor_content)
+        else {
+            return;
+        };
+        click.count = click.count.saturating_add(1);
+        click.at = Instant::now();
+        let text = content.text();
+        let (start, end) = if click.count == 2 {
+            rich::word_at(&text, click.offset)
+        } else {
+            rich::line_bounds(&text, click.offset)
+        };
+        let position = |offset| {
+            let (line, column) = rich::position_of(&text, offset);
+            text_editor::Position { line, column }
+        };
+        content.move_to(text_editor::Cursor {
+            position: position(end),
+            selection: (start != end).then(|| position(start)),
+        });
+        self.history.break_step();
+    }
+
     /// Undoes (or with `forward`, redoes) one step of the open note's body.
     fn step_history(&mut self, forward: bool) -> Task<Message> {
         let (Some(id), Some(content)) = (self.active_note, &self.editor_content) else {
@@ -1249,6 +1325,7 @@ impl App {
         self.doc = Doc { blocks: Vec::new() };
         self.broken_images.clear();
         self.history.clear();
+        self.rendered_click = None;
         self.color_picker_open = false;
         self.text_color_picker_open = false;
         self.confirm_delete = None;
@@ -2103,6 +2180,58 @@ mod tests {
         // Undo waits for the focus check, so nothing changed yet.
         assert!(task.units() > 0);
         assert_eq!(app.store.notes()[0].content, "- [x] t");
+    }
+
+    fn selected(app: &App) -> Option<String> {
+        app.editor_content.as_ref().unwrap().selection()
+    }
+
+    fn editor_click() -> Message {
+        Message::NoteEdited(text_editor::Action::Click(Point::ORIGIN))
+    }
+
+    #[test]
+    fn press_in_formatted_view_puts_cursor_at_that_character() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x\na **bold** c");
+        let _ = app.update(Message::BodyPressed(7));
+        assert!(app.editing);
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (1, 5));
+        assert_eq!(selected(&app), None);
+    }
+
+    #[test]
+    fn quick_clicks_after_a_press_select_word_then_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x\na **bold** c");
+        let _ = app.update(Message::BodyPressed(7));
+        // The second click lands on the editor that just appeared.
+        let _ = app.update(editor_click());
+        assert_eq!(selected(&app).as_deref(), Some("bold"));
+        // The editor sees its own first click and reports a double.
+        let _ = app.update(Message::NoteEdited(text_editor::Action::SelectWord));
+        assert_eq!(selected(&app).as_deref(), Some("a **bold** c"));
+    }
+
+    #[test]
+    fn double_click_in_formatted_view_then_bold() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hello world");
+        let _ = app.update(Message::BodyPressed(8));
+        let _ = app.update(editor_click());
+        let _ = app.update(Message::FormatApplied(rich::Format::Bold));
+        assert_eq!(app.store.notes()[0].content, "hello **world**");
+    }
+
+    #[test]
+    fn slow_second_click_is_an_ordinary_click() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "hello world");
+        let _ = app.update(Message::BodyPressed(8));
+        app.rendered_click.as_mut().unwrap().at -= Duration::from_secs(1);
+        let _ = app.update(editor_click());
+        assert_eq!(selected(&app), None);
     }
 
     #[test]
