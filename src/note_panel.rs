@@ -339,12 +339,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                     .id(BODY_EDITOR_ID)
                     .placeholder("Write something…")
                     .on_action(Message::NoteEdited)
-                    .key_binding(|press| match press.key.as_ref() {
-                        keyboard::Key::Character("v") if press.modifiers.command() => {
-                            Some(text_editor::Binding::Custom(Message::PasteRequested))
-                        }
-                        _ => text_editor::Binding::from_key_press(press),
-                    })
+                    .key_binding(body_key_binding)
                     .min_height(editor_min_height(available.height))
                     .size(14)
                     .padding(body_padding())
@@ -467,8 +462,59 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         .into()
 }
 
+/// The body editor's key bindings: Cmd/Ctrl+V asks the app to paste (text or
+/// image) while the editor has focus; everything else is iced's default.
+fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    match press.key.as_ref() {
+        keyboard::Key::Character("v")
+            if press.modifiers.command()
+                && matches!(press.status, text_editor::Status::Focused { .. }) =>
+        {
+            Some(text_editor::Binding::Custom(Message::PasteRequested))
+        }
+        _ => text_editor::Binding::from_key_press(press),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    fn press(ch: &str, command: bool, status: text_editor::Status) -> text_editor::KeyPress {
+        let key = keyboard::Key::Character(ch.into());
+        text_editor::KeyPress {
+            modified_key: key.clone(),
+            key,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            modifiers: if command {
+                keyboard::Modifiers::COMMAND
+            } else {
+                keyboard::Modifiers::empty()
+            },
+            text: Some(ch.into()),
+            status,
+        }
+    }
+
+    #[test]
+    fn paste_binding_only_when_focused() {
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        assert!(matches!(
+            body_key_binding(press("v", true, focused)),
+            Some(text_editor::Binding::Custom(Message::PasteRequested))
+        ));
+        assert!(body_key_binding(press("v", true, text_editor::Status::Active)).is_none());
+    }
+
+    #[test]
+    fn other_keys_use_default_bindings() {
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        assert!(matches!(
+            body_key_binding(press("x", false, focused)),
+            Some(text_editor::Binding::Insert('x'))
+        ));
+    }
+
     use super::*;
     use iced::advanced::widget::operation::scrollable::RelativeOffset;
     use iced::{Point, Size};
