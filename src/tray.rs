@@ -6,13 +6,16 @@ use crate::app::Message;
 
 /// Ids of the menu items, in menu order.
 #[cfg(any(windows, target_os = "macos", test))]
-pub const MENU_IDS: [&str; 6] = ["toggle", "new", "search", "export", "settings", "quit"];
+pub const MENU_IDS: [&str; 7] = [
+    "toggle", "new", "clip", "search", "export", "settings", "quit",
+];
 
 /// The app message a menu item id stands for.
 pub fn message_for(id: &str) -> Option<Message> {
     match id {
         "toggle" => Some(Message::ToggleVisibility),
         "new" => Some(Message::AddNote),
+        "clip" => Some(Message::ClipboardNote),
         "search" => Some(Message::ToggleSearch),
         "export" => Some(Message::ToggleExport),
         "settings" => Some(Message::ToggleSettings),
@@ -82,12 +85,13 @@ mod native {
     /// Creates the icon (hidden unless `visible`). Returns whether it worked.
     pub fn create(_window: &dyn iced::window::Window, notes_shown: bool, visible: bool) -> bool {
         let build = || -> Option<(TrayIcon, MenuItem)> {
-            let [toggle, new, search, export, settings, quit] = MENU_IDS;
+            let [toggle, new, clip, search, export, settings, quit] = MENU_IDS;
             let toggle_item = MenuItem::with_id(toggle, toggle_label(notes_shown), true, None);
             let menu = Menu::new();
             menu.append_items(&[
                 &toggle_item,
                 &MenuItem::with_id(new, "New Note", true, None),
+                &MenuItem::with_id(clip, "New Note from Clipboard", true, None),
                 &MenuItem::with_id(search, "Search…", true, None),
                 &MenuItem::with_id(export, "Export…", true, None),
                 &MenuItem::with_id(settings, "Settings…", true, None),
@@ -193,6 +197,13 @@ mod tests {
         for id in MENU_IDS {
             assert!(message_for(id).is_some(), "{id}");
         }
+    }
+
+    #[test]
+    fn tray_clip_item() {
+        assert!(matches!(message_for("clip"), Some(Message::ClipboardNote)));
+        let new = MENU_IDS.iter().position(|id| *id == "new").unwrap();
+        assert_eq!(MENU_IDS.get(new + 1), Some(&"clip"));
     }
 
     #[test]

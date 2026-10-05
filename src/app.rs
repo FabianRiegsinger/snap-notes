@@ -145,7 +145,14 @@ pub enum Message {
     /// Wrap the editor selection in this format's markup.
     FormatApplied(rich::Format),
     /// A file was dropped on the window; images are added to the open note.
+    /// Without one, the drop goes to the strip as `StripFileDropped`.
     ImageDropped(PathBuf),
+    /// A file dropped with no note open: onto this bar (entry) index, or
+    /// `None` for the add slot, empty strip space or beside the strip.
+    StripFileDropped(Option<usize>, PathBuf),
+    /// The tray item or an Alt/Option-click on `+`: a new note holding the
+    /// clipboard's text or image.
+    ClipboardNote,
     /// Cmd/Ctrl+V in the editor: pastes the clipboard's text or image.
     PasteRequested,
     /// Text from the system clipboard, read for the note with this id;
@@ -241,6 +248,23 @@ fn read_clipboard() -> ClipboardContent {
         })
     };
     classify(text, image)
+}
+
+/// Largest text file whose text a drop adds.
+const MAX_TEXT_BYTES: u64 = 1024 * 1024;
+
+/// The text of a `.txt` or `.md` file of at most `MAX_TEXT_BYTES` that is
+/// valid UTF-8, without trailing line breaks.
+fn read_text_file(path: &std::path::Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "txt" | "md") {
+        return None;
+    }
+    if std::fs::metadata(path).ok()?.len() > MAX_TEXT_BYTES {
+        return None;
+    }
+    let text = String::from_utf8(std::fs::read(path).ok()?).ok()?;
+    Some(text.trim_end_matches(['\r', '\n']).to_string())
 }
 
 pub struct App {
@@ -686,13 +710,7 @@ impl App {
                     }
                 }
             }
-            Message::AddNote => {
-                self.store.add_note(&self.settings.settings().palette);
-                self.store.mark_dirty();
-                let last = self.store.notes().len() - 1;
-                self.scroll_offset = self.strip_layout().max_scroll;
-                return self.open_note(last);
-            }
+            Message::AddNote => return self.create_note(None, String::new()),
             Message::NoteHovered(hovered) => {
                 self.note_hovered = hovered;
             }
@@ -1010,7 +1028,18 @@ impl App {
                 self.color_picker_open = false;
             }
             Message::FormatApplied(format) => return self.apply_format(format),
-            Message::ImageDropped(path) => return self.import_image(&path),
+            Message::ImageDropped(path) if self.note_open() => return self.import_image(&path),
+            Message::ImageDropped(path) => {
+                let entry = self.last_cursor.and_then(|at| {
+                    self.strip_layout()
+                        .bars
+                        .iter()
+                        .position(|bar| bar.contains(at))
+                });
+                return self.update(Message::StripFileDropped(entry, path));
+            }
+            Message::StripFileDropped(entry, path) => return self.drop_on_strip(entry, &path),
+            Message::ClipboardNote => return self.clipboard_note(read_clipboard()),
             Message::ImagePicked(id, Some(path))
                 if self.active_note == Some(id) && self.morph.is_opening() =>
             {
@@ -1216,6 +1245,7 @@ impl App {
                 let needs_notes = matches!(
                     message,
                     Message::AddNote
+                        | Message::ClipboardNote
                         | Message::ToggleSettings
                         | Message::ToggleSearch
                         | Message::ToggleExport
@@ -1655,6 +1685,101 @@ impl App {
         }
         self.store.mark_dirty();
         focus_body()
+    }
+
+    /// Adds a note, sets its title (tags in it get their reminder anchor)
+    /// and body, and opens it: rendered, unless the body is empty.
+    fn create_note(&mut self, title: Option<String>, content: String) -> Task<Message> {
+        let id = self.store.add_note(&self.settings.settings().palette);
+        if let Some(note) = self.store.note_mut(id) {
+            if let Some(title) = title {
+                reminder::retitle(note, title, chrono::Local::now());
+            }
+            note.content = content;
+        }
+        self.store.mark_dirty();
+        let last = self.store.notes().len() - 1;
+        self.scroll_offset = self.strip_layout().max_scroll;
+        self.open_note(last)
+    }
+
+    /// A note is open and not closing.
+    fn note_open(&self) -> bool {
+        self.active_note.is_some() && self.morph.is_opening()
+    }
+
+    /// A file dropped with no note open: appended to the top note of the
+    /// bar at `entry`, or else a new note titled with the file's stem.
+    fn drop_on_strip(&mut self, entry: Option<usize>, path: &std::path::Path) -> Task<Message> {
+        let text = self.dropped_text(path);
+        let top = entry
+            .and_then(|entry| self.entries().get(entry).map(|e| e.top))
+            .map(|top| self.store.notes()[top].id)
+            .filter(|&id| !self.dying(id));
+        match top {
+            Some(id) => {
+                self.append_to_note(id, &text);
+                Task::none()
+            }
+            None => {
+                let title = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+                self.create_note(title, text)
+            }
+        }
+    }
+
+    /// What a dropped file adds to a note: a small text file's text, an
+    /// image's reference, or else the file's path.
+    fn dropped_text(&self, path: &std::path::Path) -> String {
+        if let Some(text) = read_text_file(path) {
+            return text;
+        }
+        match images::import(&self.data_dir, path) {
+            Ok(rel) => format!("![]({rel})"),
+            Err(_) => path.display().to_string(),
+        }
+    }
+
+    /// Adds `text` below the note's body, after a blank line unless the
+    /// body is empty.
+    fn append_to_note(&mut self, id: Uuid, text: &str) {
+        let Some(note) = self.store.note_mut(id) else {
+            return;
+        };
+        let body = note.content.trim_end_matches('\n');
+        note.content = if body.trim().is_empty() {
+            text.to_string()
+        } else {
+            format!("{body}\n\n{text}")
+        };
+        note.updated_at = chrono::Utc::now();
+        let content = note.content.clone();
+        self.store.mark_dirty();
+        if self.active_note == Some(id) {
+            self.editor_content = Some(text_editor::Content::with_text(&content));
+            self.reparse();
+        }
+    }
+
+    /// A new note with the clipboard's text or image; nothing for an empty
+    /// clipboard.
+    fn clipboard_note(&mut self, content: ClipboardContent) -> Task<Message> {
+        let body = match content {
+            ClipboardContent::Text(text) => text.trim_end_matches(['\r', '\n']).to_string(),
+            ClipboardContent::Image {
+                rgba,
+                width,
+                height,
+            } => match images::import_png(&self.data_dir, &rgba, width, height) {
+                Ok(rel) => format!("![]({rel})"),
+                Err(e) => {
+                    eprintln!("clipboard image failed: {e}");
+                    return Task::none();
+                }
+            },
+            ClipboardContent::Empty => return Task::none(),
+        };
+        self.create_note(None, body)
     }
 
     /// Copies an image file into the open note's folder and references it;
@@ -3840,16 +3965,168 @@ mod tests {
         assert!(!app.store.is_dirty());
     }
 
+    fn file_in(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// The note a drop or clipboard note just created and opened.
+    fn new_note(app: &App) -> &crate::note::Note {
+        let note = app.store.notes().last().unwrap();
+        assert_eq!(app.active_note, Some(note.id));
+        note
+    }
+
     #[test]
-    fn drop_without_open_note_is_ignored() {
+    fn dropping_text_file_creates_note_with_title() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_in(&dir);
-        app.store.add_note(&crate::note::PALETTE);
+        app.window_size = Size::new(1400.0, 900.0);
+        let path = file_in(&dir, "Call Anna @15:00.md", b"# Hi\nthere\n");
+        let _ = app.update(Message::ImageDropped(path));
+        assert_eq!(app.store.notes().len(), 1);
+        let note = new_note(&app);
+        assert_eq!(note.title, "Call Anna @15:00");
+        assert_eq!(note.content, "# Hi\nthere");
+        // The tag in the file name sets a reminder from now.
+        assert!(note.reminder_set_at.is_some());
+        assert!(!app.editing, "a note with content opens rendered");
+        assert!(app.store.is_dirty());
+    }
+
+    #[test]
+    fn dropping_on_bar_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "first"), ("b", ""), ("c", "")]);
+        // The third note is stacked under the first: their bar is the first.
+        app.store.note_mut(ids[2]).unwrap().stack = Some(ids[0]);
         app.store.did_save();
-        let _ = app.update(Message::ImageDropped(png_file(&dir, "p.png")));
-        assert_eq!(app.store.notes()[0].content, "");
+        app.sync_entries();
+        let bars = app.strip_layout().bars;
+        assert_eq!(bars.len(), 2);
+        app.last_cursor = Some(bars[0].center());
+        let _ = app.update(Message::ImageDropped(file_in(&dir, "x.txt", b"more")));
+        assert_eq!(app.store.notes()[0].content, "first\n\nmore");
+        assert_eq!(app.store.notes()[0].title, "a");
+        assert_eq!(app.store.notes()[2].content, "");
+        // An empty body takes the text without a blank line.
+        app.last_cursor = Some(bars[1].center());
+        let _ = app.update(Message::ImageDropped(file_in(&dir, "y.md", b"new")));
+        assert_eq!(app.store.notes()[1].content, "new");
+        assert_eq!(app.store.notes().len(), 3);
+        assert_eq!(app.active_note, None);
+        assert!(app.store.is_dirty());
+    }
+
+    #[test]
+    fn dropping_on_add_or_empty_space_creates_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "first")]);
+        app.sync_entries();
+        let layout = app.strip_layout();
+        for (n, at) in [layout.add_button.center(), Point::new(5.0, 5.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let _ = app.update(Message::ClosePanel);
+            settle(&mut app);
+            app.last_cursor = Some(at);
+            let _ = app.update(Message::ImageDropped(file_in(&dir, "x.txt", b"x")));
+            assert_eq!(app.store.notes().len(), n + 2);
+            assert_eq!(app.store.notes()[0].content, "first");
+        }
+    }
+
+    #[test]
+    fn dropping_image_creates_image_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.window_size = Size::new(1400.0, 900.0);
+        let _ = app.update(Message::ImageDropped(png_file(&dir, "shot.png")));
+        let note = new_note(&app);
+        assert_eq!(note.title, "shot");
+        let rel = note
+            .content
+            .strip_prefix("![](")
+            .and_then(|r| r.strip_suffix(')'))
+            .unwrap();
+        assert!(rel.starts_with("images/") && rel.ends_with(".png"));
+        assert!(dir.path().join(rel).is_file());
+        assert!(!app.editing);
+    }
+
+    #[test]
+    fn dropping_other_file_adds_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.window_size = Size::new(1400.0, 900.0);
+        let path = file_in(&dir, "data.bin", &[0, 1, 2]);
+        let _ = app.update(Message::ImageDropped(path.clone()));
+        let note = new_note(&app);
+        assert_eq!(note.title, "data");
+        assert_eq!(note.content, path.display().to_string());
+    }
+
+    #[test]
+    fn oversized_or_binary_text_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.window_size = Size::new(1400.0, 900.0);
+        let limit = 1024 * 1024;
+        let fits = file_in(&dir, "fits.txt", &vec![b'a'; limit]);
+        let big = file_in(&dir, "big.txt", &vec![b'a'; limit + 1]);
+        let binary = file_in(&dir, "bad.md", &[0xff, 0xfe, 0x00]);
+        let _ = app.update(Message::StripFileDropped(None, fits));
+        assert_eq!(new_note(&app).content.len(), limit);
+        for path in [big, binary] {
+            let _ = app.update(Message::StripFileDropped(None, path.clone()));
+            assert_eq!(new_note(&app).content, path.display().to_string());
+        }
+    }
+
+    #[test]
+    fn clipboard_note_from_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.window_size = Size::new(1400.0, 900.0);
+        let _ = app.clipboard_note(ClipboardContent::Text("- [ ] milk\n".into()));
+        let note = new_note(&app);
+        assert_eq!(note.content, "- [ ] milk");
+        assert_eq!(note.title, "");
+        assert!(!app.editing);
+        assert!(app.store.is_dirty());
+    }
+
+    #[test]
+    fn clipboard_note_from_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.window_size = Size::new(1400.0, 900.0);
+        let (rgba, width, height) = rgba_1x1();
+        let _ = app.clipboard_note(ClipboardContent::Image {
+            rgba,
+            width,
+            height,
+        });
+        let note = new_note(&app);
+        let rel = image_ref(&note.content)
+            .strip_prefix("![](")
+            .and_then(|r| r.strip_suffix(')'))
+            .unwrap();
+        assert_eq!(note.content, format!("![]({rel})"));
+        assert!(dir.path().join(rel).is_file());
+        assert!(!app.editing);
+    }
+
+    #[test]
+    fn empty_clipboard_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.clipboard_note(ClipboardContent::Empty);
+        assert!(app.store.notes().is_empty());
+        assert_eq!(app.active_note, None);
         assert!(!app.store.is_dirty());
-        assert!(!dir.path().join("images").exists());
     }
 
     #[test]

@@ -8,9 +8,10 @@ use crate::theme;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
-use iced::advanced::widget::Tree;
+use iced::advanced::widget::{tree, Tree};
 use iced::advanced::{self, Clipboard, Shell};
 use iced::event::Event;
+use iced::keyboard;
 use iced::mouse;
 use iced::{Color, Element, Length, Point, Rectangle, Size, Theme};
 
@@ -167,6 +168,21 @@ impl StripLayout {
             None
         }
     }
+
+    /// What a press at `pos` on a slot does with `modifiers` held: Alt
+    /// (Option) on the add slot makes a note from the clipboard.
+    pub fn press_message(&self, pos: Point, modifiers: keyboard::Modifiers) -> Option<Message> {
+        match self.slot_message(pos) {
+            Some(Message::AddNote) if modifiers.alt() => Some(Message::ClipboardNote),
+            message => message,
+        }
+    }
+}
+
+/// The widget's own state: the modifiers held, for Alt-clicks.
+#[derive(Default)]
+struct StripState {
+    modifiers: keyboard::Modifiers,
 }
 
 /// The strip shows a settings slot only where no tray menu offers Settings.
@@ -442,6 +458,14 @@ impl<'a> BarStrip<'a> {
 }
 
 impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<StripState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(StripState::default())
+    }
+
     fn size(&self) -> Size<Length> {
         Size::new(Length::Fixed(STRIP_WIDTH), Length::Fill)
     }
@@ -820,7 +844,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
 
     fn update(
         &mut self,
-        _tree: &mut Tree,
+        tree: &mut Tree,
         event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
@@ -832,6 +856,9 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         let bounds = layout.bounds();
 
         match event {
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                tree.state.downcast_mut::<StripState>().modifiers = *modifiers;
+            }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 if let Some(message) = self.hover_message(bounds, *position) {
                     shell.publish(message);
@@ -858,7 +885,8 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             return;
                         }
                     }
-                    if let Some(message) = strip.slot_message(pos) {
+                    let modifiers = tree.state.downcast_ref::<StripState>().modifiers;
+                    if let Some(message) = strip.press_message(pos, modifiers) {
                         shell.publish(message);
                         shell.capture_event();
                     }
@@ -1547,6 +1575,23 @@ mod tests {
                 assert!(!l.add_hit_area.contains(search.center()));
             }
         }
+    }
+
+    #[test]
+    fn alt_click_on_add_makes_clipboard_note() {
+        let l = layout(2, |_| 1.0, 900.0, 0.0);
+        let alt = iced::keyboard::Modifiers::ALT;
+        let none = iced::keyboard::Modifiers::empty();
+        let add = l.add_button.center();
+        assert!(matches!(
+            l.press_message(add, alt),
+            Some(Message::ClipboardNote)
+        ));
+        assert!(matches!(l.press_message(add, none), Some(Message::AddNote)));
+        assert!(matches!(
+            l.press_message(l.search_button.center(), alt),
+            Some(Message::ToggleSearch)
+        ));
     }
 
     #[test]
