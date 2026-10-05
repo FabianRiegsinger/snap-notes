@@ -1197,6 +1197,16 @@ mod tests {
     }
 
     #[test]
+    fn strip_tags_adjacent_tags() {
+        assert_eq!(strip_tags("{coral}{size:20}x{/}{/}"), "x");
+    }
+
+    #[test]
+    fn strip_tags_multibyte() {
+        assert_eq!(strip_tags("{coral}é😀{/} ü"), "é😀 ü");
+    }
+
+    #[test]
     fn toggle_task_flips_marker() {
         let c = "a\n  - [ ] b\n3. [x] c";
         assert_eq!(toggle_task(c, 1).as_deref(), Some("a\n  - [x] b\n3. [x] c"));

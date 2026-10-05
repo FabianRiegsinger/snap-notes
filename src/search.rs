@@ -138,8 +138,9 @@ fn hit(note: &Note, body_match: Option<Range<usize>>) -> Hit {
     }
 }
 
+/// `text` with each line break (`\n`, `\r\n` or `\r`) as one space.
 fn one_line(text: &str) -> String {
-    text.replace(['\n', '\r'], " ")
+    text.replace("\r\n", " ").replace(['\n', '\r'], " ")
 }
 
 fn body_snippet(content: &str, matched: Range<usize>) -> (String, Range<usize>) {
@@ -154,9 +155,13 @@ fn body_snippet(content: &str, matched: Range<usize>) -> (String, Range<usize>) 
         .map_or(content.len(), |(i, _)| matched.end + i);
     let lead = if start > 0 { "…" } else { "" };
     let trail = if end < content.len() { "…" } else { "" };
-    let snippet = format!("{lead}{}{trail}", one_line(&content[start..end]));
-    let from = lead.len() + (matched.start - start);
-    (snippet, from..from + (matched.end - matched.start))
+    // Joined per part, as a line break can shorten its part.
+    let before = one_line(&content[start..matched.start]);
+    let found = one_line(&content[matched.clone()]);
+    let after = one_line(&content[matched.end..end]);
+    let from = lead.len() + before.len();
+    let highlight = from..from + found.len();
+    (format!("{lead}{before}{found}{after}{trail}"), highlight)
 }
 
 fn first_line(content: &str) -> String {
@@ -236,6 +241,61 @@ mod tests {
         let hits = find(&[note("t", "one\ntwo needle\nthree")], "needle");
         assert_eq!(hits[0].snippet, "one two needle three");
         assert_eq!(&hits[0].snippet[hits[0].highlight.clone()], "needle");
+    }
+
+    #[test]
+    fn snippet_with_multibyte_context() {
+        let before = "é😀".repeat(20);
+        let after = "ü😀".repeat(20);
+        let content = format!("{before}Needle{after}");
+        let hits = find(&[note("t", &content)], "needle");
+        let hit = &hits[0];
+        let at = before.len();
+        assert_eq!(hit.body_match, Some(at..at + 6));
+        assert_eq!(&hit.snippet[hit.highlight.clone()], "Needle");
+        let lead: String = before.chars().skip(40 - 30).collect();
+        let trail: String = after.chars().take(30).collect();
+        assert_eq!(hit.snippet, format!("…{lead}Needle{trail}…"));
+
+        // Context shorter than 30 chars is kept whole, without ellipses.
+        let hits = find(&[note("t", "é😀 needle ü😀")], "NEEDLE");
+        assert_eq!(hits[0].snippet, "é😀 needle ü😀");
+        assert_eq!(&hits[0].snippet[hits[0].highlight.clone()], "needle");
+    }
+
+    #[test]
+    fn match_across_crlf_line_end() {
+        let content = "first line\r\nsecond needle\r\nthird";
+        let hits = find(&[note("t", content)], "needle");
+        let hit = &hits[0];
+        assert_eq!(hit.snippet, "first line second needle third");
+        assert_eq!(&hit.snippet[hit.highlight.clone()], "needle");
+        assert_eq!(&content[hit.body_match.clone().unwrap()], "needle");
+
+        // A match right after the line break, in non-ASCII text.
+        let content = "Zeile eins\r\nÜnal";
+        let hits = find(&[note("t", content)], "ünal");
+        let hit = &hits[0];
+        assert_eq!(hit.snippet, "Zeile eins Ünal");
+        assert_eq!(&hit.snippet[hit.highlight.clone()], "Ünal");
+        assert_eq!(&content[hit.body_match.clone().unwrap()], "Ünal");
+    }
+
+    #[test]
+    fn match_at_start_and_end_of_content() {
+        for (content, query, matched) in [
+            ("needle and more", "NEEDLE", 0..6),
+            ("more and needle", "needle", 9..15),
+            ("Ünal und mehr", "ünal", 0..5),
+            ("mehr und Ünal", "ünal", 9..14),
+            ("needle", "needle", 0..6),
+        ] {
+            let hits = find(&[note("t", content)], query);
+            let hit = &hits[0];
+            assert_eq!(hit.body_match, Some(matched.clone()), "{content:?}");
+            assert_eq!(hit.snippet, content, "no ellipsis at either end");
+            assert_eq!(hit.highlight, matched, "{content:?}");
+        }
     }
 
     #[test]
