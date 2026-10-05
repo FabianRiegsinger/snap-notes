@@ -16,6 +16,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 arboard = "3.6.1"
 rfd = "0.17.2"
 tokio = { version = "1", features = ["time"] }
+notify-rust = "4.18.1"
 
 [target.'cfg(windows)'.dependencies]
 single-instance = "0.3"

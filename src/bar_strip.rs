@@ -66,6 +66,15 @@ fn notch_color(bar: Color, alpha: f32) -> Color {
     }
 }
 
+/// How far a fired reminder's glow reaches past its bar at full pulse.
+const PULSE_REACH: f32 = 3.0;
+
+/// The glow behind a bar whose reminder fired, `pulse` (0..=1) of the way
+/// out.
+fn pulse_halo(rect: Rectangle, pulse: f32) -> Rectangle {
+    rect.expand(PULSE_REACH * pulse.clamp(0.0, 1.0))
+}
+
 /// The two 1 px "card edge" lines left of a stack's bar, each further out
 /// and shorter than the last.
 fn stack_edges(rect: Rectangle) -> [Rectangle; 2] {
@@ -300,6 +309,9 @@ pub struct BarStrip<'a> {
     /// search.
     /// Empty when nothing is dimmed.
     pub dimmed: Vec<bool>,
+    /// How strongly each bar's fired reminder pulses (0..=1), by index.
+    /// Empty when nothing pulses.
+    pub pulse: Vec<f32>,
 }
 
 impl<'a> BarStrip<'a> {
@@ -473,6 +485,23 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 let open = self.open.filter(|(o, _)| *o == i);
                 let rect = bar_rect_for(open.map_or(0.0, |(_, p)| p), *bar_rect);
                 let corner = CORNER_RADIUS;
+                let pulse = self.pulse.get(i).copied().unwrap_or(0.0);
+                if pulse > 0.0 {
+                    let [r, g, b, _] = note.color.rgba;
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: pulse_halo(rect, pulse),
+                            border: iced::Border {
+                                radius: (corner + PULSE_REACH * pulse).into(),
+                                ..Default::default()
+                            },
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        Color::from_rgba(r, g, b, 0.6 * pulse * dim),
+                    );
+                }
                 if open.is_some() {
                     let [_, ambient] = self.theme.shadows(1.0);
                     let [r, g, b, _] = note.color.rgba;
@@ -964,6 +993,15 @@ mod tests {
     }
 
     #[test]
+    fn pulse_halo_grows_with_the_pulse() {
+        let r = Rectangle::new(Point::new(10.0, 10.0), Size::new(6.0, 40.0));
+        assert_eq!(pulse_halo(r, 0.0), r);
+        let full = pulse_halo(r, 1.0);
+        assert_eq!(full.width, r.width + 2.0 * PULSE_REACH);
+        assert_eq!(full.center(), r.center());
+    }
+
+    #[test]
     fn notch_is_darker_than_its_bar() {
         let bar = Color::from_rgb(1.0, 0.85, 0.24);
         let notch = notch_color(bar, 0.3);
@@ -1151,6 +1189,7 @@ mod tests {
             open: None,
             collapse: None,
             dimmed: Vec::new(),
+            pulse: Vec::new(),
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -1187,6 +1226,7 @@ mod tests {
             open: None,
             collapse: None,
             dimmed: Vec::new(),
+            pulse: Vec::new(),
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -1224,6 +1264,7 @@ mod tests {
             open: None,
             collapse: None,
             dimmed: Vec::new(),
+            pulse: Vec::new(),
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];

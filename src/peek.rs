@@ -6,6 +6,7 @@ use crate::animation::{ease_out_cubic, lerp};
 use crate::icons::{Icon, ICON_FONT};
 use crate::note::Note;
 use crate::note_panel::{morph_paper, PLACEHOLDER};
+use crate::reminder;
 use crate::rich;
 use crate::theme::{self, Theme, TITLE_FONT};
 
@@ -53,6 +54,8 @@ pub struct PeekText {
     pub lines: Vec<String>,
     /// Done and total task items, shown in the header.
     pub progress: Option<(usize, usize)>,
+    /// The title's reminder time (`Tue 15:00`), shown after a bell.
+    pub reminder: Option<String>,
     /// The peek's width, which the text was cut and wrapped for.
     pub width: f32,
 }
@@ -64,6 +67,8 @@ pub struct PeekLayout {
     pub title: Point,
     /// The `done/total` text in the header, left of the delete button.
     pub progress: Rectangle,
+    /// The bell and reminder time, left of the progress.
+    pub reminder: Rectangle,
     pub divider_y: f32,
     pub body: Point,
     /// The delete button in the header.
@@ -123,16 +128,29 @@ fn progress_reserve(progress: Option<(usize, usize)>) -> f32 {
     })
 }
 
-/// The title leaves room for the delete button and the progress on its right.
-fn title_width(width: f32, progress: Option<(usize, usize)>) -> f32 {
-    inner_width(width)
-        - (TRASH_SIZE + TRASH_INSET - PADDING_X).max(0.0)
-        - 4.0
-        - progress_reserve(progress)
+/// The bell's size in the header, and the space between it and the time.
+const BELL_SIZE: f32 = 14.0;
+const BELL_GAP: f32 = 4.0;
+
+/// Width reserved for the bell and reminder time, with the gap before them.
+fn reminder_reserve(reminder: Option<&str>) -> f32 {
+    reminder.map_or(0.0, |label| {
+        BELL_SIZE + BELL_GAP + label.chars().count() as f32 * BODY_SIZE * BODY_GLYPH + PROGRESS_GAP
+    })
 }
 
-fn title_rows(title: &str, width: f32, progress: Option<(usize, usize)>) -> usize {
-    let per_row = (title_width(width, progress) / (TITLE_SIZE * TITLE_GLYPH))
+/// The title leaves room for the delete button, the progress and the
+/// reminder on its right.
+fn title_width(text: &PeekText) -> f32 {
+    inner_width(text.width)
+        - (TRASH_SIZE + TRASH_INSET - PADDING_X).max(0.0)
+        - 4.0
+        - progress_reserve(text.progress)
+        - reminder_reserve(text.reminder.as_deref())
+}
+
+fn title_rows(title: &str, text: &PeekText) -> usize {
+    let per_row = (title_width(text) / (TITLE_SIZE * TITLE_GLYPH))
         .floor()
         .max(1.0) as usize;
     title.chars().count().div_ceil(per_row).max(1)
@@ -161,14 +179,12 @@ pub fn peek_text(note: &Note, width: f32) -> PeekText {
             .map(|l| truncate(l, max_chars))
             .collect(),
         progress: rich::task_progress(&note.content),
+        reminder: reminder::at(note).map(reminder::label),
     }
 }
 
 fn title_height(text: &PeekText) -> f32 {
-    text.title
-        .as_deref()
-        .map_or(1, |t| title_rows(t, text.width, text.progress)) as f32
-        * TITLE_LINE
+    text.title.as_deref().map_or(1, |t| title_rows(t, text)) as f32 * TITLE_LINE
 }
 
 /// Height of the open peek: header, divider and body (at least one line,
@@ -215,6 +231,8 @@ pub fn peek_layout(
         Size::new(TRASH_SIZE, TRASH_SIZE),
     );
     let progress_width = progress_reserve(text.progress) - PROGRESS_GAP;
+    let reminder_width = reminder_reserve(text.reminder.as_deref()) - PROGRESS_GAP;
+    let reminder_end = trash.x - 4.0 - progress_reserve(text.progress);
     let divider_y = title.y + title_height(text) + DIVIDER_GAP;
     let body = Point::new(title.x, divider_y + 1.0 + BODY_GAP);
     let buttons_y = body.y + BODY_LINE + CONFIRM_GAP;
@@ -226,6 +244,10 @@ pub fn peek_layout(
         progress: Rectangle::new(
             Point::new(trash.x - 4.0 - progress_width, title.y),
             Size::new(progress_width, TITLE_LINE),
+        ),
+        reminder: Rectangle::new(
+            Point::new(reminder_end - reminder_width.max(0.0), title.y),
+            Size::new(reminder_width.max(0.0), TITLE_LINE),
         ),
         trash,
         delete: Rectangle::new(Point::new(body.x, buttons_y), CONFIRM_BUTTON),
@@ -395,6 +417,7 @@ pub fn draw_peek(
     }
 
     let hovered = |r: Rectangle| cursor.is_some_and(|c| r.contains(c));
+    let title_width = title_width(&text);
     let mut draw_text = |content: String,
                          at: Point,
                          font: Font,
@@ -405,7 +428,7 @@ pub fn draw_peek(
                          color| {
         // The title stays clear of the delete button.
         let width = if font == TITLE_FONT {
-            title_width(width, text.progress)
+            title_width
         } else {
             inner_width(width)
         };
@@ -440,7 +463,7 @@ pub fn draw_peek(
             TITLE_SIZE,
             TITLE_LINE,
             LineHeight::Absolute(Pixels(TITLE_LINE)),
-            title_rows(title, width, text.progress),
+            title_rows(title, &text),
             theme.ink(alpha),
         ),
         None => draw_text(
@@ -524,6 +547,20 @@ pub fn draw_peek(
         );
     }
 
+    if let Some(when) = &text.reminder {
+        let r = layout.reminder;
+        let color = theme.ink(0.55 * alpha);
+        let bell = Rectangle::new(r.position(), Size::new(BELL_SIZE, r.height));
+        let bell_glyph = Icon::Bell.codepoint().to_string();
+        draw_label(renderer, &bell_glyph, bell, ICON_FONT, 12.0, color, rect);
+        let label = Rectangle {
+            x: r.x + BELL_SIZE + BELL_GAP,
+            width: (r.width - BELL_SIZE - BELL_GAP).max(0.0),
+            ..r
+        };
+        draw_label(renderer, when, label, BODY_FONT, BODY_SIZE, color, rect);
+    }
+
     let trash_alpha = if hovered(layout.trash) || confirming {
         0.9
     } else {
@@ -591,7 +628,7 @@ mod tests {
         let l = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
         // Right of the title, left of the trash, and the title stops short of it.
         assert!(l.progress.x + l.progress.width <= l.trash.x);
-        assert!(l.title.x + title_width(PEEK_WIDTH, text.progress) <= l.progress.x);
+        assert!(l.title.x + title_width(&text) <= l.progress.x);
         assert_eq!(peek_text(&note("T", "plain"), PEEK_WIDTH).progress, None);
     }
 
@@ -699,7 +736,23 @@ mod tests {
         let l = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
         assert!(inside(l.rect, l.trash));
         assert!(l.trash.y + l.trash.height <= l.divider_y);
-        assert!(l.title.x + title_width(PEEK_WIDTH, None) <= l.trash.x);
+        assert!(l.title.x + title_width(&text) <= l.trash.x);
+    }
+
+    #[test]
+    fn peek_header_shows_reminder() {
+        let mut n = note("Call @2026-10-06 15:00", "- [ ] a");
+        n.updated_at = chrono::Utc::now();
+        let text = peek_text(&n, PEEK_WIDTH);
+        assert_eq!(text.reminder.as_deref(), Some("Tue 15:00"));
+        let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
+        let l = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
+        // Title, then the bell and time, then the progress and the trash.
+        assert!(l.title.x + title_width(&text) <= l.reminder.x);
+        assert!(l.reminder.x + l.reminder.width <= l.progress.x);
+        assert!(inside(l.rect, l.reminder));
+        assert!(title_width(&text) < title_width(&peek_text(&note("Call", "- [ ] a"), PEEK_WIDTH)));
+        assert_eq!(peek_text(&note("Call", ""), PEEK_WIDTH).reminder, None);
     }
 
     #[test]

@@ -8,8 +8,10 @@ use crate::history::History;
 use crate::images;
 use crate::note::NoteColor;
 use crate::note_panel::{focus_body, post_it, PostIt};
+use crate::notify;
 use crate::peek::note_peek_width;
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
+use crate::reminder;
 use crate::resize::{resize_frame, resized, Edges, MIN_SIZE};
 use crate::rich::{self, BlockKind, Doc};
 use crate::rich_view;
@@ -50,6 +52,10 @@ const COPIED_FOR: Duration = Duration::from_millis(1500);
 const MODE_FADE_SECS: f32 = 0.12;
 /// How long the export panel shows its success before closing.
 const EXPORTED_FOR: Duration = Duration::from_secs(2);
+/// How often pending reminders are checked.
+const REMINDER_POLL: Duration = Duration::from_secs(30);
+/// One breath of a fired reminder's bar.
+const PULSE_SECS: f32 = 1.4;
 
 /// A task that delivers `message` once `duration` has passed, so a timeout
 /// needs no frames running meanwhile.
@@ -158,6 +164,8 @@ pub enum Message {
     StripScroll(f32),
     Tick(Instant),
     SaveTick,
+    /// Fires the reminders that have come due.
+    ReminderTick,
     ToggleVisibility,
     /// The tray icon was created (or failed to be).
     TrayReady(bool),
@@ -264,6 +272,11 @@ pub struct App {
     copies: u64,
     animating: bool,
     last_tick: Option<Instant>,
+    /// Notes whose reminder fired and that haven't been opened since; their
+    /// bars pulse.
+    pulsing: HashSet<Uuid>,
+    /// Seconds into the pulse, advanced by frames while anything pulses.
+    pulse_phase: f32,
     visible: bool,
     window_id: Option<window::Id>,
     monitor: Option<Size>,
@@ -408,6 +421,8 @@ impl App {
                     None => Task::none(),
                 }),
                 iced::system::theme().map(|m| Message::ThemeChanged(m.into())),
+                // Reminders missed while the app was closed fire now.
+                Task::done(Message::ReminderTick),
             ]),
         )
     }
@@ -456,6 +471,8 @@ impl App {
             copies: 0,
             animating: false,
             last_tick: None,
+            pulsing: HashSet::new(),
+            pulse_phase: 0.0,
             visible: true,
             window_id: None,
             monitor: None,
@@ -688,6 +705,12 @@ impl App {
             Message::TitleEdited(title) => {
                 if let Some(id) = self.active_note {
                     if let Some(note) = self.store.note_mut(id) {
+                        // A changed tag counts from now: `@15:00` typed at
+                        // 16:00 means tomorrow.
+                        let now = chrono::Local::now();
+                        if reminder::parse(&note.title, now) != reminder::parse(&title, now) {
+                            note.reminder_set_at = Some(now.with_timezone(&chrono::Utc));
+                        }
                         note.title = title;
                         note.updated_at = chrono::Utc::now();
                     }
@@ -920,7 +943,11 @@ impl App {
                 if export_closed {
                     self.export = None;
                 }
-                self.animating = mag_active || morph_active || collapse_active;
+                let pulse_active = !self.pulsing.is_empty();
+                if pulse_active {
+                    self.pulse_phase = (self.pulse_phase + dt) % PULSE_SECS;
+                }
+                self.animating = mag_active || morph_active || collapse_active || pulse_active;
                 if !self.animating {
                     self.last_tick = None;
                 }
@@ -935,6 +962,7 @@ impl App {
                 }
                 return focus;
             }
+            Message::ReminderTick => self.fire_reminders(chrono::Local::now()),
             Message::SaveTick => {
                 if self.store.should_save() {
                     let _ = self.store.save();
@@ -1280,6 +1308,7 @@ impl App {
                 .map(|entry| (entry, self.morph.progress())),
             collapse: self.collapse(),
             dimmed: self.dimmed_bars(),
+            pulse: self.bar_pulse(),
         })
         .width(Fill)
         .height(Fill)
@@ -1321,6 +1350,7 @@ impl App {
                         hovered: self.note_hovered,
                         dragging: self.note_drag.is_some(),
                         mode_fade: self.mode_fade.progress(),
+                        reminder: reminder::at(note).map(reminder::label),
                     });
                     let note_view = mouse_area(note_view)
                         .on_enter(Message::NoteHovered(true))
@@ -1446,6 +1476,9 @@ impl App {
         if self.hover_bar.is_some() && !self.peek.is_opening() {
             subs.push(iced::time::every(PEEK_POLL).map(Message::PeekTick));
         }
+        if self.reminders_pending() {
+            subs.push(iced::time::every(REMINDER_POLL).map(|_| Message::ReminderTick));
+        }
         Subscription::batch(subs)
     }
 
@@ -1464,6 +1497,7 @@ impl App {
         }
 
         let switching = self.active_note.is_some_and(|active| active != id);
+        self.pulsing.remove(&id);
         self.editor_content = Some(text_editor::Content::with_text(&note.content));
         self.history.clear();
         self.rendered_click = None;
@@ -1745,6 +1779,69 @@ impl App {
         self.animating = true;
     }
 
+    /// Fires every reminder due at `now`: a notification, a pulsing bar, and
+    /// the fired time saved at once so it never fires twice.
+    fn fire_reminders(&mut self, now: chrono::DateTime<chrono::Local>) {
+        let due: Vec<_> = self
+            .store
+            .notes()
+            .iter()
+            .filter_map(|note| Some((note.id, reminder::due(note, now)?)))
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        for (id, time) in due {
+            let Some(note) = self.store.note_mut(id) else {
+                continue;
+            };
+            note.reminder_fired = Some(time);
+            notify::reminder(&reminder::display(&note.title));
+            // The open note is already in view.
+            if !(self.active_note == Some(id) && self.morph.is_opening()) {
+                if self.pulsing.is_empty() {
+                    self.pulse_phase = 0.0;
+                }
+                self.pulsing.insert(id);
+            }
+        }
+        let _ = self.store.save();
+        self.store.did_save();
+        self.animating |= !self.pulsing.is_empty();
+    }
+
+    /// Some note has a reminder that hasn't fired yet.
+    fn reminders_pending(&self) -> bool {
+        self.store
+            .notes()
+            .iter()
+            .any(|note| reminder::pending(note).is_some())
+    }
+
+    /// How strongly each bar pulses (0..=1); empty while nothing pulses. A
+    /// stacked note's reminder pulses its stack's bar.
+    fn bar_pulse(&self) -> Vec<f32> {
+        if self.pulsing.is_empty() {
+            return Vec::new();
+        }
+        let wave = 0.5 - 0.5 * (std::f32::consts::TAU * self.pulse_phase / PULSE_SECS).cos();
+        let amount = 0.25 + 0.75 * wave;
+        let notes = self.store.notes();
+        self.entries()
+            .iter()
+            .map(|entry| {
+                let pulses = std::iter::once(entry.top)
+                    .chain(entry.members.iter().copied())
+                    .any(|i| self.pulsing.contains(&notes[i].id));
+                if pulses {
+                    amount
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
     /// Removes the collapsing note (if any) for good.
     fn finish_collapse(&mut self) {
         let index = self.collapse().map(|(entry, _)| entry);
@@ -1761,6 +1858,7 @@ impl App {
             }
         }
         self.store.delete_note(id);
+        self.pulsing.remove(&id);
         let _ = self.store.save();
         self.store.did_save();
         self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
@@ -4300,5 +4398,101 @@ mod tests {
             settle(&mut app);
             assert!(app.export.is_none());
         }
+    }
+
+    /// A title whose reminder is long due, so a tick fires it.
+    const DUE_TITLE: &str = "Call Anna @2026-01-02 09:00";
+
+    fn due_time() -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Local
+            .with_ymd_and_hms(2026, 1, 2, 9, 0, 0)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn reminder_tick_fires_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("Plain", ""), (DUE_TITLE, "")]);
+        assert!(app.reminders_pending());
+        let _ = app.update(Message::ReminderTick);
+        assert_eq!(app.store.notes()[1].reminder_fired, Some(due_time()));
+        assert_eq!(app.store.notes()[0].reminder_fired, None);
+        assert!(app.pulsing.contains(&ids[1]));
+        let pulse = app.bar_pulse();
+        assert_eq!(pulse[0], 0.0);
+        assert!(pulse[1] > 0.0);
+        assert!(app.animating, "the pulse runs on frames");
+        // Saved at once: a crash right after can't fire it again.
+        assert!(!app.store.is_dirty());
+        let saved = NoteStore::load(dir.path().join("notes.json"));
+        assert_eq!(saved.notes()[1].reminder_fired, Some(due_time()));
+        assert!(!app.reminders_pending(), "no timer once nothing is pending");
+
+        // A second tick fires nothing more.
+        app.pulsing.clear();
+        let _ = app.update(Message::ReminderTick);
+        assert!(app.pulsing.is_empty());
+    }
+
+    #[test]
+    fn fired_reminder_does_not_refire_after_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[(DUE_TITLE, "")]);
+        let _ = app.store.save();
+        let _ = app.update(Message::ReminderTick);
+        assert_eq!(app.pulsing.len(), 1);
+        drop(app);
+
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::ReminderTick);
+        assert!(app.pulsing.is_empty());
+        assert!(app.bar_pulse().is_empty());
+    }
+
+    #[test]
+    fn opening_note_stops_pulse() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[(DUE_TITLE, "")]);
+        let _ = app.update(Message::ReminderTick);
+        settle(&mut app);
+        assert!(app.animating, "the pulse keeps frames running");
+        let _ = app.update(Message::BarClicked(0));
+        assert!(!app.pulsing.contains(&ids[0]));
+        let _ = app.update(Message::ClosePanel);
+        settle(&mut app);
+        assert!(!app.animating, "no frames once nothing pulses");
+    }
+
+    #[test]
+    fn stacked_reminder_pulses_its_stack_bar() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("Top", ""), (DUE_TITLE, ""), ("Other", "")]);
+        assert!(app.store.stack(ids[1], ids[0]));
+        let _ = app.update(Message::ReminderTick);
+        let pulse = app.bar_pulse();
+        assert_eq!(pulse.len(), 2);
+        assert!(pulse[0] > 0.0);
+        assert_eq!(pulse[1], 0.0);
+    }
+
+    #[test]
+    fn editing_the_tag_moves_the_reminder_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let id = app.active_note.unwrap();
+        let anchor = |app: &App| app.store.notes()[0].reminder_set_at;
+        let _ = app.update(Message::TitleEdited("Call".into()));
+        assert_eq!(anchor(&app), None);
+        let _ = app.update(Message::TitleEdited("Call @tue".into()));
+        let set = anchor(&app);
+        assert!(set.is_some());
+        // Other edits to the title keep it.
+        let _ = app.update(Message::TitleEdited("Call Bob @tue".into()));
+        assert_eq!(anchor(&app), set);
+        app.store.note_mut(id).unwrap().reminder_set_at = None;
+        let _ = app.update(Message::TitleEdited("Call Bob @wed".into()));
+        assert!(anchor(&app).is_some());
     }
 }

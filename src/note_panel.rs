@@ -21,7 +21,7 @@ use std::path::Path;
 
 use iced::widget::{
     button, column, container, mouse_area, responsive, row, scrollable, stack, text, text_editor,
-    text_input, Space,
+    text_input, tooltip, Space,
 };
 use iced::{border, gradient, Border, Color, Element, Fill, Length, Padding, Shadow, Size};
 use iced::{keyboard, mouse, Theme, Vector};
@@ -120,6 +120,8 @@ pub struct PostIt<'a> {
     pub dragging: bool,
     /// Progress (0..=1) of the fade after switching edit/render mode.
     pub mode_fade: f32,
+    /// The title's reminder time (`Tue 15:00`); a bell shows while set.
+    pub reminder: Option<String>,
 }
 
 /// A button whose background darkens while pressed and whose label sinks
@@ -297,6 +299,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         hovered,
         dragging,
         mode_fade,
+        reminder,
     } = p;
     let mode_eased = ease_out_cubic(mode_fade);
     // The body that just appeared fades in after a mode switch.
@@ -363,11 +366,33 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             },
         );
 
+        // A bell left of the title while it sets a reminder; hovering it
+        // shows when.
+        let bell = reminder.map(|when| {
+            let label = container(text(when).size(TEXT_SM).font(theme::BODY_FONT))
+                .padding(Padding::new(space(1)).left(space(2)).right(space(2)))
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(theme.card().into()),
+                    text_color: Some(theme.ink(1.0)),
+                    border: border::rounded(RADIUS_CONTROL),
+                    shadow: theme.shadows(1.0)[0],
+                    ..Default::default()
+                });
+            tooltip(
+                container(icon(Icon::Bell, TEXT_SM).color(theme.ink(0.65 * a)))
+                    .padding(Padding::new(0.0).left(2)),
+                label,
+                tooltip::Position::Bottom,
+            )
+            .gap(4)
+        });
+
         // Any press on the header, title and buttons included, leaves edit
         // mode; the press still reaches them.
         let header = press_through(
             container(
                 row![
+                    bell,
                     // Cmd shortcuts reach the app instead of typing.
                     command_passthrough(title),
                     color_btn,

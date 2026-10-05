@@ -115,6 +115,11 @@ pub struct Note {
     /// The reminder time that has already fired for this note.
     #[serde(default)]
     pub reminder_fired: Option<DateTime<Utc>>,
+    /// When the title's reminder tag was last changed: relative tags
+    /// (`@15:00`, `@tomorrow`, `@mon`) count from it. `None` counts from
+    /// `updated_at`.
+    #[serde(default)]
+    pub reminder_set_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -133,6 +138,7 @@ impl Note {
             pinned: false,
             stack: None,
             reminder_fired: None,
+            reminder_set_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -162,6 +168,7 @@ mod tests {
         assert!(!note.pinned);
         assert_eq!(note.stack, None);
         assert_eq!(note.reminder_fired, None);
+        assert_eq!(note.reminder_set_at, None);
     }
 
     #[test]
