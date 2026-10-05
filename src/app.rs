@@ -132,6 +132,7 @@ pub enum Message {
     ClosePanel,
     DeleteRequested,
     CopyNote,
+    TogglePin,
     /// `COPIED_FOR` after the copy of this note with this number: the copy
     /// button's check goes, unless something was copied again since.
     CopiedExpired(Uuid, u64),
@@ -880,6 +881,27 @@ impl App {
                     ]);
                 }
             }
+            Message::TogglePin => {
+                let note = self
+                    .active_note
+                    .and_then(|id| self.store.notes().iter().find(|n| n.id == id));
+                if let Some(note) = note {
+                    // A member pins through its stack's top.
+                    let top = note.stack.unwrap_or(note.id);
+                    let pinned = self.top_pinned(note);
+                    self.store.set_pinned(top, !pinned);
+                    self.store.mark_dirty();
+                    // The open note's bar may have moved; its panel follows.
+                    self.sync_entries();
+                    if let Some(bar) = self
+                        .active_note
+                        .and_then(|id| self.id_entry(id))
+                        .and_then(|entry| self.strip_layout().bars.get(entry).copied())
+                    {
+                        self.anchor_y = bar.y + bar.height / 2.0;
+                    }
+                }
+            }
             Message::CopiedExpired(id, at) => {
                 if self.copied_at == Some((id, at)) {
                     self.copied_at = None;
@@ -1341,6 +1363,7 @@ impl App {
                         content_alpha: frame.content_alpha,
                         confirm_delete: self.confirm_delete.is_some(),
                         copied: self.copied_for(note.id),
+                        pinned: self.top_pinned(note),
                         color_picker_open: self.color_picker_open,
                         text_color_picker_open: self.text_color_picker_open,
                         hovered: self.note_hovered,
@@ -2573,6 +2596,15 @@ impl App {
         self.entries().iter().position(|e| e.holds(index))
     }
 
+    /// Whether the note's stack (or the note itself) is pinned: a pinned top
+    /// pins its whole stack.
+    fn top_pinned(&self, note: &crate::note::Note) -> bool {
+        match note.stack {
+            Some(top) => self.store.notes().iter().any(|n| n.id == top && n.pinned),
+            None => note.pinned,
+        }
+    }
+
     fn id_entry(&self, id: Uuid) -> Option<usize> {
         let index = self.store.notes().iter().position(|n| n.id == id)?;
         self.note_entry(index)
@@ -3236,6 +3268,45 @@ mod tests {
         let task = app.apply_paste(classify(None, None));
         assert!(task.units() > 0, "no clipboard read was started");
         assert_eq!(app.store.notes()[0].content, "ab");
+    }
+
+    #[test]
+    fn toggle_pin_moves_note_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", ""), ("b", ""), ("c", "")]);
+        let _ = app.update(Message::BarClicked(2));
+        settle(&mut app);
+        let before = app.anchor_y;
+        let _ = app.update(Message::TogglePin);
+        assert_eq!(app.store.notes()[0].id, ids[2]);
+        assert!(app.store.notes()[0].pinned);
+        assert!(app.store.is_dirty());
+        assert_eq!(app.active_note, Some(ids[2]));
+        assert_eq!(app.id_entry(ids[2]), Some(0));
+        assert!(app.anchor_y < before, "anchor follows the moved bar");
+        app.store.save().unwrap();
+        let reloaded = NoteStore::load(dir.path().join("notes.json"));
+        assert!(reloaded.notes()[0].pinned);
+        let _ = app.update(Message::TogglePin);
+        assert!(!app.store.notes()[0].pinned);
+        assert_eq!(app.active_note, Some(ids[2]));
+    }
+
+    #[test]
+    fn pinning_a_member_pins_its_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", ""), ("b", ""), ("c", "")]);
+        assert!(app.store.stack(ids[2], ids[1]));
+        app.sync_entries();
+        let member = app.store.notes().iter().position(|n| n.id == ids[2]);
+        let _ = app.open_note(member.unwrap());
+        settle(&mut app);
+        let _ = app.update(Message::TogglePin);
+        let order: Vec<_> = app.store.notes().iter().map(|n| n.id).collect();
+        assert_eq!(order, vec![ids[1], ids[2], ids[0]]);
+        assert!(app.store.notes()[..2].iter().all(|n| n.pinned));
+        assert!(!app.store.notes()[2].pinned);
+        assert_eq!(app.active_note, Some(ids[2]));
     }
 
     #[test]

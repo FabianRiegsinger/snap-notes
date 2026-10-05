@@ -113,6 +113,8 @@ pub struct PostIt<'a> {
     pub confirm_delete: bool,
     /// The note was just copied; the copy button shows a check.
     pub copied: bool,
+    /// The note (its stack's top) is pinned; the pin button draws at full ink.
+    pub pinned: bool,
     pub color_picker_open: bool,
     /// The toolbar's text color grid is open.
     pub text_color_picker_open: bool,
@@ -156,6 +158,30 @@ fn header_button<'a>(
             _ => None,
         },
         text_color: theme.ink(0.65 * alpha),
+        border: border::rounded(RADIUS_CONTROL),
+        ..Default::default()
+    })
+    .into()
+}
+
+/// The header's pin toggle: full ink while pinned, a faint header button
+/// otherwise.
+fn pin_button<'a>(pinned: bool, theme: theme::Theme, alpha: f32) -> Element<'a, Message> {
+    if !pinned {
+        return header_button(Icon::Pin, Message::TogglePin, theme, alpha);
+    }
+    pressable(
+        icon(Icon::Pin, TEXT_SM),
+        Padding::new(space(1)).left(space(2)).right(space(2)),
+        Message::TogglePin,
+    )
+    .style(move |_theme: &Theme, status| button::Style {
+        background: match status {
+            button::Status::Hovered => Some(theme.ink(0.12 * alpha).into()),
+            button::Status::Pressed => Some(theme.ink(0.22 * alpha).into()),
+            _ => None,
+        },
+        text_color: theme.ink(alpha),
         border: border::rounded(RADIUS_CONTROL),
         ..Default::default()
     })
@@ -294,6 +320,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         content_alpha: a,
         confirm_delete,
         copied,
+        pinned,
         color_picker_open,
         text_color_picker_open,
         hovered,
@@ -396,6 +423,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                     // Cmd shortcuts reach the app instead of typing.
                     command_passthrough(title),
                     color_btn,
+                    pin_button(pinned, theme, controls),
                     header_button(
                         if copied { Icon::Check } else { Icon::Copy },
                         Message::CopyNote,

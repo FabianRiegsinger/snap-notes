@@ -169,7 +169,6 @@ impl NoteStore {
     /// the end of the pinned group, unpinning to the start of the unpinned
     /// group. A top note carries its members along (they take its pin state);
     /// a stack member is ignored, as it follows its top.
-    #[allow(dead_code)] // used from Task 5
     pub fn set_pinned(&mut self, id: Uuid, pinned: bool) {
         let Some((at, members)) = self.group(id) else {
             return;
