@@ -8,6 +8,7 @@ use crate::note::Note;
 use crate::note_panel::{morph_paper, PLACEHOLDER};
 use crate::reminder;
 use crate::rich;
+use crate::strip_model::{self, Entry};
 use crate::theme::{self, Theme, TITLE_FONT};
 
 use iced::advanced::renderer::{self, Quad};
@@ -17,6 +18,7 @@ use iced::alignment;
 use iced::border;
 use iced::widget::text::{LineHeight, Shaping, Wrapping};
 use iced::{Border, Color, Font, Pixels, Point, Rectangle, Shadow, Size};
+use uuid::Uuid;
 
 /// Same insets and type sizes as the open note.
 const PADDING_X: f32 = 18.0;
@@ -44,6 +46,10 @@ const TRASH_INSET: f32 = 8.0;
 const CONFIRM_BUTTON: Size = Size::new(68.0, 24.0);
 const CONFIRM_GAP: f32 = 8.0;
 const CONFIRM_HEIGHT: f32 = BODY_LINE + CONFIRM_GAP + 24.0;
+/// The stack peek's "Unstack" button below its list.
+const UNSTACK_BUTTON: Size = Size::new(76.0, 24.0);
+/// Shown in a stack's list for a note without a title.
+const UNTITLED: &str = "Untitled";
 /// Rough glyph widths as a share of the font size, kept generous so the
 /// estimated text height never cuts text off.
 const TITLE_GLYPH: f32 = 0.62;
@@ -58,6 +64,9 @@ pub struct PeekText {
     pub reminder: Option<String>,
     /// The peek's width, which the text was cut and wrapped for.
     pub width: f32,
+    /// A stack's notes, top first, by id and title: listed in place of the
+    /// body lines. Empty for a single note.
+    pub stack: Vec<(Uuid, String)>,
 }
 
 /// Where the peek and its parts are. Text and button positions are those of
@@ -76,6 +85,10 @@ pub struct PeekLayout {
     /// The confirmation's buttons, used while it shows.
     pub delete: Rectangle,
     pub cancel: Rectangle,
+    /// A stack's list rows, one per note of `PeekText::stack`.
+    pub stack_rows: Vec<Rectangle>,
+    /// A stack's "Unstack" button below its list.
+    pub unstack: Option<Rectangle>,
 }
 
 /// The width the peek of `note` asks for: the open note's, or the default
@@ -180,7 +193,30 @@ pub fn peek_text(note: &Note, width: f32) -> PeekText {
             .collect(),
         progress: rich::task_progress(&note.content),
         reminder: reminder::at(note).map(reminder::label),
+        stack: Vec::new(),
     }
+}
+
+/// The peek of `entry`'s bar: its top note's, and for a stack the titles of
+/// all its notes in place of the body, with the header counting the whole
+/// stack's tasks like its bar.
+pub fn entry_peek_text(notes: &[Note], entry: &Entry, width: f32) -> PeekText {
+    let mut text = peek_text(&notes[entry.top], width);
+    if entry.members.is_empty() {
+        return text;
+    }
+    let max_chars = body_chars_per_line(width);
+    text.lines.clear();
+    text.progress = strip_model::progress(notes, std::slice::from_ref(entry))[0];
+    text.stack = entry
+        .notes()
+        .map(|i| {
+            let title = notes[i].title.trim();
+            let title = if title.is_empty() { UNTITLED } else { title };
+            (notes[i].id, truncate(title, max_chars))
+        })
+        .collect();
+    text
 }
 
 fn title_height(text: &PeekText) -> f32 {
@@ -191,7 +227,11 @@ fn title_height(text: &PeekText) -> f32 {
 /// which shows a placeholder for an empty body, and room for the delete
 /// confirmation while `confirming`).
 pub fn peek_height(text: &PeekText, confirming: bool) -> f32 {
-    let mut body = text.lines.len().max(1) as f32 * BODY_LINE;
+    let mut body = if text.stack.is_empty() {
+        text.lines.len().max(1) as f32 * BODY_LINE
+    } else {
+        text.stack.len() as f32 * BODY_LINE + CONFIRM_GAP + UNSTACK_BUTTON.height
+    };
     if confirming {
         body = body.max(CONFIRM_HEIGHT);
     }
@@ -236,6 +276,20 @@ pub fn peek_layout(
     let divider_y = title.y + title_height(text) + DIVIDER_GAP;
     let body = Point::new(title.x, divider_y + 1.0 + BODY_GAP);
     let buttons_y = body.y + BODY_LINE + CONFIRM_GAP;
+    let stack_rows: Vec<Rectangle> = (0..text.stack.len())
+        .map(|i| {
+            Rectangle::new(
+                Point::new(body.x, body.y + i as f32 * BODY_LINE),
+                Size::new(inner_width(text.width), BODY_LINE),
+            )
+        })
+        .collect();
+    let unstack = stack_rows.last().map(|last| {
+        Rectangle::new(
+            Point::new(body.x, last.y + last.height + CONFIRM_GAP),
+            UNSTACK_BUTTON,
+        )
+    });
     PeekLayout {
         rect: rect_at(ease_out_cubic(progress)),
         title,
@@ -255,6 +309,8 @@ pub fn peek_layout(
             Point::new(body.x + CONFIRM_BUTTON.width + CONFIRM_GAP, buttons_y),
             CONFIRM_BUTTON,
         ),
+        stack_rows,
+        unstack,
     }
 }
 
@@ -332,6 +388,7 @@ fn draw_button(
 pub fn draw_peek(
     renderer: &mut iced::Renderer,
     note: &Note,
+    text: &PeekText,
     bar: Rectangle,
     bounds: Rectangle,
     theme: &Theme,
@@ -342,8 +399,7 @@ pub fn draw_peek(
     cursor: Option<Point>,
     width: f32,
 ) {
-    let text = peek_text(note, width);
-    let layout = peek_layout(bar, bounds, progress, &text, confirming, width);
+    let layout = peek_layout(bar, bounds, progress, text, confirming, width);
     let rect = layout.rect;
     let t = ease_out_cubic(progress);
     // Gradient quads draw no shadow, so each shadow sits on its own solid
@@ -417,7 +473,27 @@ pub fn draw_peek(
     }
 
     let hovered = |r: Rectangle| cursor.is_some_and(|c| r.contains(c));
-    let title_width = title_width(&text);
+    // The stack row under the cursor is shaded, before any text draws.
+    if let Some(row) = layout
+        .stack_rows
+        .iter()
+        .find(|r| !confirming && hovered(**r))
+    {
+        renderer::Renderer::fill_quad(
+            renderer,
+            Quad {
+                bounds: row.expand(2.0),
+                border: Border {
+                    radius: theme::RADIUS_CONTROL.into(),
+                    ..Default::default()
+                },
+                shadow: Shadow::default(),
+                snap: true,
+            },
+            theme.ink(0.06 * alpha),
+        );
+    }
+    let title_width = title_width(text);
     let mut draw_text = |content: String,
                          at: Point,
                          font: Font,
@@ -463,7 +539,7 @@ pub fn draw_peek(
             TITLE_SIZE,
             TITLE_LINE,
             LineHeight::Absolute(Pixels(TITLE_LINE)),
-            title_rows(title, &text),
+            title_rows(title, text),
             theme.ink(alpha),
         ),
         None => draw_text(
@@ -490,7 +566,7 @@ pub fn draw_peek(
             1,
             theme.ink(alpha),
         );
-    } else if text.lines.is_empty() {
+    } else if text.lines.is_empty() && text.stack.is_empty() {
         draw_text(
             PLACEHOLDER.into(),
             layout.body,
@@ -504,7 +580,8 @@ pub fn draw_peek(
     }
     for (i, content) in text
         .lines
-        .into_iter()
+        .iter()
+        .cloned()
         .enumerate()
         .take_while(|_| !confirming)
     {
@@ -518,6 +595,37 @@ pub fn draw_peek(
             LineHeight::Relative(theme::BODY_LINE_HEIGHT),
             1,
             theme.ink(0.8 * alpha),
+        );
+    }
+
+    // A stack: its notes' titles, each opening its note, then "Unstack".
+    let shade_if = |r: Rectangle, base: f32| if hovered(r) { base + 0.08 } else { base };
+    for ((_, title), row) in text
+        .stack
+        .iter()
+        .zip(&layout.stack_rows)
+        .take_while(|_| !confirming)
+    {
+        let faint = if title == UNTITLED { 0.35 } else { 0.8 };
+        draw_text(
+            title.clone(),
+            row.position(),
+            BODY_FONT,
+            BODY_SIZE,
+            BODY_LINE,
+            LineHeight::Relative(theme::BODY_LINE_HEIGHT),
+            1,
+            theme.ink(faint * alpha),
+        );
+    }
+    if let Some(unstack) = layout.unstack.filter(|_| !confirming) {
+        draw_button(
+            renderer,
+            "Unstack",
+            unstack,
+            theme.ink(shade_if(unstack, 0.12) * alpha),
+            theme.ink(alpha),
+            rect,
         );
     }
 
@@ -576,7 +684,6 @@ pub fn draw_peek(
         rect,
     );
     if confirming {
-        let shade_if = |r: Rectangle, base: f32| if hovered(r) { base + 0.08 } else { base };
         draw_button(
             renderer,
             "Delete",
@@ -753,6 +860,59 @@ mod tests {
         assert!(inside(l.rect, l.reminder));
         assert!(title_width(&text) < title_width(&peek_text(&note("Call", "- [ ] a"), PEEK_WIDTH)));
         assert_eq!(peek_text(&note("Call", ""), PEEK_WIDTH).reminder, None);
+    }
+
+    #[test]
+    fn stack_peek_lists_its_notes_and_fits_them() {
+        let notes = [
+            note("Top", "- [x] a"),
+            note("  ", "- [ ] b"),
+            note("Third", "body"),
+        ];
+        let entry = Entry {
+            top: 0,
+            members: vec![1, 2],
+        };
+        let text = entry_peek_text(&notes, &entry, PEEK_WIDTH);
+        let titles: Vec<_> = text.stack.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(titles, ["Top", "Untitled", "Third"]);
+        let ids: Vec<_> = text.stack.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [notes[0].id, notes[1].id, notes[2].id]);
+        // The header counts the whole stack's tasks, like its bar.
+        assert_eq!(text.progress, Some((1, 2)));
+        let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
+        let l = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
+        assert_eq!(l.stack_rows.len(), 3);
+        for (i, row) in l.stack_rows.iter().enumerate() {
+            assert!(inside(l.rect, *row));
+            assert!(row.y > l.divider_y);
+            assert_eq!(row.height, BODY_LINE);
+            assert_eq!(row.y, l.body.y + i as f32 * BODY_LINE);
+        }
+        let unstack = l.unstack.expect("a stack's peek has an Unstack button");
+        assert!(inside(l.rect, unstack));
+        let last = l.stack_rows[2];
+        assert!(unstack.y >= last.y + last.height);
+        assert!(!unstack.intersects(&l.trash));
+        // Taller than one note's peek, and room for the delete question too.
+        let single = peek_text(&notes[0], PEEK_WIDTH);
+        assert!(peek_height(&text, false) > peek_height(&single, false));
+        assert!(peek_height(&text, true) >= peek_height(&text, false));
+    }
+
+    #[test]
+    fn single_note_peek_has_no_stack_list() {
+        let notes = [note("T", "milk")];
+        let entry = Entry {
+            top: 0,
+            members: Vec::new(),
+        };
+        let text = entry_peek_text(&notes, &entry, PEEK_WIDTH);
+        assert!(text.stack.is_empty());
+        assert_eq!(text.lines, ["milk"]);
+        let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
+        let l = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
+        assert!(l.stack_rows.is_empty() && l.unstack.is_none());
     }
 
     #[test]

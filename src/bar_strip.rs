@@ -1,7 +1,7 @@
 use crate::animation::MagnificationState;
 use crate::app::{DragState, Message};
 use crate::note::Note;
-use crate::peek::{draw_peek, note_peek_width, peek_layout, peek_text};
+use crate::peek::{draw_peek, entry_peek_text, note_peek_width, peek_layout, PeekText};
 use crate::settings::BarSettings;
 use crate::strip_model::Entry;
 use crate::theme;
@@ -85,6 +85,35 @@ fn stack_edges(rect: Rectangle) -> [Rectangle; 2] {
             Size::new(1.0, (rect.height - 2.0 * inset).max(0.0)),
         )
     })
+}
+
+/// Where a dragged bar would land when dropped at a height over `bar`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropZone {
+    Before,
+    /// The middle half: stacks the dragged note under this bar's.
+    Onto,
+    After,
+}
+
+/// The zone of `bar` a drag released at `y` falls in; above or below the
+/// bar counts as its edge.
+pub fn drop_zone(bar: Rectangle, y: f32) -> DropZone {
+    let quarter = bar.height / 4.0;
+    if y < bar.y + quarter {
+        DropZone::Before
+    } else if y > bar.y + bar.height - quarter {
+        DropZone::After
+    } else {
+        DropZone::Onto
+    }
+}
+
+/// The bar a drag of bar `dragged` released at `y` stacks onto, if any.
+pub fn stack_target(bars: &[Rectangle], dragged: usize, y: f32) -> Option<usize> {
+    bars.iter()
+        .enumerate()
+        .position(|(i, bar)| i != dragged && drop_zone(*bar, y) == DropZone::Onto)
 }
 
 /// The bar's rectangle: the open note's bar grows to the left from its right
@@ -332,20 +361,22 @@ impl<'a> BarStrip<'a> {
         )
     }
 
+    /// The note bar `i` (at `bar`) peeks, and the peek's width and text.
+    fn peek_parts(&self, i: usize, bar: Rectangle) -> Option<(&'a Note, f32, PeekText)> {
+        let note = self.note(i)?;
+        let width = note_peek_width(note, self.default_note_width, bar);
+        let text = entry_peek_text(self.notes, self.entries.get(i)?, width);
+        Some((note, width, text))
+    }
+
     /// Bar whose open peek is under `pos`, if any.
     fn peek_hit(&self, bounds: Rectangle, pos: Point) -> Option<usize> {
         let (i, _) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
-        let note = self.note(i)?;
-        peek_target(
-            bar,
-            bounds,
-            note,
-            self.peek_confirm,
-            note_peek_width(note, self.default_note_width, bar),
-        )
-        .contains(pos)
-        .then_some(i)
+        let (_, width, text) = self.peek_parts(i, bar)?;
+        peek_target(bar, bounds, &text, self.peek_confirm, width)
+            .contains(pos)
+            .then_some(i)
     }
 
     /// The hover update for a cursor at `pos`: magnify around it inside the
@@ -362,22 +393,16 @@ impl<'a> BarStrip<'a> {
     }
 
     /// What a press at `pos` on the open peek does: delete-related clicks
-    /// once it is fully open, otherwise opening the note. While the
-    /// confirmation shows, other presses on the peek do nothing.
+    /// and a stack's rows and Unstack button once it is fully open,
+    /// otherwise opening the note. While the confirmation shows, other
+    /// presses on the peek do nothing.
     fn peek_press(&self, bounds: Rectangle, pos: Point) -> Option<Option<Message>> {
         let i = self.peek_hit(bounds, pos)?;
         let (_, progress) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
-        let note = self.note(i)?;
-        let width = note_peek_width(note, self.default_note_width, bar);
-        let parts = peek_layout(
-            bar,
-            bounds,
-            1.0,
-            &peek_text(note, width),
-            self.peek_confirm,
-            width,
-        );
+        let (_, width, text) = self.peek_parts(i, bar)?;
+        let parts = peek_layout(bar, bounds, 1.0, &text, self.peek_confirm, width);
+        let row = parts.stack_rows.iter().position(|r| r.contains(pos));
         let open = progress >= 0.99;
         Some(if self.peek_confirm {
             if parts.delete.contains(pos) {
@@ -389,6 +414,10 @@ impl<'a> BarStrip<'a> {
             }
         } else if open && parts.trash.contains(pos) {
             Some(Message::PeekDeleteRequested(i))
+        } else if let Some(row) = row.filter(|_| open) {
+            Some(Message::OpenStackMember(text.stack[row].0))
+        } else if open && parts.unstack.is_some_and(|u| u.contains(pos)) {
+            Some(Message::Unstack(i))
         } else {
             Some(Message::BarClicked(i))
         })
@@ -450,10 +479,11 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         for (i, bar_rect) in bars.iter().enumerate() {
             if let Some((peek_index, progress)) = self.peek {
                 if peek_index == i && progress > 0.0 {
-                    if let Some(note) = self.note(i) {
+                    if let Some((note, width, text)) = self.peek_parts(i, *bar_rect) {
                         draw_peek(
                             renderer,
                             note,
+                            &text,
                             *bar_rect,
                             bounds,
                             &self.theme,
@@ -462,7 +492,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             self.paper_tint,
                             self.peek_confirm,
                             cursor.position(),
-                            note_peek_width(note, self.default_note_width, *bar_rect),
+                            width,
                         );
                     }
                     continue;
@@ -741,26 +771,44 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                         ),
                     );
 
-                    let target = self.insertion_index(drag.current_y, bars);
-                    let indicator_y = if target < bars.len() {
-                        bars[target].y - self.bars.gap / 2.0
+                    // Over a bar's middle the drop stacks: that bar is ringed.
+                    if let Some(onto) = stack_target(bars, drag.bar_index, drag.current_y) {
+                        renderer::Renderer::fill_quad(
+                            renderer,
+                            renderer::Quad {
+                                bounds: bars[onto].expand(2.0),
+                                border: iced::Border {
+                                    radius: (CORNER_RADIUS + 2.0).into(),
+                                    width: 1.5,
+                                    color: self.theme.ink(0.8),
+                                },
+                                shadow: Default::default(),
+                                snap: true,
+                            },
+                            Color::TRANSPARENT,
+                        );
                     } else {
-                        bars.last()
-                            .map_or(bounds.y, |b| b.y + b.height + self.bars.gap / 2.0)
-                    };
-                    renderer::Renderer::fill_quad(
-                        renderer,
-                        renderer::Quad {
-                            bounds: Rectangle::new(
-                                Point::new(bounds.x + bounds.width - 20.0, indicator_y - 1.0),
-                                Size::new(20.0, 2.0),
-                            ),
-                            border: Default::default(),
-                            shadow: Default::default(),
-                            snap: true,
-                        },
-                        self.theme.ink(0.8),
-                    );
+                        let target = self.insertion_index(drag.current_y, bars);
+                        let indicator_y = if target < bars.len() {
+                            bars[target].y - self.bars.gap / 2.0
+                        } else {
+                            bars.last()
+                                .map_or(bounds.y, |b| b.y + b.height + self.bars.gap / 2.0)
+                        };
+                        renderer::Renderer::fill_quad(
+                            renderer,
+                            renderer::Quad {
+                                bounds: Rectangle::new(
+                                    Point::new(bounds.x + bounds.width - 20.0, indicator_y - 1.0),
+                                    Size::new(20.0, 2.0),
+                                ),
+                                border: Default::default(),
+                                shadow: Default::default(),
+                                snap: true,
+                            },
+                            self.theme.ink(0.8),
+                        );
+                    }
                 }
             }
         }
@@ -919,11 +967,11 @@ fn search_glyph(slot: Rectangle) -> SearchGlyph {
 pub fn peek_target(
     bar: Rectangle,
     bounds: Rectangle,
-    note: &Note,
+    text: &PeekText,
     confirming: bool,
     width: f32,
 ) -> Rectangle {
-    peek_layout(bar, bounds, 1.0, &peek_text(note, width), confirming, width).rect
+    peek_layout(bar, bounds, 1.0, text, confirming, width).rect
 }
 
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
@@ -955,6 +1003,7 @@ fn draw_slot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peek::peek_text;
 
     fn bounds(height: f32) -> Rectangle {
         Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, height))
@@ -1156,11 +1205,83 @@ mod tests {
     }
 
     #[test]
+    fn drop_zone_edges() {
+        let bar = Rectangle::new(Point::new(40.0, 100.0), Size::new(8.0, 40.0));
+        assert_eq!(drop_zone(bar, 90.0), DropZone::Before);
+        assert_eq!(drop_zone(bar, 109.0), DropZone::Before);
+        assert_eq!(drop_zone(bar, 110.0), DropZone::Onto);
+        assert_eq!(drop_zone(bar, 120.0), DropZone::Onto);
+        assert_eq!(drop_zone(bar, 130.0), DropZone::Onto);
+        assert_eq!(drop_zone(bar, 131.0), DropZone::After);
+        assert_eq!(drop_zone(bar, 150.0), DropZone::After);
+        let bars = [bar, Rectangle { y: 150.0, ..bar }];
+        assert_eq!(stack_target(&bars, 1, 120.0), Some(0));
+        assert_eq!(stack_target(&bars, 0, 120.0), None, "not onto itself");
+        assert_eq!(stack_target(&bars, 1, 145.0), None, "between bars");
+    }
+
+    #[test]
+    fn stack_peek_rows_open_their_notes() {
+        let notes = [
+            crate::note::Note::new(crate::note::PALETTE[0]),
+            crate::note::Note::new(crate::note::PALETTE[1]),
+        ];
+        let mut notes = notes;
+        notes[1].stack = Some(notes[0].id);
+        let entries = crate::strip_model::entries(&notes);
+        let magnification = MagnificationState::new();
+        let drag = None;
+        let bars = BarSettings::default();
+        let strip = BarStrip {
+            notes: &notes,
+            entries: &entries,
+            progress: &[],
+            magnification: &magnification,
+            drag: &drag,
+            scroll_offset: 0.0,
+            peek: Some((0, 1.0)),
+            bars: &bars,
+            height_fraction: 1.0,
+            paper_tint: 0.0,
+            default_note_width: 260.0,
+            peek_confirm: false,
+            theme: theme::Theme::default(),
+            open: None,
+            collapse: None,
+            dimmed: Vec::new(),
+            pulse: Vec::new(),
+        };
+        let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
+        let bar = strip.layout_in(bounds).bars[0];
+        let (_, width, text) = strip.peek_parts(0, bar).unwrap();
+        let parts = peek_layout(bar, bounds, 1.0, &text, false, width);
+        let press = |pos| strip.peek_press(bounds, pos);
+        let member = notes[1].id;
+        assert!(matches!(
+            press(parts.stack_rows[1].center()),
+            Some(Some(Message::OpenStackMember(id))) if id == member
+        ));
+        let top = notes[0].id;
+        assert!(matches!(
+            press(parts.stack_rows[0].center()),
+            Some(Some(Message::OpenStackMember(id))) if id == top
+        ));
+        assert!(matches!(
+            press(parts.unstack.unwrap().center()),
+            Some(Some(Message::Unstack(0)))
+        ));
+        assert!(matches!(
+            press(parts.title),
+            Some(Some(Message::BarClicked(0)))
+        ));
+    }
+
+    #[test]
     fn peek_target_finds_open_peek() {
         let bar = Rectangle::new(Point::new(48.0, 400.0), Size::new(6.0, 30.0));
         let strip = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let note = crate::note::Note::new(crate::note::PALETTE[0]);
-        let rect = peek_target(bar, strip, &note, false, 260.0);
+        let rect = peek_target(bar, strip, &peek_text(&note, 260.0), false, 260.0);
         assert!(rect.width > STRIP_WIDTH);
         assert!(rect.contains(Point::new(bar.x - 100.0, bar.center().y)));
     }
@@ -1195,7 +1316,7 @@ mod tests {
         let bar = strip.layout_in(bounds).bars[0];
         let width = note_peek_width(&notes[0], strip.default_note_width, bar);
         assert_eq!(
-            peek_target(bar, bounds, &notes[0], false, width).width,
+            peek_target(bar, bounds, &peek_text(&notes[0], width), false, width).width,
             260.0
         );
         let inside = Point::new(bar.x + bar.width - 100.0, bar.center().y);
@@ -1268,7 +1389,7 @@ mod tests {
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
-        let peek = peek_target(bar, bounds, &notes[0], false, 260.0);
+        let peek = peek_target(bar, bounds, &peek_text(&notes[0], 260.0), false, 260.0);
         // The peek's top right corner (where its trash sits) lies inside the
         // strip, above the bar it grew from.
         let on_peek_in_strip = Point::new(peek.x + peek.width - 4.0, peek.y + 4.0);

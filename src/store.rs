@@ -224,7 +224,6 @@ impl NoteStore {
     /// group (nested stacks are not supported). The note takes the stack's pin
     /// state. Returns false (and changes nothing) for a missing note, a note
     /// stacked on itself, or a target that is itself a stack member.
-    #[allow(dead_code)] // used from Task 6
     pub fn stack(&mut self, id: Uuid, onto_top: Uuid) -> bool {
         if id == onto_top {
             return false;
@@ -251,7 +250,6 @@ impl NoteStore {
 
     /// Dissolves the stack under `top`: its members stay right after it, now
     /// as top-level notes.
-    #[allow(dead_code)] // used from Task 6
     pub fn unstack(&mut self, top: Uuid) {
         for note in &mut self.notes {
             if note.stack == Some(top) {
@@ -288,7 +286,8 @@ impl NoteStore {
 
 /// Makes a hand-edited or damaged file's stacks valid: a note stacked on a
 /// missing note, or on a note that is itself stacked, becomes top-level, and
-/// each stack's members move right after its top (in their order).
+/// each stack's members move right after its top (in their order) and take
+/// its pin state. Pinned stacks and notes then come first, in their order.
 fn normalize_stacks(notes: Vec<Note>) -> Vec<Note> {
     let tops: HashSet<Uuid> = notes
         .iter()
@@ -304,11 +303,9 @@ fn normalize_stacks(notes: Vec<Note>) -> Vec<Note> {
             n
         })
         .partition(|n| n.stack.is_none());
-    if members.is_empty() {
-        return ordered;
-    }
+    let regrouped = !members.is_empty();
     let mut i = 0;
-    while i < ordered.len() {
+    while i < ordered.len() && !members.is_empty() {
         let top = ordered[i].id;
         let (mine, rest): (Vec<Note>, Vec<Note>) =
             members.into_iter().partition(|n| n.stack == Some(top));
@@ -317,8 +314,22 @@ fn normalize_stacks(notes: Vec<Note>) -> Vec<Note> {
         ordered.splice(i + 1..i + 1, mine);
         i += 1 + count;
     }
-    for (order, note) in ordered.iter_mut().enumerate() {
-        note.order = order;
+    let mut pinned = false;
+    for note in &mut ordered {
+        match note.stack {
+            None => pinned = note.pinned,
+            Some(_) => note.pinned = pinned,
+        }
+    }
+    let pinned_first = ordered.windows(2).all(|w| w[0].pinned || !w[1].pinned);
+    if !pinned_first {
+        // Stable, so each stack stays together and in order.
+        ordered.sort_by_key(|n| !n.pinned);
+    }
+    if regrouped || !pinned_first {
+        for (order, note) in ordered.iter_mut().enumerate() {
+            note.order = order;
+        }
     }
     ordered
 }
@@ -380,6 +391,26 @@ mod tests {
         assert_eq!(ids(&loaded), vec![id[0], id[2], id[1], id[3]]);
         let stacks: Vec<_> = loaded.notes().iter().map(|n| n.stack).collect();
         assert_eq!(stacks, vec![None, Some(id[0]), None, None]);
+        let orders: Vec<_> = loaded.notes().iter().map(|n| n.order).collect();
+        assert_eq!(orders, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn load_restores_pin_invariants() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.json");
+        let mut store = NoteStore::load(path.clone());
+        let id: Vec<Uuid> = (0..4).map(|_| store.add_note(&PALETTE)).collect();
+        // A pinned member of an unpinned top, and a pinned stack last.
+        store.note_mut(id[1]).unwrap().stack = Some(id[0]);
+        store.note_mut(id[1]).unwrap().pinned = true;
+        store.note_mut(id[2]).unwrap().pinned = true;
+        store.note_mut(id[3]).unwrap().stack = Some(id[2]);
+        store.save().unwrap();
+        let loaded = NoteStore::load(path);
+        assert_eq!(ids(&loaded), vec![id[2], id[3], id[0], id[1]]);
+        let pinned: Vec<_> = loaded.notes().iter().map(|n| n.pinned).collect();
+        assert_eq!(pinned, vec![true, true, false, false]);
         let orders: Vec<_> = loaded.notes().iter().map(|n| n.order).collect();
         assert_eq!(orders, vec![0, 1, 2, 3]);
     }

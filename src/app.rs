@@ -1,6 +1,7 @@
 use crate::animation::{ease_out_cubic, morph_frame, MagnificationState, Morph, MorphFrame};
 use crate::bar_strip::{
-    band, compute_layout, peek_target, BarStrip, StripLayout, SETTINGS_SLOT, STRIP_WIDTH,
+    band, compute_layout, peek_target, stack_target, BarStrip, StripLayout, SETTINGS_SLOT,
+    STRIP_WIDTH,
 };
 use crate::export::{self, ExportFormat};
 use crate::export_panel::{export_panel, ExportJob, ExportState, ExportStatus, ExportView};
@@ -9,7 +10,7 @@ use crate::images;
 use crate::note::NoteColor;
 use crate::note_panel::{focus_body, post_it, PostIt};
 use crate::notify;
-use crate::peek::note_peek_width;
+use crate::peek::{entry_peek_text, note_peek_width};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
 use crate::reminder;
 use crate::resize::{resize_frame, resized, Edges, MIN_SIZE};
@@ -162,6 +163,16 @@ pub enum Message {
     DragStart(usize, f32),
     DragMove(f32),
     DragEnd,
+    /// A dragged bar dropped onto another bar's middle: its note (with its
+    /// stack) goes under that bar's note. Both are bar (entry) indices.
+    StackOnto {
+        dragged: usize,
+        target: usize,
+    },
+    /// The stack peek's "Unstack" button on this bar.
+    Unstack(usize),
+    /// A title in the stack peek's list.
+    OpenStackMember(Uuid),
     StripScroll(f32),
     Tick(Instant),
     SaveTick,
@@ -891,15 +902,7 @@ impl App {
                     let pinned = self.top_pinned(note);
                     self.store.set_pinned(top, !pinned);
                     self.store.mark_dirty();
-                    // The open note's bar may have moved; its panel follows.
-                    self.sync_entries();
-                    if let Some(bar) = self
-                        .active_note
-                        .and_then(|id| self.id_entry(id))
-                        .and_then(|entry| self.strip_layout().bars.get(entry).copied())
-                    {
-                        self.anchor_y = bar.y + bar.height / 2.0;
-                    }
+                    self.follow_open_bar();
                 }
             }
             Message::CopiedExpired(id, at) => {
@@ -1073,7 +1076,17 @@ impl App {
             Message::DragEnd => {
                 if let Some(drag) = self.drag.take() {
                     let moved = (drag.current_y - drag.origin_y).abs() > 5.0;
-                    if moved {
+                    let onto = moved
+                        .then(|| {
+                            stack_target(&self.strip_layout().bars, drag.bar_index, drag.current_y)
+                        })
+                        .flatten();
+                    if let Some(target) = onto {
+                        return self.update(Message::StackOnto {
+                            dragged: drag.bar_index,
+                            target,
+                        });
+                    } else if moved {
                         let bars = self.bar_centers();
                         let mut target = bars.len();
                         for (i, center) in bars.iter().enumerate() {
@@ -1096,6 +1109,35 @@ impl App {
                     } else if let Some(index) = self.entry_note(drag.bar_index) {
                         return self.open_note(index);
                     }
+                }
+            }
+            Message::StackOnto { dragged, target } => {
+                let entries = self.entries();
+                let (Some(from), Some(onto)) = (entries.get(dragged), entries.get(target)) else {
+                    return Task::none();
+                };
+                let notes = self.store.notes();
+                let (id, onto) = (notes[from.top].id, notes[onto.top].id);
+                if !self.dying(id) && !self.dying(onto) && self.store.stack(id, onto) {
+                    self.store.mark_dirty();
+                    self.follow_open_bar();
+                }
+            }
+            Message::Unstack(entry) => {
+                let top = self
+                    .entries()
+                    .get(entry)
+                    .map(|e| self.store.notes()[e.top].id);
+                if let Some(top) = top.filter(|top| !self.dying(*top)) {
+                    self.hide_peek();
+                    self.store.unstack(top);
+                    self.store.mark_dirty();
+                    self.follow_open_bar();
+                }
+            }
+            Message::OpenStackMember(id) => {
+                if let Some(index) = self.store.notes().iter().position(|n| n.id == id) {
+                    return self.open_note(index);
                 }
             }
             Message::StripScroll(delta) => {
@@ -1300,6 +1342,8 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        // The strip borrows the cached entries, which `update` keeps synced.
+        debug_assert_eq!(self.entries_synced, self.store.revision());
         if !self.visible {
             return Space::new().width(Fill).height(Fill).into();
         }
@@ -1507,7 +1551,7 @@ impl App {
         };
         let id = note.id;
         // A deleted note can't be opened while its bar collapses.
-        if self.collapsing.as_ref().is_some_and(|(c, _)| *c == id) {
+        if self.dying(id) {
             return Task::none();
         }
 
@@ -2109,13 +2153,16 @@ impl App {
             Point::new(self.window_size.width - STRIP_WIDTH, 0.0),
             Size::new(STRIP_WIDTH, self.window_size.height),
         );
-        let note = &self.store.notes()[self.entry_note(entry)?];
+        let entries = self.entries();
+        let entry = entries.get(entry)?;
+        let notes = self.store.notes();
+        let width = note_peek_width(&notes[entry.top], self.settings.settings().notes.size, bar);
         Some(peek_target(
             bar,
             strip,
-            note,
+            &entry_peek_text(notes, entry, width),
             self.peek_confirm_delete.is_some(),
-            note_peek_width(note, self.settings.settings().notes.size, bar),
+            width,
         ))
     }
 
@@ -2586,9 +2633,33 @@ impl App {
         }
     }
 
-    /// The note bar `entry` shows (the stack's top), by note index.
+    /// The note bar `entry` stands for (the stack's top), by note index.
+    /// While a stack's top is being deleted, its bar stands for the next
+    /// note, which takes its place.
     fn entry_note(&self, entry: usize) -> Option<usize> {
-        self.entries().get(entry).map(|e| e.top)
+        let entries = self.entries();
+        let entry = entries.get(entry)?;
+        match entry.members.first() {
+            Some(&next) if self.dying(self.store.notes()[entry.top].id) => Some(next),
+            _ => Some(entry.top),
+        }
+    }
+
+    /// Whether the note is being deleted while its bar collapses.
+    fn dying(&self, id: Uuid) -> bool {
+        self.collapsing.as_ref().is_some_and(|(c, _)| *c == id)
+    }
+
+    /// The open note's bar may have moved; its panel follows.
+    fn follow_open_bar(&mut self) {
+        self.sync_entries();
+        if let Some(bar) = self
+            .active_note
+            .and_then(|id| self.id_entry(id))
+            .and_then(|entry| self.strip_layout().bars.get(entry).copied())
+        {
+            self.anchor_y = bar.y + bar.height / 2.0;
+        }
     }
 
     /// The bar holding the note at `index`: a stacked note's is its stack's.
@@ -2937,6 +3008,151 @@ mod tests {
         assert_eq!(app.active_note, None);
         let order: Vec<Uuid> = app.store.notes().iter().map(|n| n.id).collect();
         assert_eq!(order, vec![ids[0]]);
+    }
+
+    fn order(app: &App) -> Vec<Uuid> {
+        app.store.notes().iter().map(|n| n.id).collect()
+    }
+
+    #[test]
+    fn dragging_onto_bar_stacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 3);
+        let bars = app.strip_layout().bars;
+        let _ = app.update(Message::DragStart(2, bars[2].center().y));
+        let _ = app.update(Message::DragMove(bars[0].center().y));
+        let _ = app.update(Message::DragEnd);
+        assert!(app.drag.is_none());
+        assert_eq!(order(&app), vec![ids[0], ids[2], ids[1]]);
+        assert_eq!(app.store.notes()[1].stack, Some(ids[0]));
+        assert!(app.store.is_dirty());
+        assert_eq!(app.entries().len(), 2);
+        assert_eq!(app.id_entry(ids[2]), Some(0));
+        // A drop on a bar's edge still reorders.
+        let bars = app.strip_layout().bars;
+        let _ = app.update(Message::DragStart(1, bars[1].center().y));
+        let _ = app.update(Message::DragMove(bars[0].y + 1.0));
+        let _ = app.update(Message::DragEnd);
+        assert_eq!(order(&app), vec![ids[1], ids[0], ids[2]]);
+        assert_eq!(app.entries().len(), 2);
+    }
+
+    #[test]
+    fn unstack_restores_members_after_top() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 4);
+        let _ = app.update(Message::StackOnto {
+            dragged: 3,
+            target: 1,
+        });
+        let _ = app.update(Message::StackOnto {
+            dragged: 0,
+            target: 0,
+        });
+        assert_eq!(app.entries().len(), 3);
+        let _ = app.update(Message::StackOnto {
+            dragged: 0,
+            target: 1,
+        });
+        // [1, 3, 0] under 1, then 2.
+        assert_eq!(order(&app), vec![ids[1], ids[3], ids[0], ids[2]]);
+        assert_eq!(app.entries().len(), 2);
+        app.store.did_save();
+        let _ = app.update(Message::Unstack(0));
+        assert_eq!(order(&app), vec![ids[1], ids[3], ids[0], ids[2]]);
+        assert!(app.store.notes().iter().all(|n| n.stack.is_none()));
+        assert_eq!(app.entries().len(), 4);
+        assert!(app.store.is_dirty());
+    }
+
+    #[test]
+    fn opening_stack_member_opens_that_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 3);
+        assert!(app.store.stack(ids[1], ids[0]));
+        let _ = app.update(Message::OpenStackMember(ids[1]));
+        assert_eq!(app.active_note, Some(ids[1]));
+        // Its bar is the stack's.
+        assert_eq!(app.id_entry(ids[1]), Some(0));
+        let stack_bar = app.strip_layout().bars[0];
+        assert_eq!(app.anchor_y, stack_bar.center().y);
+    }
+
+    #[test]
+    fn deleting_stack_top_promotes_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        let a = app.store.notes()[0].id;
+        let a1 = app.store.add_note(&crate::note::PALETTE);
+        let a2 = app.store.add_note(&crate::note::PALETTE);
+        let b = app.store.add_note(&crate::note::PALETTE);
+        assert!(app.store.stack(a1, a));
+        assert!(app.store.stack(a2, a));
+        app.sync_entries();
+        let _ = app.update(Message::PeekDeleteRequested(0));
+        assert_eq!(app.peek_confirm_delete, Some(a));
+        let _ = app.update(Message::PeekDeleteConfirmed);
+        // The stack's bar stays while its top goes.
+        assert_eq!(app.collapse(), None);
+        settle(&mut app);
+        assert_eq!(order(&app), vec![a1, a2, b]);
+        assert_eq!(app.store.notes()[0].stack, None);
+        assert_eq!(app.store.notes()[1].stack, Some(a1));
+        assert_eq!(app.entries().len(), 2);
+        // Deleting a member just removes it.
+        let _ = app.update(Message::OpenStackMember(a2));
+        settle(&mut app);
+        let _ = app.update(Message::DeleteRequested);
+        let _ = app.update(Message::ConfirmDelete(true));
+        settle(&mut app);
+        assert_eq!(order(&app), vec![a1, b]);
+        assert!(app.store.notes().iter().all(|n| n.stack.is_none()));
+    }
+
+    #[test]
+    fn stack_bar_while_top_collapses_opens_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 3);
+        assert!(app.store.stack(ids[1], ids[0]));
+        app.sync_entries();
+        app.start_collapse(ids[0]);
+        let bar = app.strip_layout().bars[0];
+        let _ = app.update(Message::StripHover(Some(bar.center().y)));
+        assert_eq!(app.hover_bar.map(|(id, _)| id), Some(ids[1]));
+        // A real click arrives as a drag without movement.
+        let _ = app.update(Message::DragStart(0, bar.center().y));
+        let _ = app.update(Message::DragEnd);
+        assert_eq!(app.active_note, Some(ids[1]));
+    }
+
+    #[test]
+    fn deleting_a_dragged_bar_beside_a_stack_drops_the_drag() {
+        let dir = tempfile::tempdir().unwrap();
+        // [A, a1 (under A), B]
+        let (mut app, ids) = app_with_bars(&dir, 3);
+        assert!(app.store.stack(ids[1], ids[0]));
+        app.sync_entries();
+        let bar = app.strip_layout().bars[1];
+        let _ = app.update(Message::DragStart(1, bar.center().y));
+        app.start_collapse(ids[2]);
+        assert_eq!(app.collapse().map(|(entry, _)| entry), Some(1));
+        settle(&mut app);
+        assert!(app.drag.is_none());
+        let _ = app.update(Message::DragEnd);
+        assert_eq!(app.active_note, None);
+        assert_eq!(order(&app), vec![ids[0], ids[1]]);
+        assert_eq!(app.entries().len(), 1);
+    }
+
+    #[test]
+    fn search_matching_only_a_member_keeps_the_stack_lit() {
+        let dir = tempfile::tempdir().unwrap();
+        // [A, a1 (under A), B]
+        let (mut app, ids) = app_with_notes(&dir, &[("A", ""), ("a1", "needle"), ("B", "")]);
+        assert!(app.store.stack(ids[1], ids[0]));
+        let _ = app.update(Message::ToggleSearch);
+        let _ = app.update(Message::SearchChanged("needle".into()));
+        assert_eq!(app.dimmed_bars(), vec![false, true]);
     }
 
     #[test]
