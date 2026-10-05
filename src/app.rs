@@ -303,6 +303,8 @@ pub struct App {
     /// The strip's bars as of store revision `entries_synced`; see
     /// [`App::entries`].
     strip_entries: Vec<Entry>,
+    /// Task progress per entry of `strip_entries`, from the same revision.
+    strip_progress: Vec<Option<(usize, usize)>>,
     entries_synced: u64,
     /// The export panel is showing (kept while it folds back into the gear).
     export: Option<ExportState>,
@@ -422,6 +424,7 @@ impl App {
         let window_size = Size::new(Self::docked_width(s, false), 600.0);
         let data_dir = store.dir().to_path_buf();
         let strip_entries = strip_model::entries(store.notes());
+        let strip_progress = strip_model::progress(store.notes(), &strip_entries);
         let entries_synced = store.revision();
         Self {
             theme: theme::Theme::default(),
@@ -483,6 +486,7 @@ impl App {
             search_matches: HashSet::new(),
             search_synced: None,
             strip_entries,
+            strip_progress,
             entries_synced,
             pending_focus: None,
             tray_ok: false,
@@ -1256,6 +1260,7 @@ impl App {
         let strip = container(BarStrip {
             notes: self.store.notes(),
             entries: &self.strip_entries,
+            progress: &self.strip_progress,
             magnification: &self.magnification,
             drag: &self.drag,
             scroll_offset: self.scroll_offset,
@@ -2454,6 +2459,7 @@ impl App {
     fn sync_entries(&mut self) {
         if self.entries_synced != self.store.revision() {
             self.strip_entries = strip_model::entries(self.store.notes());
+            self.strip_progress = strip_model::progress(self.store.notes(), &self.strip_entries);
             self.entries_synced = self.store.revision();
         }
     }

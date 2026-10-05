@@ -30,6 +30,46 @@ const OPEN_BAR_SCALE: f32 = 1.5;
 /// Opacity factor for bars of notes that don't match the search.
 const DIM_ALPHA: f32 = 0.3;
 
+/// The bottom `done` of `total` share of `rect`, the checklist progress.
+pub fn progress_fill(rect: Rectangle, done: usize, total: usize) -> Rectangle {
+    let share = if total == 0 {
+        0.0
+    } else {
+        (done as f32 / total as f32).clamp(0.0, 1.0)
+    };
+    let height = rect.height * share;
+    Rectangle {
+        y: rect.y + rect.height - height,
+        height,
+        ..rect
+    }
+}
+
+/// Factor on a bar's alpha: a checklist bar is faint under its progress
+/// fill, and an all-done one dims entirely.
+fn progress_alpha(progress: Option<(usize, usize)>) -> f32 {
+    match progress {
+        Some((done, total)) if total > 0 && done >= total => 0.5,
+        Some(_) => 0.45,
+        None => 1.0,
+    }
+}
+
+/// Height of the pinned bar's notch.
+const NOTCH_HEIGHT: f32 = 2.0;
+
+/// The two 1 px "card edge" lines left of a stack's bar, each further out
+/// and shorter than the last.
+fn stack_edges(rect: Rectangle) -> [Rectangle; 2] {
+    [1, 2].map(|n| {
+        let inset = 3.0 * n as f32;
+        Rectangle::new(
+            Point::new(rect.x - 3.0 * n as f32, rect.y + inset),
+            Size::new(1.0, (rect.height - 2.0 * inset).max(0.0)),
+        )
+    })
+}
+
 /// The bar's rectangle: the open note's bar grows to the left from its right
 /// edge as the note unfolds (`progress` 0 is docked, 1 fully open).
 pub fn bar_rect_for(progress: f32, rect: Rectangle) -> Rectangle {
@@ -225,6 +265,8 @@ pub struct BarStrip<'a> {
     pub notes: &'a [Note],
     /// One bar per entry; bar indices below are entry indices.
     pub entries: &'a [Entry],
+    /// Task progress per entry (`done, total`), summed over the stack.
+    pub progress: &'a [Option<(usize, usize)>],
     pub magnification: &'a MagnificationState,
     pub drag: &'a Option<DragState>,
     pub scroll_offset: f32,
@@ -417,6 +459,9 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 } else {
                     note.color.rgba[3]
                 } * dim;
+                let progress = self.progress.get(i).copied().flatten();
+                let fill_alpha = alpha;
+                let alpha = alpha * progress_alpha(progress);
                 let open = self.open.filter(|(o, _)| *o == i);
                 let rect = bar_rect_for(open.map_or(0.0, |(_, p)| p), *bar_rect);
                 let corner = CORNER_RADIUS;
@@ -450,6 +495,27 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     },
                     self.theme.bar_gradient(note.color, alpha),
                 );
+                // Open tasks leave the bar faint; done ones fill it from the
+                // bottom. An all-done bar just dims.
+                if let Some((done, total)) = progress.filter(|(d, t)| d < t) {
+                    let fill = progress_fill(rect, done, total);
+                    if fill.height > 0.0 {
+                        let [r, g, b, _] = note.color.rgba;
+                        renderer::Renderer::fill_quad(
+                            renderer,
+                            renderer::Quad {
+                                bounds: fill,
+                                border: iced::Border {
+                                    radius: corner.min(fill.height / 2.0).into(),
+                                    ..Default::default()
+                                },
+                                shadow: Default::default(),
+                                snap: true,
+                            },
+                            Color::from_rgba(r, g, b, fill_alpha),
+                        );
+                    }
+                }
                 renderer::Renderer::fill_quad(
                     renderer,
                     renderer::Quad {
@@ -467,6 +533,38 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     },
                     self.theme.highlight().scale_alpha(dim),
                 );
+                if note.pinned {
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: Rectangle::new(
+                                Point::new(rect.x + corner, rect.y),
+                                Size::new(
+                                    (rect.width - 2.0 * corner).max(0.0),
+                                    rect.height.min(NOTCH_HEIGHT),
+                                ),
+                            ),
+                            border: Default::default(),
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        Color::BLACK.scale_alpha(0.35 * dim),
+                    );
+                }
+                if self.entries.get(i).is_some_and(|e| !e.members.is_empty()) {
+                    for edge in stack_edges(rect) {
+                        renderer::Renderer::fill_quad(
+                            renderer,
+                            renderer::Quad {
+                                bounds: edge,
+                                border: Default::default(),
+                                shadow: Default::default(),
+                                snap: true,
+                            },
+                            self.theme.ink(0.35 * dim),
+                        );
+                    }
+                }
             }
         }
 
@@ -847,6 +945,31 @@ mod tests {
     }
 
     #[test]
+    fn progress_fill_grows_from_bottom() {
+        let r = Rectangle::new(Point::new(10.0, 100.0), Size::new(8.0, 40.0));
+        assert_eq!(progress_fill(r, 0, 4).height, 0.0);
+        let half = progress_fill(r, 2, 4);
+        assert_eq!((half.height, half.y + half.height), (20.0, 140.0));
+        assert_eq!((half.x, half.width), (r.x, r.width));
+        assert_eq!(progress_fill(r, 4, 4), r);
+    }
+
+    #[test]
+    fn all_done_bar_dims() {
+        assert_eq!(progress_alpha(Some((3, 3))), 0.5);
+        assert_eq!(progress_alpha(Some((1, 3))), 0.45);
+        assert_eq!(progress_alpha(None), 1.0);
+    }
+
+    #[test]
+    fn stack_edges_sit_left_of_the_bar() {
+        let r = Rectangle::new(Point::new(40.0, 100.0), Size::new(8.0, 40.0));
+        let [a, b] = stack_edges(r);
+        assert!(a.x + a.width <= r.x && b.x + b.width <= a.x);
+        assert!(b.height < a.height && a.height < r.height);
+    }
+
+    #[test]
     fn open_bar_is_wider_and_keeps_its_right_edge() {
         let r = Rectangle::new(Point::new(40.0, 100.0), Size::new(6.0, 30.0));
         let open = bar_rect_for(1.0, r);
@@ -996,6 +1119,7 @@ mod tests {
         let strip = BarStrip {
             notes: &notes,
             entries: &entries,
+            progress: &[],
             magnification: &magnification,
             drag: &drag,
             scroll_offset: 0.0,
@@ -1031,6 +1155,7 @@ mod tests {
         let strip = |peek| BarStrip {
             notes: &notes,
             entries: &entries,
+            progress: &[],
             magnification: &magnification,
             drag: &drag,
             scroll_offset: 0.0,
@@ -1067,6 +1192,7 @@ mod tests {
         let strip = |peek| BarStrip {
             notes: &notes,
             entries: &entries,
+            progress: &[],
             magnification: &magnification,
             drag: &drag,
             scroll_offset: 0.0,

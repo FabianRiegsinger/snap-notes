@@ -669,7 +669,6 @@ pub fn plain_text(content: &str) -> String {
 
 /// `(done, total)` task list items in the note, counted the way the parser
 /// sees them (so fenced code does not count); `None` when there are none.
-#[allow(dead_code)] // used from Task 3
 pub fn task_progress(content: &str) -> Option<(usize, usize)> {
     let mut done = 0;
     let mut total = 0;

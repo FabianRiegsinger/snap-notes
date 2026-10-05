@@ -1,4 +1,5 @@
 use crate::note::Note;
+use crate::rich;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -20,6 +21,20 @@ impl Entry {
     pub fn notes(&self) -> impl Iterator<Item = usize> + '_ {
         std::iter::once(self.top).chain(self.members.iter().copied())
     }
+}
+
+/// Per entry, `(done, total)` task items summed over its top and members;
+/// `None` when none of them has tasks.
+pub fn progress(notes: &[Note], entries: &[Entry]) -> Vec<Option<(usize, usize)>> {
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .notes()
+                .filter_map(|i| rich::task_progress(&notes[i].content))
+                .reduce(|(d, t), (d2, t2)| (d + d2, t + t2))
+        })
+        .collect()
 }
 
 /// One entry per top-level note, in strip (store) order; members are listed
