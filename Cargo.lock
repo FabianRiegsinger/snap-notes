@@ -3506,6 +3506,7 @@ dependencies = [
  "serde_json",
  "single-instance",
  "tempfile",
+ "tokio",
  "tray-icon",
  "ttf-parser",
  "uuid",
