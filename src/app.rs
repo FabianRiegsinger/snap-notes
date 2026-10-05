@@ -124,9 +124,9 @@ pub enum Message {
     ClosePanel,
     DeleteRequested,
     CopyNote,
-    /// `COPIED_FOR` after copying this note at this instant: the copy
-    /// button's check goes, unless the note was copied again since.
-    CopiedExpired(Uuid, Instant),
+    /// `COPIED_FOR` after the copy of this note with this number: the copy
+    /// button's check goes, unless something was copied again since.
+    CopiedExpired(Uuid, u64),
     ConfirmDelete(bool),
     ToggleColorPicker,
     /// Open or close the toolbar's text color grid.
@@ -255,9 +255,11 @@ pub struct App {
     drag: Option<DragState>,
     scroll_offset: f32,
     confirm_delete: Option<Uuid>,
-    /// The note last copied and when; its copy button shows a check for
-    /// `COPIED_FOR` after.
-    copied_at: Option<(Uuid, Instant)>,
+    /// The note last copied and the copy's number; its copy button shows a
+    /// check for `COPIED_FOR` after.
+    copied_at: Option<(Uuid, u64)>,
+    /// Counts copies, so a check's timer only clears its own copy.
+    copies: u64,
     animating: bool,
     last_tick: Option<Instant>,
     visible: bool,
@@ -440,6 +442,7 @@ impl App {
             scroll_offset: 0.0,
             confirm_delete: None,
             copied_at: None,
+            copies: 0,
             animating: false,
             last_tick: None,
             visible: true,
@@ -832,7 +835,8 @@ impl App {
                     .and_then(|id| self.store.notes().iter().find(|n| n.id == id));
                 if let Some(note) = note {
                     let text = crate::note::copy_text(note);
-                    let copied = (note.id, Instant::now());
+                    self.copies += 1;
+                    let copied = (note.id, self.copies);
                     self.copied_at = Some(copied);
                     return Task::batch([
                         iced::clipboard::write(text),
@@ -3015,8 +3019,7 @@ mod tests {
 
         // A timer from an earlier copy leaves a newer one alone.
         let _ = app.update(Message::CopyNote);
-        let (_, first) = app.copied_at.unwrap();
-        std::thread::sleep(Duration::from_millis(1));
+        let (_, first): (Uuid, u64) = app.copied_at.unwrap();
         let _ = app.update(Message::CopyNote);
         let (_, second) = app.copied_at.unwrap();
         assert_ne!(first, second);
