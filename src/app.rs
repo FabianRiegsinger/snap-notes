@@ -37,9 +37,9 @@ const PEEK_POLL: Duration = Duration::from_millis(100);
 const FOCUS_GRACE: Duration = Duration::from_millis(500);
 /// A deleted note's bar shrinks away in this long (at speed 1).
 const COLLAPSE_SECS: f32 = 0.18;
-/// Toolbar and body fade in this long after switching edit/render mode.
 /// How long the copy button shows its check.
 const COPIED_FOR: Duration = Duration::from_millis(1500);
+/// Toolbar and body fade in this long after switching edit/render mode.
 const MODE_FADE_SECS: f32 = 0.12;
 
 #[derive(Debug, Clone)]
@@ -212,9 +212,9 @@ pub struct App {
     drag: Option<DragState>,
     scroll_offset: f32,
     confirm_delete: Option<Uuid>,
-    /// When the open note was last copied; the copy button shows a check
-    /// for `COPIED_SECS` after.
-    copied_at: Option<Instant>,
+    /// The note last copied and when; its copy button shows a check for
+    /// `COPIED_FOR` after.
+    copied_at: Option<(Uuid, Instant)>,
     animating: bool,
     last_tick: Option<Instant>,
     visible: bool,
@@ -687,7 +687,7 @@ impl App {
                     .and_then(|id| self.store.notes().iter().find(|n| n.id == id));
                 if let Some(note) = note {
                     let text = crate::note::copy_text(note);
-                    self.copied_at = Some(Instant::now());
+                    self.copied_at = Some((note.id, Instant::now()));
                     self.animating = true;
                     return iced::clipboard::write(text);
                 }
@@ -736,7 +736,7 @@ impl App {
                 }
                 if self
                     .copied_at
-                    .is_some_and(|t| now.saturating_duration_since(t) >= COPIED_FOR)
+                    .is_some_and(|(_, t)| now.saturating_duration_since(t) >= COPIED_FOR)
                 {
                     self.copied_at = None;
                 }
@@ -1087,7 +1087,7 @@ impl App {
                         morph_progress: self.morph.progress(),
                         content_alpha: frame.content_alpha,
                         confirm_delete: self.confirm_delete.is_some(),
-                        copied: self.copied_at.is_some(),
+                        copied: self.copied_for(note.id),
                         color_picker_open: self.color_picker_open,
                         text_color_picker_open: self.text_color_picker_open,
                         hovered: self.note_hovered,
@@ -1569,6 +1569,12 @@ impl App {
             || over_peek
             || over_panel(self.note_frame())
             || over_panel(self.settings_frame())
+    }
+
+    /// Whether `id`'s copy button still shows its check.
+    fn copied_for(&self, id: Uuid) -> bool {
+        self.copied_at
+            .is_some_and(|(copied, at)| copied == id && at.elapsed() < COPIED_FOR)
     }
 
     fn update_passthrough(&mut self, cursor: Option<Point>) -> Task<Message> {
@@ -2456,13 +2462,26 @@ mod tests {
         let mut app = app_with_note(&dir, "body");
         let task = app.update(Message::CopyNote);
         assert!(task.units() > 0, "no clipboard write was started");
-        let at = app.copied_at.expect("copied_at set");
+        let (_, at) = app.copied_at.expect("copied_at set");
         assert!(app.animating);
         let _ = app.update(Message::Tick(at + Duration::from_millis(1000)));
         assert!(app.copied_at.is_some());
         assert!(app.animating, "must keep ticking until the icon flips back");
         let _ = app.update(Message::Tick(at + Duration::from_millis(1600)));
         assert!(app.copied_at.is_none());
+    }
+
+    #[test]
+    fn copied_check_belongs_to_its_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 2);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        let a = app.active_note.unwrap();
+        let _ = app.update(Message::CopyNote);
+        assert!(app.copied_for(a));
+        let b = ids.into_iter().find(|id| *id != a).unwrap();
+        assert!(!app.copied_for(b));
     }
 
     #[test]
