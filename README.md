@@ -34,7 +34,7 @@
 - **Paper notes:** a softer paper tone derived from the bar color, with layered shadows, a top highlight and an adhesive band. Text keeps WCAG AA contrast in light and dark.
 - **Tab-like bars:** bars have a gradient and a highlight, and the open note's bar is wider, like a tab.
 - **Motion:** a deleted note's bar collapses, the toolbar fades and slides in, the body fades when you switch modes, and buttons have pressed states.
-- **Details:** a focus ring, a hint in empty notes ("Start typing… Markdown works.") and slimmer scrollbars.
+- **Details:** a focus ring on the title, a faint "…" in empty notes and slimmer scrollbars.
 
 ### Formatting
 Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. In edit mode the toolbar's bold, italic, strikethrough, code, text color, highlight, size (small, normal, large, huge), link and image buttons apply the markup.

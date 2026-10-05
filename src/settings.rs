@@ -60,7 +60,7 @@ pub struct NoteSettings {
 impl Default for NoteSettings {
     fn default() -> Self {
         Self {
-            size: 320.0,
+            size: 380.0,
             paper_tint: -0.12,
             idle_control_alpha: 0.3,
         }
@@ -618,7 +618,7 @@ mod tests {
         );
         assert_eq!(
             (s.notes.size, s.notes.paper_tint, s.notes.idle_control_alpha),
-            (320.0, -0.12, 0.3)
+            (380.0, -0.12, 0.3)
         );
         assert_eq!(s.motion.speed, 1.0);
         assert_eq!(s.window.height_fraction, 0.9);

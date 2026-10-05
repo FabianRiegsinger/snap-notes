@@ -25,7 +25,7 @@ use iced::{border, gradient, Border, Color, Element, Fill, Length, Padding, Shad
 use iced::{keyboard, mouse, Theme, Vector};
 
 /// Shown in an empty note, in the editor and in the formatted view.
-pub(crate) const PLACEHOLDER: &str = "Start typing… Markdown works.";
+pub(crate) const PLACEHOLDER: &str = "…";
 
 const BODY_SCROLL_ID: &str = "note-body-scroll";
 const BODY_EDITOR_ID: &str = "note-body-editor";
@@ -240,19 +240,8 @@ fn body_scrollable<'a>(
 }
 
 /// Holds the body's scrollable `BODY_INSET` in from the note's edges.
-/// While `ring`, it draws the focus ring around the scroll area; it stays
-/// put while the text scrolls.
-fn body_inset<'a>(
-    content: impl Into<Element<'a, Message>>,
-    theme: theme::Theme,
-    ring: bool,
-    a: f32,
-) -> Element<'a, Message> {
-    let frame = container(content).style(move |_theme: &Theme| container::Style {
-        border: focus_border(theme, ring, a),
-        ..Default::default()
-    });
-    container(frame)
+fn body_inset<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
         .padding(
             Padding::ZERO
                 .left(BODY_INSET)
@@ -433,30 +422,25 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         // fills exactly the space the body gets (measured, not estimated),
         // so clicks below short text still land in the editor.
         let body: Element<'_, Message> = if editing {
-            body_inset(
-                responsive(move |available| {
-                    let editor = text_editor(content)
-                        .id(BODY_EDITOR_ID)
-                        .placeholder(PLACEHOLDER)
-                        .on_action(Message::NoteEdited)
-                        .key_binding(body_key_binding)
-                        .min_height(editor_min_height(available.height) + borrowed)
-                        .size(TEXT_SM)
-                        .line_height(text::LineHeight::Relative(theme::BODY_LINE_HEIGHT))
-                        .padding(body_padding().top(EDITOR_PADDING_TOP - borrowed))
-                        .style(move |_theme: &Theme, _status| text_editor::Style {
-                            background: Color::TRANSPARENT.into(),
-                            border: Border::default(),
-                            placeholder: theme.ink(0.35 * body_a),
-                            value: theme.ink(0.9 * body_a),
-                            selection: theme.ink(0.18 * body_a),
-                        });
-                    body_scrollable(pass_wheel(editor), theme, hovered, body_a)
-                }),
-                theme,
-                true,
-                body_a,
-            )
+            body_inset(responsive(move |available| {
+                let editor = text_editor(content)
+                    .id(BODY_EDITOR_ID)
+                    .placeholder(PLACEHOLDER)
+                    .on_action(Message::NoteEdited)
+                    .key_binding(body_key_binding)
+                    .min_height(editor_min_height(available.height) + borrowed)
+                    .size(TEXT_SM)
+                    .line_height(text::LineHeight::Relative(theme::BODY_LINE_HEIGHT))
+                    .padding(body_padding().top(EDITOR_PADDING_TOP - borrowed))
+                    .style(move |_theme: &Theme, _status| text_editor::Style {
+                        background: Color::TRANSPARENT.into(),
+                        border: Border::default(),
+                        placeholder: theme.ink(0.35 * body_a),
+                        value: theme.ink(0.9 * body_a),
+                        selection: theme.ink(0.18 * body_a),
+                    });
+                body_scrollable(pass_wheel(editor), theme, hovered, body_a)
+            }))
         } else {
             // Content inside a scrollable can't fill its height, so the
             // click target for the space below the text sits behind it.
@@ -465,12 +449,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             stack![
                 mouse_area(Space::new().width(Fill).height(Fill))
                     .on_press(Message::BodyClicked(None)),
-                body_inset(
-                    body_scrollable(rendered, theme, hovered, body_a),
-                    theme,
-                    false,
-                    body_a
-                ),
+                body_inset(body_scrollable(rendered, theme, hovered, body_a)),
             ]
             .width(Fill)
             .height(Fill)
@@ -703,7 +682,7 @@ mod tests {
 
     #[test]
     fn empty_placeholder_text() {
-        assert_eq!(PLACEHOLDER, "Start typing… Markdown works.");
+        assert_eq!(PLACEHOLDER, "…");
     }
 
     #[test]
