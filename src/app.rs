@@ -3,9 +3,7 @@ use crate::bar_strip::{
     band, compute_layout, peek_target, BarStrip, StripLayout, SETTINGS_SLOT, STRIP_WIDTH,
 };
 use crate::export::{self, ExportFormat};
-use crate::export_panel::{
-    export_panel, exported_message, save_error_message, ExportState, ExportView,
-};
+use crate::export_panel::{export_panel, ExportJob, ExportState, ExportStatus, ExportView};
 use crate::history::History;
 use crate::images;
 use crate::note::NoteColor;
@@ -75,8 +73,8 @@ pub enum Message {
     ExportFormatChosen(ExportFormat),
     /// The Export button: opens the save dialog.
     ExportRequested,
-    /// The save dialog returned; `None` when it was cancelled.
-    ExportPicked(Option<PathBuf>),
+    /// The save dialog returned what to write; `None` when it was cancelled.
+    ExportPicked(Option<ExportJob>),
     SettingChanged(SettingKey, f32),
     // Only the macOS/Windows settings panel shows these toggles.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
@@ -539,8 +537,14 @@ impl App {
                 }
             }
             Message::ExportRequested => return self.request_export(),
-            Message::ExportPicked(Some(path)) => self.export_to(&path),
-            Message::ExportPicked(None) => {}
+            Message::ExportPicked(job) => {
+                if let Some(state) = &mut self.export {
+                    state.picking = false;
+                }
+                if let Some(job) = job {
+                    self.run_export(job);
+                }
+            }
             Message::SettingChanged(key, value) => {
                 self.settings.settings_mut().set(key, value);
                 return self.apply_settings();
@@ -1172,7 +1176,10 @@ impl App {
                 // Clicking another app (through the passthrough area) closes
                 // the note and the panels.
                 self.close_search();
-                self.close_export();
+                // The save dialog takes the focus as long as it is open.
+                if !self.export.as_ref().is_some_and(|state| state.picking) {
+                    self.close_export();
+                }
                 let close_settings = self.update(Message::CloseSettings);
                 return Task::batch([close_settings, self.update(Message::ClosePanel)]);
             }
@@ -1315,13 +1322,15 @@ impl App {
         if let (Some(frame), Some(state)) = (self.export_frame(), &self.export) {
             let rect = frame.rect;
             if rect.width >= 1.0 && rect.height >= 1.0 {
-                // Only while unfolding, as for the search.
+                // Only while unfolding, as for the search. While the save
+                // dialog is open a click beside the panel does nothing.
                 if self.export_morph.is_opening() {
-                    layers.push(
-                        mouse_area(Space::new().width(Fill).height(Fill))
-                            .on_press(Message::ToggleExport)
-                            .into(),
-                    );
+                    let backdrop = Space::new().width(Fill).height(Fill);
+                    layers.push(if state.picking {
+                        opaque(backdrop)
+                    } else {
+                        mouse_area(backdrop).on_press(Message::ToggleExport).into()
+                    });
                 }
                 let panel = export_panel(ExportView {
                     theme: self.theme,
@@ -2036,15 +2045,20 @@ impl App {
         }
     }
 
-    /// Opens the save dialog for the selected notes, if there are any.
+    /// Opens the save dialog for the selected notes, unless one is open
+    /// already or none of them exists any more. The dialog's task carries
+    /// the notes and the format, so the export happens even if the panel
+    /// folds meanwhile.
     fn request_export(&mut self) -> Task<Message> {
         let Some(state) = &mut self.export else {
             return Task::none();
         };
-        if state.selected.is_empty() {
+        if !state.can_export(self.store.notes()) {
             return Task::none();
         }
         state.status = None;
+        state.picking = true;
+        let notes = state.selected_in(self.store.notes());
         let format = state.format;
         let name = export::suggested_name(chrono::Local::now().date_naive(), format);
         let kind = match format {
@@ -2062,32 +2076,37 @@ impl App {
                 .save_file()
                 .await
         };
-        Task::perform(dialog, |file| {
-            Message::ExportPicked(file.map(|f| f.path().to_path_buf()))
+        Task::perform(dialog, move |file| {
+            Message::ExportPicked(file.map(|f| ExportJob {
+                path: f.path().to_path_buf(),
+                notes,
+                format,
+            }))
         })
     }
 
-    /// Writes the selected notes, in strip order, to `path` and shows how
-    /// that went.
-    fn export_to(&mut self, path: &std::path::Path) {
-        let Some(state) = &mut self.export else {
-            return;
-        };
-        let notes: Vec<_> = self
-            .store
-            .notes()
+    /// Writes the job's notes that still exist, in its order, and shows how
+    /// that went in the panel, or logs it once the panel is gone.
+    fn run_export(&mut self, job: ExportJob) {
+        let notes: Vec<_> = job
+            .notes
             .iter()
-            .filter(|note| state.selected.contains(&note.id))
+            .filter_map(|id| self.store.notes().iter().find(|note| note.id == *id))
             .collect();
         if notes.is_empty() {
             return;
         }
-        let status = match export::write(path, &export::render(&notes, state.format)) {
-            Ok(()) => exported_message(notes.len()),
-            Err(error) => save_error_message(&error),
+        let status = match export::write(&job.path, &export::render(&notes, job.format)) {
+            Ok(()) => ExportStatus::Exported(notes.len()),
+            Err(error) => ExportStatus::Failed(error.to_string()),
         };
-        state.status = Some((status, Instant::now()));
-        self.animating = true;
+        match &mut self.export {
+            Some(state) => {
+                state.status = Some((status, Instant::now()));
+                self.animating = true;
+            }
+            None => eprintln!("export to {}: {}", job.path.display(), status.message()),
+        }
     }
 
     /// Folds the search panel back into its slot (if it is showing).
@@ -3656,12 +3675,26 @@ mod tests {
         app.export.is_some() && app.export_morph.is_opening()
     }
 
-    fn export_status(app: &App) -> Option<&str> {
+    fn export_status(app: &App) -> Option<String> {
         app.export
             .as_ref()?
             .status
             .as_ref()
-            .map(|(s, _)| s.as_str())
+            .map(|(s, _)| s.message())
+    }
+
+    /// Clicks Export and has the dialog return `path`, as the dialog task
+    /// would.
+    fn export_via_dialog(app: &mut App, path: PathBuf) {
+        let task = app.update(Message::ExportRequested);
+        assert!(task.units() > 0, "no dialog was started");
+        let state = app.export.as_ref().unwrap();
+        let job = ExportJob {
+            path,
+            notes: state.selected_in(app.store.notes()),
+            format: state.format,
+        };
+        let _ = app.update(Message::ExportPicked(Some(job)));
     }
 
     #[test]
@@ -3727,11 +3760,11 @@ mod tests {
         settle(&mut app);
         let _ = app.update(Message::ExportToggleNote(ids[1]));
         let path = dir.path().join("out.md");
-        let _ = app.update(Message::ExportPicked(Some(path.clone())));
+        export_via_dialog(&mut app, path.clone());
         let notes = app.store.notes();
         let expected = crate::export::render(&[&notes[0], &notes[2]], ExportFormat::Markdown);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
-        assert_eq!(export_status(&app), Some("Exported 2 notes"));
+        assert_eq!(export_status(&app).as_deref(), Some("Exported 2 notes"));
         assert!(app.animating, "must keep ticking until the panel closes");
         let at = app.export.as_ref().unwrap().status.as_ref().unwrap().1;
         let _ = app.update(Message::Tick(at + Duration::from_millis(1900)));
@@ -3746,8 +3779,8 @@ mod tests {
         let _ = app.update(Message::ToggleExport);
         let _ = app.update(Message::ExportAll(false));
         let _ = app.update(Message::ExportToggleNote(ids[0]));
-        let _ = app.update(Message::ExportPicked(Some(dir.path().join("one.txt"))));
-        assert_eq!(export_status(&app), Some("Exported 1 note"));
+        export_via_dialog(&mut app, dir.path().join("one.txt"));
+        assert_eq!(export_status(&app).as_deref(), Some("Exported 1 note"));
     }
 
     #[test]
@@ -3756,7 +3789,10 @@ mod tests {
         let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
         let _ = app.update(Message::ToggleExport);
         settle(&mut app);
+        let _ = app.update(Message::ExportRequested);
+        assert!(app.export.as_ref().unwrap().picking);
         let _ = app.update(Message::ExportPicked(None));
+        assert!(!app.export.as_ref().unwrap().picking);
         assert!(export_status(&app).is_none());
         assert!(export_showing(&app));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
@@ -3768,7 +3804,7 @@ mod tests {
         let (mut app, ids) = app_with_notes(&dir, &[("a", "1")]);
         let _ = app.update(Message::ToggleExport);
         settle(&mut app);
-        let _ = app.update(Message::ExportPicked(Some(dir.path().to_path_buf())));
+        export_via_dialog(&mut app, dir.path().to_path_buf());
         let status = export_status(&app).expect("error shown");
         assert!(status.starts_with("Couldn't save: "), "{status}");
         // It stays until the next action.
@@ -3791,6 +3827,83 @@ mod tests {
         assert!(app.keep_open_until.is_some());
         let _ = app.update(Message::WindowUnfocused);
         assert!(export_showing(&app));
+    }
+
+    #[test]
+    fn second_export_request_while_picking_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let first = app.update(Message::ExportRequested);
+        assert!(first.units() > 0);
+        assert!(app.export.as_ref().unwrap().picking);
+        let second = app.update(Message::ExportRequested);
+        assert_eq!(second.units(), 0, "a second dialog was started");
+        assert!(!app.export.as_ref().unwrap().can_export(app.store.notes()));
+    }
+
+    #[test]
+    fn export_picked_after_panel_closed_still_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "1"), ("b", "2")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let _ = app.update(Message::ExportRequested);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        assert!(app.export.is_none());
+        let path = dir.path().join("late.md");
+        let _ = app.update(Message::ExportPicked(Some(ExportJob {
+            path: path.clone(),
+            notes: ids.clone(),
+            format: ExportFormat::Markdown,
+        })));
+        let notes = app.store.notes();
+        let expected = crate::export::render(&[&notes[0], &notes[1]], ExportFormat::Markdown);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        // A note deleted while the dialog was open is skipped.
+        app.store.delete_note(ids[0]);
+        let path = dir.path().join("later.md");
+        let _ = app.update(Message::ExportPicked(Some(ExportJob {
+            path: path.clone(),
+            notes: ids,
+            format: ExportFormat::Markdown,
+        })));
+        let expected = crate::export::render(&[&app.store.notes()[0]], ExportFormat::Markdown);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn panel_stays_open_while_picking() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let _ = app.update(Message::ExportRequested);
+        // Past the focus grace, as with a slow dialog.
+        app.keep_open_until = None;
+        let _ = app.update(Message::WindowUnfocused);
+        assert!(export_showing(&app));
+        let _ = app.update(Message::ExportPicked(None));
+        let _ = app.update(Message::WindowUnfocused);
+        assert!(!app.export_morph.is_opening());
+    }
+
+    #[test]
+    fn export_button_needs_an_existing_selected_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "1"), ("b", "2")]);
+        let _ = app.update(Message::ToggleExport);
+        let _ = app.update(Message::ExportToggleNote(ids[1]));
+        let state = app.export.as_ref().unwrap();
+        assert!(state.can_export(app.store.notes()));
+        app.store.delete_note(ids[0]);
+        let state = app.export.as_ref().unwrap();
+        assert!(!state.selected.is_empty());
+        assert!(!state.can_export(app.store.notes()));
+        let task = app.update(Message::ExportRequested);
+        assert_eq!(task.units(), 0);
     }
 
     #[test]

@@ -12,18 +12,47 @@ use crate::theme::{self, space, RADIUS_CONTROL, TEXT_MD, TEXT_SM, TEXT_XS};
 use iced::widget::{button, checkbox, column, row, scrollable, text, Space};
 use iced::{border, Border, Element, Fill, Padding, Size, Theme};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Instant;
 use uuid::Uuid;
 
-/// How a failed write's message starts; the reason follows.
-const SAVE_ERROR: &str = "Couldn't save: ";
+/// How the last export went.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExportStatus {
+    /// This many notes were written.
+    Exported(usize),
+    /// The write failed for this reason.
+    Failed(String),
+}
+
+impl ExportStatus {
+    /// The panel's one-line message.
+    pub fn message(&self) -> String {
+        match self {
+            ExportStatus::Exported(1) => "Exported 1 note".to_string(),
+            ExportStatus::Exported(count) => format!("Exported {count} notes"),
+            ExportStatus::Failed(reason) => format!("Couldn't save: {reason}"),
+        }
+    }
+}
+
+/// An export the save dialog returned a path for: the notes (in strip
+/// order) and the format chosen when the dialog opened.
+#[derive(Debug, Clone)]
+pub struct ExportJob {
+    pub path: PathBuf,
+    pub notes: Vec<Uuid>,
+    pub format: ExportFormat,
+}
 
 /// The open export panel's choices and its last result.
 pub struct ExportState {
     pub selected: HashSet<Uuid>,
     pub format: ExportFormat,
-    /// The last export's one-line result and when it happened.
-    pub status: Option<(String, Instant)>,
+    /// The last export's result and when it happened.
+    pub status: Option<(ExportStatus, Instant)>,
+    /// The save dialog is open.
+    pub picking: bool,
 }
 
 impl ExportState {
@@ -33,30 +62,33 @@ impl ExportState {
             selected: notes.iter().map(|n| n.id).collect(),
             format: ExportFormat::Markdown,
             status: None,
+            picking: false,
         }
     }
 
     /// When the last export succeeded, if it did: the panel closes a moment
     /// after. A failure stays until the next action.
     pub fn succeeded_at(&self) -> Option<Instant> {
-        self.status
-            .as_ref()
-            .filter(|(message, _)| !message.starts_with(SAVE_ERROR))
-            .map(|(_, at)| *at)
+        match &self.status {
+            Some((ExportStatus::Exported(_), at)) => Some(*at),
+            _ => None,
+        }
     }
-}
 
-/// "Exported N notes", singular for one.
-pub fn exported_message(count: usize) -> String {
-    if count == 1 {
-        "Exported 1 note".to_string()
-    } else {
-        format!("Exported {count} notes")
+    /// The ids of `notes` that are selected, in their order.
+    pub fn selected_in(&self, notes: &[Note]) -> Vec<Uuid> {
+        notes
+            .iter()
+            .map(|note| note.id)
+            .filter(|id| self.selected.contains(id))
+            .collect()
     }
-}
 
-pub fn save_error_message(error: &std::io::Error) -> String {
-    format!("{SAVE_ERROR}{error}")
+    /// Whether Export can start: no dialog is open and at least one
+    /// selected note still exists.
+    pub fn can_export(&self, notes: &[Note]) -> bool {
+        !self.picking && notes.iter().any(|note| self.selected.contains(&note.id))
+    }
 }
 
 pub struct ExportView<'a> {
@@ -221,13 +253,12 @@ pub fn export_panel(v: ExportView<'_>) -> Element<'_, Message> {
         }
 
         let status: Element<'_, Message> = match &state.status {
-            Some((message, _)) => {
-                let color = if state.succeeded_at().is_some() {
-                    theme.ink(0.65 * a)
-                } else {
-                    theme.danger(a)
+            Some((status, _)) => {
+                let color = match status {
+                    ExportStatus::Exported(_) => theme.ink(0.65 * a),
+                    ExportStatus::Failed(_) => theme.danger(a),
                 };
-                text(message.as_str())
+                text(status.message())
                     .size(TEXT_XS)
                     .color(color)
                     .wrapping(iced::widget::text::Wrapping::None)
@@ -236,7 +267,7 @@ pub fn export_panel(v: ExportView<'_>) -> Element<'_, Message> {
             }
             None => Space::new().width(Fill).into(),
         };
-        let footer = row![status, export_button(!state.selected.is_empty(), theme, a)]
+        let footer = row![status, export_button(state.can_export(notes), theme, a)]
             .spacing(space(2))
             .padding(Padding::ZERO.right(space(3)))
             .align_y(iced::Alignment::Center);
@@ -254,10 +285,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exported_message_counts() {
-        assert_eq!(exported_message(1), "Exported 1 note");
-        assert_eq!(exported_message(2), "Exported 2 notes");
-        assert_eq!(exported_message(0), "Exported 0 notes");
+    fn status_messages() {
+        assert_eq!(ExportStatus::Exported(1).message(), "Exported 1 note");
+        assert_eq!(ExportStatus::Exported(2).message(), "Exported 2 notes");
+        assert_eq!(ExportStatus::Exported(0).message(), "Exported 0 notes");
+        assert_eq!(
+            ExportStatus::Failed("disk full".into()).message(),
+            "Couldn't save: disk full"
+        );
     }
 
     #[test]
@@ -265,11 +300,9 @@ mod tests {
         let mut state = ExportState::new(&[]);
         assert!(state.succeeded_at().is_none());
         let at = Instant::now();
-        state.status = Some((exported_message(2), at));
+        state.status = Some((ExportStatus::Exported(2), at));
         assert_eq!(state.succeeded_at(), Some(at));
-        let error = std::io::Error::other("disk full");
-        state.status = Some((save_error_message(&error), at));
-        assert_eq!(state.status.as_ref().unwrap().0, "Couldn't save: disk full");
+        state.status = Some((ExportStatus::Failed("disk full".into()), at));
         assert!(state.succeeded_at().is_none());
     }
 }
