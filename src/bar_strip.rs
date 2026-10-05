@@ -234,6 +234,19 @@ impl<'a> BarStrip<'a> {
             .then_some(i)
     }
 
+    /// The hover update for a cursor at `pos`: magnify around it inside the
+    /// strip, end the hover outside. None over the open peek, so the bars
+    /// (and the peek centered on its bar) hold still while it's in use.
+    fn hover_message(&self, bounds: Rectangle, pos: Point) -> Option<Message> {
+        if self.peek_hit(bounds, pos).is_some() {
+            None
+        } else if bounds.contains(pos) {
+            Some(Message::StripHover(Some(pos.y)))
+        } else {
+            Some(Message::StripHover(None))
+        }
+    }
+
     /// What a press at `pos` on the open peek does: delete-related clicks
     /// once it is fully open, otherwise opening the note. While the
     /// confirmation shows, other presses on the peek do nothing.
@@ -525,10 +538,8 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
 
         match event {
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                if bounds.contains(*position) {
-                    shell.publish(Message::StripHover(Some(position.y)));
-                } else {
-                    shell.publish(Message::StripHover(None));
+                if let Some(message) = self.hover_message(bounds, *position) {
+                    shell.publish(message);
                 }
             }
             Event::Mouse(mouse::Event::CursorLeft) => {
@@ -866,6 +877,59 @@ mod tests {
         assert_eq!(strip(None).peek_hit(bounds, on_peek), None);
         let far = Point::new(bar.x - 600.0, bar.center().y);
         assert_eq!(strip(Some((0, 1.0))).peek_hit(bounds, far), None);
+    }
+
+    #[test]
+    fn bars_hold_still_while_the_cursor_is_on_the_peek() {
+        let notes = [
+            crate::note::Note::new(crate::note::PALETTE[0]),
+            crate::note::Note::new(crate::note::PALETTE[1]),
+        ];
+        let magnification = MagnificationState::new();
+        let drag = None;
+        let bars = BarSettings::default();
+        let strip = |peek| BarStrip {
+            notes: &notes,
+            magnification: &magnification,
+            drag: &drag,
+            scroll_offset: 0.0,
+            peek,
+            bars: &bars,
+            height_fraction: 1.0,
+            paper_tint: 0.0,
+            peek_confirm: false,
+            theme: theme::Theme::default(),
+            open: None,
+            collapse: None,
+        };
+        let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
+        let bar = strip(None).layout_in(bounds).bars[0];
+        let peek = peek_target(bar, bounds, &notes[0], false);
+        // The peek's top right corner (where its trash sits) lies inside the
+        // strip, above the bar it grew from.
+        let on_peek_in_strip = Point::new(peek.x + peek.width - 4.0, peek.y + 4.0);
+        assert!(bounds.contains(on_peek_in_strip));
+        assert!(strip(Some((0, 1.0)))
+            .hover_message(bounds, on_peek_in_strip)
+            .is_none());
+
+        // Without a peek the same spot magnifies the bars as usual.
+        assert!(matches!(
+            strip(None).hover_message(bounds, on_peek_in_strip),
+            Some(Message::StripHover(Some(_)))
+        ));
+        // Off the peek, inside the strip: hover resumes.
+        let below = strip(None).layout_in(bounds).bars[1];
+        let off_peek = Point::new(below.center().x, peek.y + peek.height + 20.0);
+        assert!(matches!(
+            strip(Some((0, 1.0))).hover_message(bounds, off_peek),
+            Some(Message::StripHover(Some(_)))
+        ));
+        // Outside the strip the hover ends.
+        assert!(matches!(
+            strip(Some((0, 1.0))).hover_message(bounds, Point::new(10.0, 10.0)),
+            Some(Message::StripHover(None))
+        ));
     }
 
     #[test]
