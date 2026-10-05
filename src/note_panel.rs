@@ -1,11 +1,15 @@
+use crate::animation::ease_out_cubic;
 use crate::app::Message;
 use crate::color_picker::color_picker;
+use crate::icons::{icon, Icon};
 use crate::note::{Note, NoteColor};
 use crate::pass_wheel::pass_wheel;
+use crate::press_shift::press_shift;
 use crate::press_through::press_through;
 use crate::rich::Doc;
 use crate::rich_view;
-use crate::toolbar::toolbar;
+use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM};
+use crate::toolbar::{slide_padding, toolbar};
 
 use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, Scrollable};
 use iced::advanced::widget::{Id, Operation};
@@ -17,24 +21,11 @@ use iced::widget::{
     button, column, container, mouse_area, responsive, row, scrollable, stack, text, text_editor,
     text_input, Space,
 };
-use iced::{
-    font, gradient, Background, Border, Color, Element, Fill, Font, Length, Padding, Shadow, Size,
-};
+use iced::{border, gradient, Border, Color, Element, Fill, Length, Padding, Shadow, Size};
 use iced::{keyboard, mouse, Theme, Vector};
 
-/// Named explicitly: with the generic family, the bold face can fall back to a
-/// monospace font.
-#[cfg(target_os = "macos")]
-const TITLE_FAMILY: font::Family = font::Family::Name("Helvetica Neue");
-#[cfg(windows)]
-const TITLE_FAMILY: font::Family = font::Family::Name("Segoe UI");
-#[cfg(not(any(target_os = "macos", windows)))]
-const TITLE_FAMILY: font::Family = font::Family::SansSerif;
-pub(crate) const TITLE_FONT: Font = Font {
-    family: TITLE_FAMILY,
-    weight: font::Weight::Bold,
-    ..Font::DEFAULT
-};
+/// Shown in an empty note, in the editor and in the formatted view.
+pub(crate) const PLACEHOLDER: &str = "…";
 
 const BODY_SCROLL_ID: &str = "note-body-scroll";
 const BODY_EDITOR_ID: &str = "note-body-editor";
@@ -86,15 +77,21 @@ impl<T> Operation<T> for RevealLastLine {
 /// The body editor's vertical padding; its layout adds this on top of its
 /// minimum height.
 const EDITOR_PADDING_TOP: f32 = 6.0;
-const EDITOR_PADDING_BOTTOM: f32 = 18.0;
+const EDITOR_PADDING_BOTTOM: f32 = 14.0;
 const EDITOR_PADDING_Y: f32 = EDITOR_PADDING_TOP + EDITOR_PADDING_BOTTOM;
-
-const INK: [f32; 3] = [0.13, 0.12, 0.10];
-/// Corner radius of an open note (and of a fully open peek).
-pub(crate) const NOTE_RADIUS: f32 = 8.0;
+/// Gap between the note's edges and the body's scrollable, so the editor's
+/// focus ring stays clear of the rounded corners. The body padding makes up
+/// for it: the text sits 18 px in from the edges.
+const BODY_INSET: f32 = 8.0;
+const BODY_INSET_BOTTOM: f32 = 4.0;
+/// Width of a focus ring around the title and the editor.
+const FOCUS_RING: f32 = 1.5;
+/// Height of the grip along the top edge, under the adhesive band.
+const GRIP_HEIGHT: f32 = 16.0;
 
 pub struct PostIt<'a> {
     pub note: &'a Note,
+    pub theme: theme::Theme,
     pub palette: &'a [NoteColor],
     /// How much lighter (negative) or darker than its bar the paper is.
     pub paper_tint: f32,
@@ -117,67 +114,97 @@ pub struct PostIt<'a> {
     pub text_color_picker_open: bool,
     pub hovered: bool,
     pub dragging: bool,
+    /// Progress (0..=1) of the fade after switching edit/render mode.
+    pub mode_fade: f32,
 }
 
-pub(crate) fn ink(alpha: f32) -> Color {
-    Color::from_rgba(INK[0], INK[1], INK[2], alpha)
-}
-
-/// Mixes the note color toward black (`amount > 0`) or white (`amount < 0`).
-pub(crate) fn shade(note: &Note, amount: f32, alpha: f32) -> Color {
-    let [r, g, b, _] = note.color.rgba;
-    let mix = |c: f32| {
-        if amount >= 0.0 {
-            c * (1.0 - amount)
-        } else {
-            c + (1.0 - c) * -amount
-        }
-    };
-    Color::from_rgba(mix(r), mix(g), mix(b), alpha)
-}
-
-pub(crate) fn icon_button<'a>(
-    label: &'a str,
+/// A button whose background darkens while pressed and whose label sinks
+/// 1 px. `padding` goes around the label, inside the press area.
+pub(crate) fn pressable<'a>(
+    label: impl Into<Element<'a, Message>>,
+    padding: Padding,
     message: Message,
+) -> button::Button<'a, Message> {
+    button(press_shift(container(label).padding(padding)))
+        .padding(0)
+        .on_press(message)
+}
+
+/// A header control: a Lucide icon on a faint ink wash when hovered, a
+/// darker one when pressed.
+fn header_button<'a>(
+    glyph: Icon,
+    message: Message,
+    theme: theme::Theme,
     alpha: f32,
 ) -> Element<'a, Message> {
-    button(text(label).size(14))
-        .on_press(message)
-        .padding(Padding::new(3.0).left(7).right(7))
-        .style(move |_theme: &Theme, status| button::Style {
-            background: match status {
-                button::Status::Hovered | button::Status::Pressed => Some(ink(0.12 * alpha).into()),
-                _ => None,
-            },
-            text_color: ink(0.65 * alpha),
-            border: Border {
-                radius: 4.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into()
+    pressable(
+        icon(glyph, TEXT_SM),
+        Padding::new(space(1)).left(space(2)).right(space(2)),
+        message,
+    )
+    .style(move |_theme: &Theme, status| button::Style {
+        background: match status {
+            button::Status::Hovered => Some(theme.ink(0.12 * alpha).into()),
+            button::Status::Pressed => Some(theme.ink(0.22 * alpha).into()),
+            _ => None,
+        },
+        text_color: theme.ink(0.65 * alpha),
+        border: border::rounded(RADIUS_CONTROL),
+        ..Default::default()
+    })
+    .into()
+}
+
+/// The focus ring's border while `focused`, otherwise a plain rounded edge.
+fn focus_border(theme: theme::Theme, focused: bool, alpha: f32) -> Border {
+    let ring = theme.focus_ring();
+    Border {
+        color: Color {
+            a: ring.a * alpha,
+            ..ring
+        },
+        width: if focused { FOCUS_RING } else { 0.0 },
+        radius: RADIUS_CONTROL.into(),
+    }
 }
 
 /// Padding around the body text, the same in edit and rendered mode so the
-/// text doesn't jump when switching.
+/// text doesn't jump when switching. With `BODY_INSET` it puts the text
+/// 18 px in from the note's edges.
 fn body_padding() -> Padding {
     Padding::new(EDITOR_PADDING_TOP)
-        .left(18)
-        .right(18)
+        .left(18.0 - BODY_INSET)
+        .right(18.0 - BODY_INSET)
         .bottom(EDITOR_PADDING_BOTTOM)
 }
 
+/// Width of the body's scrollbar: slim while idle, wider while the pointer
+/// is over the note.
+fn scroller_width(active: bool) -> f32 {
+    if active {
+        6.0
+    } else {
+        3.0
+    }
+}
+
 /// The note body's scrollable, with a slim inked scrollbar.
-fn body_scrollable<'a>(content: impl Into<Element<'a, Message>>, a: f32) -> Element<'a, Message> {
+fn body_scrollable<'a>(
+    content: impl Into<Element<'a, Message>>,
+    theme: theme::Theme,
+    hovered: bool,
+    a: f32,
+) -> Element<'a, Message> {
+    let width = scroller_width(hovered);
     scrollable(content)
         .id(BODY_SCROLL_ID)
         .height(Fill)
         .direction(scrollable::Direction::Vertical(
             scrollable::Scrollbar::new()
-                .width(6)
-                .scroller_width(6)
-                .margin(5),
+                .width(width)
+                .scroller_width(width)
+                .margin(1),
         ))
         .style(move |_theme: &Theme, status| {
             let active = matches!(
@@ -185,17 +212,15 @@ fn body_scrollable<'a>(content: impl Into<Element<'a, Message>>, a: f32) -> Elem
                 scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
             );
             let rail = scrollable::Rail {
-                background: Some(ink(0.06 * a).into()),
-                border: Border {
-                    radius: 3.0.into(),
-                    ..Default::default()
-                },
+                background: Some(theme.ink(0.06 * a).into()),
+                border: border::rounded(width / 2.0),
                 scroller: scrollable::Scroller {
-                    background: ink(if active { 0.45 } else { 0.28 } * a).into(),
-                    border: Border {
-                        radius: 3.0.into(),
-                        ..Default::default()
-                    },
+                    background: Color {
+                        a: theme.scrollbar(active).a * a,
+                        ..theme.scrollbar(active)
+                    }
+                    .into(),
+                    border: border::rounded(width / 2.0),
                 },
             };
             scrollable::Style {
@@ -204,13 +229,25 @@ fn body_scrollable<'a>(content: impl Into<Element<'a, Message>>, a: f32) -> Elem
                 horizontal_rail: rail,
                 gap: None,
                 auto_scroll: scrollable::AutoScroll {
-                    background: ink(0.1 * a).into(),
+                    background: theme.ink(0.1 * a).into(),
                     border: Border::default(),
                     shadow: Shadow::default(),
-                    icon: ink(a),
+                    icon: theme.ink(a),
                 },
             }
         })
+        .into()
+}
+
+/// Holds the body's scrollable `BODY_INSET` in from the note's edges.
+fn body_inset<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .padding(
+            Padding::ZERO
+                .left(BODY_INSET)
+                .right(BODY_INSET)
+                .bottom(BODY_INSET_BOTTOM),
+        )
         .into()
 }
 
@@ -220,9 +257,24 @@ fn editor_min_height(available: f32) -> f32 {
     (available - EDITOR_PADDING_Y).max(0.0)
 }
 
+/// The paper while the note grows out of its bar: the bar's color at
+/// `progress` 0, so the morph has no seam where it meets the bar, easing
+/// into the theme's paper at 1.
+pub(crate) fn morph_paper(
+    theme: &theme::Theme,
+    color: NoteColor,
+    tint: f32,
+    progress: f32,
+) -> Color {
+    let [r, g, b, _] = color.rgba;
+    let bar = Color::from_rgb(r, g, b);
+    theme::mix(bar, theme.paper(color, tint), ease_out_cubic(progress))
+}
+
 pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     let PostIt {
         note,
+        theme,
         palette,
         paper_tint,
         idle_control_alpha,
@@ -239,16 +291,26 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         text_color_picker_open,
         hovered,
         dragging,
+        mode_fade,
     } = p;
+    let mode_eased = ease_out_cubic(mode_fade);
+    // The body that just appeared fades in after a mode switch.
+    let body_a = a * mode_eased;
+    // Space the sliding toolbar takes from the top of the editor below it,
+    // so the text stays put.
+    let borrowed = if editing {
+        slide_padding(mode_eased).borrowed()
+    } else {
+        0.0
+    };
     let controls = if hovered || dragging || color_picker_open || confirm_delete {
         a
     } else {
         a * idle_control_alpha
     };
 
-    // Starts as the bar color so the morph has no seam where it meets the bar.
-    let paper = shade(note, paper_tint * morph_progress, 1.0);
-    let shadow_alpha = 0.28 * morph_progress;
+    let paper = morph_paper(&theme, note.color, paper_tint, morph_progress);
+    let [contact, ambient] = theme.shadows(morph_progress);
 
     let inner: Element<'_, Message> = if a < 0.01 {
         Space::new().width(Fill).height(Fill).into()
@@ -256,36 +318,45 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         let title = text_input("Title", &note.title)
             .id(TITLE_ID)
             .on_input(Message::TitleEdited)
-            .size(16)
-            .padding(0)
-            .font(TITLE_FONT)
-            .style(move |_theme: &Theme, _status| text_input::Style {
+            .size(TEXT_MD)
+            .padding(Padding::new(2.0).left(4).right(4))
+            .font(theme::TITLE_FONT)
+            .style(move |_theme: &Theme, status| text_input::Style {
                 background: Color::TRANSPARENT.into(),
-                border: Border::default(),
-                icon: ink(a),
-                placeholder: ink(0.35 * a),
-                value: ink(a),
-                selection: ink(0.18 * a),
+                border: focus_border(
+                    theme,
+                    matches!(status, text_input::Status::Focused { .. }),
+                    a,
+                ),
+                icon: theme.ink(a),
+                placeholder: theme.ink(0.35 * a),
+                value: theme.ink(a),
+                selection: theme.ink(0.18 * a),
             });
 
+        let swatch_color = {
+            let [r, g, b, _] = note.color.rgba;
+            Color::from_rgba(r, g, b, controls)
+        };
         let swatch = container(Space::new().width(12).height(12)).style(move |_theme: &Theme| {
             container::Style {
-                background: Some(shade(note, 0.0, controls).into()),
+                background: Some(swatch_color.into()),
                 border: Border {
                     radius: 6.0.into(),
                     width: 1.0,
-                    color: ink(0.35 * controls),
+                    color: theme.ink(0.35 * controls),
                 },
                 ..Default::default()
             }
         });
-        let color_btn = button(swatch)
-            .on_press(Message::ToggleColorPicker)
-            .padding(5)
-            .style(|_theme: &Theme, _status| button::Style {
-                background: None,
+        let color_btn = pressable(swatch, Padding::new(5.0), Message::ToggleColorPicker).style(
+            move |_theme: &Theme, status| button::Style {
+                background: matches!(status, button::Status::Pressed)
+                    .then(|| theme.ink(0.12 * controls).into()),
+                border: border::rounded(RADIUS_CONTROL),
                 ..Default::default()
-            });
+            },
+        );
 
         // Any press on the header, title and buttons included, leaves edit
         // mode; the press still reaches them.
@@ -294,34 +365,49 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 row![
                     title,
                     color_btn,
-                    icon_button("🗑", Message::DeleteRequested, controls),
-                    icon_button("✕", Message::ClosePanel, controls),
+                    header_button(Icon::Trash, Message::DeleteRequested, theme, controls),
+                    header_button(Icon::Close, Message::ClosePanel, theme, controls),
                 ]
                 .spacing(2)
                 .align_y(iced::Alignment::Center),
             )
-            .padding(Padding::new(2.0).left(18).right(10).bottom(6)),
+            .padding(Padding::new(2.0).left(14).right(10).bottom(6)),
             Message::EditorBlurred,
         );
 
         // Grip along the top edge: drag to move the note, double-click to
-        // send it back next to the dock.
+        // send it back next to the dock. It sits on the adhesive band, under
+        // the paper's 1 px top highlight (kept clear of the rounded corners).
         let pill = container(Space::new().width(36).height(4)).style(move |_theme: &Theme| {
             container::Style {
-                background: Some(ink(0.3 * controls).into()),
-                border: Border {
-                    radius: 2.0.into(),
-                    ..Default::default()
-                },
+                background: Some(theme.ink(0.3 * controls).into()),
+                border: border::rounded(2),
                 ..Default::default()
             }
         });
+        let highlight = container(container(Space::new().width(Fill).height(1)).style(
+            move |_theme: &Theme| container::Style {
+                background: Some(theme.highlight().into()),
+                ..Default::default()
+            },
+        ))
+        .padding(Padding::ZERO.left(RADIUS_SURFACE).right(RADIUS_SURFACE));
         let grip = mouse_area(
-            container(pill)
-                .width(Fill)
-                .height(16)
-                .align_x(iced::Alignment::Center)
-                .align_y(iced::Alignment::Center),
+            container(column![
+                highlight,
+                container(pill)
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::Alignment::Center)
+                    .align_y(iced::Alignment::Center),
+            ])
+            .width(Fill)
+            .height(GRIP_HEIGHT)
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(theme.band().into()),
+                border: border::rounded(border::top(RADIUS_SURFACE)),
+                ..Default::default()
+            }),
         )
         .on_press(Message::NoteDragStart)
         .on_double_click(Message::NoteResetPosition)
@@ -336,34 +422,34 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         // fills exactly the space the body gets (measured, not estimated),
         // so clicks below short text still land in the editor.
         let body: Element<'_, Message> = if editing {
-            responsive(move |available| {
+            body_inset(responsive(move |available| {
                 let editor = text_editor(content)
                     .id(BODY_EDITOR_ID)
-                    .placeholder("Write something…")
+                    .placeholder(PLACEHOLDER)
                     .on_action(Message::NoteEdited)
                     .key_binding(body_key_binding)
-                    .min_height(editor_min_height(available.height))
-                    .size(14)
-                    .padding(body_padding())
+                    .min_height(editor_min_height(available.height) + borrowed)
+                    .size(TEXT_SM)
+                    .line_height(text::LineHeight::Relative(theme::BODY_LINE_HEIGHT))
+                    .padding(body_padding().top(EDITOR_PADDING_TOP - borrowed))
                     .style(move |_theme: &Theme, _status| text_editor::Style {
                         background: Color::TRANSPARENT.into(),
                         border: Border::default(),
-                        placeholder: ink(0.35 * a),
-                        value: ink(0.9 * a),
-                        selection: ink(0.18 * a),
+                        placeholder: theme.ink(0.35 * body_a),
+                        value: theme.ink(0.9 * body_a),
+                        selection: theme.ink(0.18 * body_a),
                     });
-                body_scrollable(pass_wheel(editor), a)
-            })
-            .into()
+                body_scrollable(pass_wheel(editor), theme, hovered, body_a)
+            }))
         } else {
             // Content inside a scrollable can't fill its height, so the
             // click target for the space below the text sits behind it.
-            let rendered = container(rich_view::view(doc, data_dir, broken_images, ink, a))
+            let rendered = container(rich_view::view(doc, data_dir, broken_images, theme, body_a))
                 .padding(body_padding());
             stack![
                 mouse_area(Space::new().width(Fill).height(Fill))
                     .on_press(Message::BodyClicked(None)),
-                body_scrollable(rendered, a),
+                body_inset(body_scrollable(rendered, theme, hovered, body_a)),
             ]
             .width(Fill)
             .height(Fill)
@@ -375,7 +461,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         let hairline =
             container(Space::new().width(Fill).height(1)).style(move |_theme: &Theme| {
                 container::Style {
-                    background: Some(ink(0.12 * a).into()),
+                    background: Some(theme.ink(0.12 * a).into()),
                     ..Default::default()
                 }
             });
@@ -383,8 +469,8 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             container::Style {
                 background: Some(
                     gradient::Linear::new(std::f32::consts::PI)
-                        .add_stop(0.0, ink(0.07 * a))
-                        .add_stop(1.0, ink(0.0))
+                        .add_stop(0.0, theme.ink(0.07 * a))
+                        .add_stop(1.0, theme.ink(0.0))
                         .into(),
                 ),
                 ..Default::default()
@@ -395,38 +481,52 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         let mut col = column![grip, header, divider];
         if color_picker_open {
             col = col.push(
-                container(color_picker(&note.color, palette))
+                container(color_picker(&note.color, palette, theme))
                     .padding(Padding::ZERO.left(14).bottom(6)),
             );
         }
         if editing {
-            col = col.push(toolbar(palette, text_color_picker_open, controls));
+            col = col.push(toolbar(
+                palette,
+                text_color_picker_open,
+                controls,
+                mode_eased,
+                theme,
+            ));
         }
         col = col.push(body);
 
         if confirm_delete {
             let choice = |label: &'static str, msg: Message, danger: bool| {
-                button(text(label).size(13))
-                    .on_press(msg)
-                    .padding(Padding::new(4.0).left(12).right(12))
-                    .style(move |_theme: &Theme, _status| button::Style {
+                pressable(
+                    text(label).size(TEXT_SM),
+                    Padding::new(space(1)).left(space(3)).right(space(3)),
+                    msg,
+                )
+                .style(move |_theme: &Theme, status| {
+                    let pressed = matches!(status, button::Status::Pressed);
+                    button::Style {
                         background: Some(if danger {
-                            Color::from_rgba(0.75, 0.18, 0.18, 0.95 * a).into()
+                            let fill = theme.danger(0.95 * a);
+                            if pressed {
+                                theme::mix(fill, Color::BLACK, 0.18)
+                            } else {
+                                fill
+                            }
+                            .into()
                         } else {
-                            ink(0.12 * a).into()
+                            theme.ink(if pressed { 0.22 } else { 0.12 } * a).into()
                         }),
-                        text_color: if danger { Color::WHITE } else { ink(a) },
-                        border: Border {
-                            radius: 4.0.into(),
-                            ..Default::default()
-                        },
+                        text_color: if danger { Color::WHITE } else { theme.ink(a) },
+                        border: border::rounded(RADIUS_CONTROL),
                         ..Default::default()
-                    })
+                    }
+                })
             };
             col = col.push(
                 container(
                     row![
-                        text("Delete this note?").size(13).color(ink(a)),
+                        text("Delete this note?").size(TEXT_SM).color(theme.ink(a)),
                         Space::new().width(Fill),
                         choice("Cancel", Message::ConfirmDelete(false), false),
                         choice("Delete", Message::ConfirmDelete(true), true),
@@ -436,7 +536,8 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 )
                 .padding(Padding::new(10.0).left(18))
                 .style(move |_theme: &Theme| container::Style {
-                    background: Some(shade(note, 0.08, a).into()),
+                    background: Some(theme.ink(0.06 * a).into()),
+                    border: border::rounded(border::bottom(RADIUS_SURFACE)),
                     ..Default::default()
                 }),
             );
@@ -444,24 +545,32 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         col.into()
     };
 
-    container(inner)
+    // Gradient quads draw no shadow, so each shadow sits on its own solid
+    // paper layer under the gradient one: ambient outside, contact inside.
+    let sheet = container(inner)
         .width(Length::Fixed(size.width))
         .height(Length::Fixed(size.height))
         .clip(true)
         .style(move |_theme: &Theme| container::Style {
-            background: Some(Background::Color(paper)),
-            border: Border {
-                radius: NOTE_RADIUS.into(),
-                ..Default::default()
-            },
-            shadow: Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, shadow_alpha),
-                offset: Vector::new(4.0, 10.0),
-                blur_radius: 22.0,
-            },
+            background: Some(theme.paper_gradient(paper, 1.0).into()),
+            border: border::rounded(RADIUS_SURFACE),
             ..Default::default()
-        })
-        .into()
+        });
+    paper_layer(paper_layer(sheet, paper, contact), paper, ambient).into()
+}
+
+/// A solid paper quad under `content` that casts `shadow`.
+fn paper_layer<'a>(
+    content: impl Into<Element<'a, Message>>,
+    paper: Color,
+    shadow: Shadow,
+) -> container::Container<'a, Message> {
+    container(content).style(move |_theme: &Theme| container::Style {
+        background: Some(paper.into()),
+        border: border::rounded(RADIUS_SURFACE),
+        shadow,
+        ..Default::default()
+    })
 }
 
 /// Whether the note's title field has keyboard focus.
@@ -570,6 +679,38 @@ mod tests {
     use super::*;
     use iced::advanced::widget::operation::scrollable::RelativeOffset;
     use iced::{Point, Size};
+
+    #[test]
+    fn empty_placeholder_text() {
+        assert_eq!(PLACEHOLDER, "…");
+    }
+
+    #[test]
+    fn paper_starts_as_the_bar() {
+        let close = |a: Color, b: Color| {
+            [a.r - b.r, a.g - b.g, a.b - b.b, a.a - b.a]
+                .iter()
+                .all(|d| d.abs() < 1e-5)
+        };
+        for mode in [theme::Mode::Light, theme::Mode::Dark] {
+            let theme = theme::Theme::new(mode);
+            for color in crate::note::PALETTE {
+                let [r, g, b, _] = color.rgba;
+                let bar = Color::from_rgb(r, g, b);
+                assert!(close(morph_paper(&theme, color, 0.2, 0.0), bar));
+                assert!(close(
+                    morph_paper(&theme, color, 0.2, 1.0),
+                    theme.paper(color, 0.2)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn scrollbar_widths() {
+        assert_eq!(scroller_width(true), 6.0);
+        assert_eq!(scroller_width(false), 3.0);
+    }
 
     #[test]
     fn editor_fills_body_without_overflow() {

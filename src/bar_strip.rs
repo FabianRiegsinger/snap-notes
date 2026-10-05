@@ -3,6 +3,7 @@ use crate::app::{DragState, Message};
 use crate::note::Note;
 use crate::peek::{draw_peek, peek_layout, peek_text};
 use crate::settings::BarSettings;
+use crate::theme;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
@@ -22,7 +23,20 @@ const ADD_MAX_HEIGHT_SCALE: f32 = 1.4;
 /// Magnification at which the "+" inside the add bar is fully visible.
 const ADD_PLUS_SCALE: f32 = 3.0;
 const EDGE_PADDING: f32 = 16.0;
-const CORNER_RADIUS: f32 = 3.0;
+const CORNER_RADIUS: f32 = theme::RADIUS_BAR;
+/// The open note's bar is this much wider than a docked one.
+const OPEN_BAR_SCALE: f32 = 1.5;
+
+/// The bar's rectangle: the open note's bar grows to the left from its right
+/// edge as the note unfolds (`progress` 0 is docked, 1 fully open).
+pub fn bar_rect_for(progress: f32, rect: Rectangle) -> Rectangle {
+    let width = rect.width * (1.0 + (OPEN_BAR_SCALE - 1.0) * progress);
+    Rectangle {
+        x: rect.x + rect.width - width,
+        width,
+        ..rect
+    }
+}
 
 pub struct StripLayout {
     pub bars: Vec<Rectangle>,
@@ -78,6 +92,9 @@ fn slot_size(bars: &BarSettings, scale: f32) -> Size {
 ///
 /// `scale(count)` is the add button's magnification, `scale(count + 1)` the
 /// settings button's (if `settings_slot`).
+///
+/// `collapse` is a deleted bar's index and how far it has collapsed (0..=1):
+/// its height and one gap next to it shrink by that share.
 pub fn compute_layout(
     count: usize,
     scale: impl Fn(usize) -> f32,
@@ -85,12 +102,27 @@ pub fn compute_layout(
     scroll_offset: f32,
     bars_settings: &BarSettings,
     settings_slot: bool,
+    collapse: Option<(usize, f32)>,
 ) -> StripLayout {
     let gap = bars_settings.gap;
+    let shrink = |i: usize| match collapse {
+        Some((c, t)) if c == i => 1.0 - t.clamp(0.0, 1.0),
+        _ => 1.0,
+    };
     let heights: Vec<f32> = (0..count)
-        .map(|i| bars_settings.height * scale(i))
+        .map(|i| bars_settings.height * scale(i) * shrink(i))
         .collect();
-    let bars_height: f32 = heights.iter().sum::<f32>() + gap * count.saturating_sub(1) as f32;
+    // Gap `i` sits below bar `i`; the last bar collapses into the gap above.
+    let gaps: Vec<f32> = (0..count.saturating_sub(1))
+        .map(|i| {
+            let owner = match collapse {
+                Some((c, _)) if c + 1 == count => i + 1,
+                _ => i,
+            };
+            gap * shrink(owner)
+        })
+        .collect();
+    let bars_height: f32 = heights.iter().sum::<f32>() + gaps.iter().sum::<f32>();
     let add_gap = if count > 0 { ADD_BUTTON_GAP } else { 0.0 };
     let add_size = slot_size(bars_settings, scale(count));
     let gear_size = slot_size(bars_settings, scale(count + 1));
@@ -117,10 +149,7 @@ pub fn compute_layout(
     for (i, h) in heights.iter().enumerate() {
         let w = bars_settings.width * scale(i);
         bars.push(Rectangle::new(Point::new(right - w, y), Size::new(w, *h)));
-        y += h + gap;
-    }
-    if count > 0 {
-        y += add_gap - gap;
+        y += h + gaps.get(i).copied().unwrap_or(add_gap);
     }
 
     let add_button = Rectangle::new(Point::new(right - add_size.width, y), add_size);
@@ -174,6 +203,12 @@ pub struct BarStrip<'a> {
     pub paper_tint: f32,
     /// The open peek asks whether to delete its note.
     pub peek_confirm: bool,
+    pub theme: theme::Theme,
+    /// Index of the open (or opening) note's bar and the note's morph
+    /// progress.
+    pub open: Option<(usize, f32)>,
+    /// Bar index of a deleted note and how far its bar has collapsed.
+    pub collapse: Option<(usize, f32)>,
 }
 
 impl<'a> BarStrip<'a> {
@@ -185,6 +220,7 @@ impl<'a> BarStrip<'a> {
             self.scroll_offset,
             self.bars,
             SETTINGS_SLOT,
+            self.collapse,
         )
     }
 
@@ -196,6 +232,19 @@ impl<'a> BarStrip<'a> {
         peek_target(bar, bounds, note, self.peek_confirm)
             .contains(pos)
             .then_some(i)
+    }
+
+    /// The hover update for a cursor at `pos`: magnify around it inside the
+    /// strip, end the hover outside. None over the open peek, so the bars
+    /// (and the peek centered on its bar) hold still while it's in use.
+    fn hover_message(&self, bounds: Rectangle, pos: Point) -> Option<Message> {
+        if self.peek_hit(bounds, pos).is_some() {
+            None
+        } else if bounds.contains(pos) {
+            Some(Message::StripHover(Some(pos.y)))
+        } else {
+            Some(Message::StripHover(None))
+        }
     }
 
     /// What a press at `pos` on the open peek does: delete-related clicks
@@ -285,6 +334,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             note,
                             *bar_rect,
                             bounds,
+                            &self.theme,
                             CORNER_RADIUS,
                             progress,
                             self.paper_tint,
@@ -301,24 +351,55 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 } else {
                     note.color.rgba[3]
                 };
-                let color = Color::from_rgba(
-                    note.color.rgba[0],
-                    note.color.rgba[1],
-                    note.color.rgba[2],
-                    alpha,
-                );
+                let open = self.open.filter(|(o, _)| *o == i);
+                let rect = bar_rect_for(open.map_or(0.0, |(_, p)| p), *bar_rect);
+                let corner = CORNER_RADIUS;
+                if open.is_some() {
+                    let [_, ambient] = self.theme.shadows(1.0);
+                    let [r, g, b, _] = note.color.rgba;
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: rect,
+                            border: iced::Border {
+                                radius: corner.into(),
+                                ..Default::default()
+                            },
+                            shadow: ambient,
+                            snap: true,
+                        },
+                        Color::from_rgba(r, g, b, alpha),
+                    );
+                }
                 renderer::Renderer::fill_quad(
                     renderer,
                     renderer::Quad {
-                        bounds: *bar_rect,
+                        bounds: rect,
                         border: iced::Border {
-                            radius: CORNER_RADIUS.into(),
+                            radius: corner.into(),
                             ..Default::default()
                         },
                         shadow: Default::default(),
                         snap: true,
                     },
-                    color,
+                    self.theme.bar_gradient(note.color, alpha),
+                );
+                renderer::Renderer::fill_quad(
+                    renderer,
+                    renderer::Quad {
+                        bounds: Rectangle::new(
+                            Point::new(rect.x + corner, rect.y),
+                            Size::new(
+                                (rect.width - 2.0 * corner).max(0.0),
+                                // A collapsing bar takes its highlight with it.
+                                rect.height.min(1.0),
+                            ),
+                        ),
+                        border: Default::default(),
+                        shadow: Default::default(),
+                        snap: true,
+                    },
+                    self.theme.highlight(),
                 );
             }
         }
@@ -335,6 +416,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             add,
             idle && cursor.is_over(strip.add_hit_area),
             add_reveal,
+            &self.theme,
         );
         if add_reveal > 0.0 {
             let thickness = 2.0;
@@ -356,7 +438,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                         shadow: Default::default(),
                         snap: true,
                     },
-                    Color::from_rgba(1.0, 1.0, 1.0, 0.95 * add_reveal),
+                    self.theme.card().scale_alpha(0.95 * add_reveal),
                 );
             }
         }
@@ -368,6 +450,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 gear,
                 idle && cursor.is_over(gear_hit),
                 gear_reveal,
+                &self.theme,
             );
             if gear_reveal > 0.0 {
                 for quad in settings_glyph(gear) {
@@ -382,7 +465,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             shadow: Default::default(),
                             snap: true,
                         },
-                        Color::from_rgba(1.0, 1.0, 1.0, 0.95 * gear_reveal),
+                        self.theme.card().scale_alpha(0.95 * gear_reveal),
                     );
                 }
             }
@@ -433,7 +516,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             shadow: Default::default(),
                             snap: true,
                         },
-                        Color::from_rgba(1.0, 1.0, 1.0, 0.8),
+                        self.theme.ink(0.8),
                     );
                 }
             }
@@ -455,10 +538,8 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
 
         match event {
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                if bounds.contains(*position) {
-                    shell.publish(Message::StripHover(Some(position.y)));
-                } else {
-                    shell.publish(Message::StripHover(None));
+                if let Some(message) = self.hover_message(bounds, *position) {
+                    shell.publish(message);
                 }
             }
             Event::Mouse(mouse::Event::CursorLeft) => {
@@ -575,9 +656,14 @@ pub fn peek_target(bar: Rectangle, bounds: Rectangle, note: &Note, confirming: b
 
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
 /// grows, darker while hovered.
-fn draw_slot(renderer: &mut iced::Renderer, rect: Rectangle, hovered: bool, reveal: f32) {
-    let fill_alpha = if hovered { 0.9 } else { 0.15 + 0.5 * reveal };
-    let shade = if hovered { 0.3 } else { 0.45 };
+fn draw_slot(
+    renderer: &mut iced::Renderer,
+    rect: Rectangle,
+    hovered: bool,
+    reveal: f32,
+    theme: &theme::Theme,
+) {
+    let fill_alpha = if hovered { 0.8 } else { 0.1 + 0.4 * reveal };
     renderer::Renderer::fill_quad(
         renderer,
         renderer::Quad {
@@ -585,12 +671,12 @@ fn draw_slot(renderer: &mut iced::Renderer, rect: Rectangle, hovered: bool, reve
             border: iced::Border {
                 radius: CORNER_RADIUS.into(),
                 width: 1.5 * (1.0 - reveal),
-                color: Color::from_rgba(0.45, 0.46, 0.5, 0.75),
+                color: theme.ink(0.4),
             },
             shadow: Default::default(),
             snap: true,
         },
-        Color::from_rgba(shade, shade + 0.01, shade + 0.05, fill_alpha),
+        theme.ink(fill_alpha),
     );
 }
 
@@ -610,6 +696,7 @@ mod tests {
             scroll,
             &BarSettings::default(),
             true,
+            None,
         )
     }
 
@@ -624,12 +711,42 @@ mod tests {
     }
 
     #[test]
+    fn open_bar_is_wider_and_keeps_its_right_edge() {
+        let r = Rectangle::new(Point::new(40.0, 100.0), Size::new(6.0, 30.0));
+        let open = bar_rect_for(1.0, r);
+        assert_eq!(open.width, r.width * 1.5);
+        assert_eq!(open.x + open.width, r.x + r.width);
+        assert_eq!((open.y, open.height), (r.y, r.height));
+        assert_eq!(bar_rect_for(0.0, r), r);
+        // It widens with the note's morph instead of jumping.
+        let half = bar_rect_for(0.5, r);
+        assert_eq!(half.width, r.width * 1.25);
+        assert_eq!(half.x + half.width, r.x + r.width);
+    }
+
+    #[test]
     fn stack_is_vertically_centered_for_any_count() {
         for count in [0, 1, 3, 8] {
             let l = layout(count, |_| 1.0, 900.0, 0.0);
             assert!((stack_center(&l) - 450.0).abs() < 0.01, "count {count}");
             assert_eq!(l.max_scroll, 0.0);
         }
+    }
+
+    #[test]
+    fn collapsing_bar_shrinks_with_progress() {
+        let d = BarSettings::default();
+        let with = |collapse| compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &d, true, collapse);
+        let full = with(None);
+        let half = with(Some((1, 0.5)));
+        assert!((half.bars[1].height - d.height / 2.0).abs() < 0.01);
+        let gone = with(Some((1, 1.0)));
+        assert_eq!(gone.bars[1].height, 0.0);
+        let extent = |l: &StripLayout| {
+            let gear = l.settings_button.unwrap();
+            gear.y + gear.height - l.bars[0].y
+        };
+        assert!((extent(&full) - extent(&gone) - (d.height + d.gap)).abs() < 0.01);
     }
 
     #[test]
@@ -646,7 +763,7 @@ mod tests {
             height: 50.0,
             gap: 20.0,
         };
-        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &bars, true);
+        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &bars, true, None);
         assert_eq!(l.bars[0].size(), Size::new(10.0, 50.0));
         let gap = l.bars[1].y - (l.bars[0].y + l.bars[0].height);
         assert!((gap - 20.0).abs() < 0.01);
@@ -749,6 +866,9 @@ mod tests {
             height_fraction: 1.0,
             paper_tint: 0.0,
             peek_confirm: false,
+            theme: theme::Theme::default(),
+            open: None,
+            collapse: None,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -757,6 +877,59 @@ mod tests {
         assert_eq!(strip(None).peek_hit(bounds, on_peek), None);
         let far = Point::new(bar.x - 600.0, bar.center().y);
         assert_eq!(strip(Some((0, 1.0))).peek_hit(bounds, far), None);
+    }
+
+    #[test]
+    fn bars_hold_still_while_the_cursor_is_on_the_peek() {
+        let notes = [
+            crate::note::Note::new(crate::note::PALETTE[0]),
+            crate::note::Note::new(crate::note::PALETTE[1]),
+        ];
+        let magnification = MagnificationState::new();
+        let drag = None;
+        let bars = BarSettings::default();
+        let strip = |peek| BarStrip {
+            notes: &notes,
+            magnification: &magnification,
+            drag: &drag,
+            scroll_offset: 0.0,
+            peek,
+            bars: &bars,
+            height_fraction: 1.0,
+            paper_tint: 0.0,
+            peek_confirm: false,
+            theme: theme::Theme::default(),
+            open: None,
+            collapse: None,
+        };
+        let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
+        let bar = strip(None).layout_in(bounds).bars[0];
+        let peek = peek_target(bar, bounds, &notes[0], false);
+        // The peek's top right corner (where its trash sits) lies inside the
+        // strip, above the bar it grew from.
+        let on_peek_in_strip = Point::new(peek.x + peek.width - 4.0, peek.y + 4.0);
+        assert!(bounds.contains(on_peek_in_strip));
+        assert!(strip(Some((0, 1.0)))
+            .hover_message(bounds, on_peek_in_strip)
+            .is_none());
+
+        // Without a peek the same spot magnifies the bars as usual.
+        assert!(matches!(
+            strip(None).hover_message(bounds, on_peek_in_strip),
+            Some(Message::StripHover(Some(_)))
+        ));
+        // Off the peek, inside the strip: hover resumes.
+        let below = strip(None).layout_in(bounds).bars[1];
+        let off_peek = Point::new(below.center().x, peek.y + peek.height + 20.0);
+        assert!(matches!(
+            strip(Some((0, 1.0))).hover_message(bounds, off_peek),
+            Some(Message::StripHover(Some(_)))
+        ));
+        // Outside the strip the hover ends.
+        assert!(matches!(
+            strip(Some((0, 1.0))).hover_message(bounds, Point::new(10.0, 10.0)),
+            Some(Message::StripHover(None))
+        ));
     }
 
     #[test]
@@ -769,6 +942,7 @@ mod tests {
                 0.0,
                 &BarSettings::default(),
                 false,
+                None,
             );
             assert!(l.settings_button.is_none() && l.settings_hit_area.is_none());
             let top = l.bars.first().map_or(l.add_button.y, |b| b.y);

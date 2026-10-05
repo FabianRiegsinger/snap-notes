@@ -3,14 +3,20 @@
 use crate::app::Message;
 use crate::hit_text::hit_text;
 use crate::note::NoteColor;
+use crate::note_panel::PLACEHOLDER;
 use crate::rich::{self, Block, BlockKind, Doc, Span};
+use crate::theme::{self, BODY_FONT, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XL};
 
 use iced::widget::{button, column, container, image, mouse_area, rich_text, row, text, Space};
-use iced::{font, Border, Color, ContentFit, Element, Fill, Font, Padding, Theme};
+use iced::{border, font, Color, ContentFit, Element, Fill, Font, Padding, Theme};
 use std::collections::HashSet;
 use std::path::Path;
 
-const BODY_SIZE: f32 = 14.0;
+const BODY_SIZE: f32 = TEXT_SM;
+/// Every line of the formatted view, its markers and `hit_text`'s layout
+/// share this line height, so hits land where the text is drawn.
+pub(crate) const LINE_HEIGHT: text::LineHeight =
+    text::LineHeight::Relative(theme::BODY_LINE_HEIGHT);
 const LIST_INDENT: f32 = 16.0;
 /// Space below each block; part of the block, so clicks there still hit it.
 const BLOCK_GAP: f32 = 6.0;
@@ -28,9 +34,9 @@ pub fn openable(url: &str) -> Option<&str> {
 
 fn heading_size(level: u8) -> f32 {
     match level {
-        1 => 22.0,
-        2 => 18.0,
-        _ => 16.0,
+        1 => TEXT_XL,
+        2 => TEXT_LG,
+        _ => TEXT_MD,
     }
 }
 
@@ -46,35 +52,41 @@ pub fn view<'a>(
     doc: &'a Doc,
     dir: &'a Path,
     broken: &'a HashSet<String>,
-    ink: impl Fn(f32) -> Color + Copy + 'a,
+    theme: theme::Theme,
     alpha: f32,
 ) -> Element<'a, Message> {
     if doc.blocks.is_empty() {
         // Same placeholder as the empty editor.
-        return text("Write something…")
+        return text(PLACEHOLDER)
             .size(BODY_SIZE)
-            .color(ink(0.35 * alpha))
+            .line_height(LINE_HEIGHT)
+            .color(theme.ink(0.35 * alpha))
             .into();
     }
-    column(doc.blocks.iter().map(|b| block(b, dir, broken, ink, alpha)))
-        .width(Fill)
-        .into()
+    column(
+        doc.blocks
+            .iter()
+            .map(|b| block(b, dir, broken, theme, alpha)),
+    )
+    .width(Fill)
+    .into()
 }
 
 fn block<'a>(
     block: &'a Block,
     dir: &'a Path,
     broken: &'a HashSet<String>,
-    ink: impl Fn(f32) -> Color + Copy + 'a,
+    theme: theme::Theme,
     alpha: f32,
 ) -> Element<'a, Message> {
+    let ink = move |a: f32| theme.ink(a);
     let size = match block.kind {
         BlockKind::Heading(level) => heading_size(level),
         _ => BODY_SIZE,
     };
     let bold = matches!(block.kind, BlockKind::Heading(_));
     let mono = block.kind == BlockKind::CodeBlock;
-    let styled = || lines(block, size, bold, mono, ink, alpha);
+    let styled = || lines(block, size, bold, mono, theme, alpha);
 
     let content: Element<'a, Message> = match &block.kind {
         BlockKind::Paragraph | BlockKind::Heading(_) => styled(),
@@ -84,24 +96,33 @@ fn block<'a>(
             task,
         } => {
             let marker: Element<'a, Message> = match (task, ordered) {
-                (Some(done), _) => button(text(if *done { "☑" } else { "☐" }).size(size))
-                    .on_press(Message::ToggleTask(block.source_line))
-                    .padding(0)
-                    .style(move |_theme: &Theme, status| button::Style {
-                        background: None,
-                        text_color: ink(if matches!(status, button::Status::Hovered) {
-                            1.0
-                        } else {
-                            0.75
-                        } * alpha),
-                        ..Default::default()
-                    })
-                    .into(),
+                (Some(done), _) => button(
+                    text(if *done { "☑" } else { "☐" })
+                        .size(size)
+                        .line_height(LINE_HEIGHT),
+                )
+                .on_press(Message::ToggleTask(block.source_line))
+                .padding(0)
+                .style(move |_theme: &Theme, status| button::Style {
+                    background: None,
+                    text_color: ink(if matches!(status, button::Status::Hovered) {
+                        1.0
+                    } else {
+                        0.75
+                    } * alpha),
+                    ..Default::default()
+                })
+                .into(),
                 (None, Some(n)) => text(format!("{n}."))
                     .size(size)
+                    .line_height(LINE_HEIGHT)
                     .color(ink(0.75 * alpha))
                     .into(),
-                (None, None) => text("•").size(size).color(ink(0.75 * alpha)).into(),
+                (None, None) => text("•")
+                    .size(size)
+                    .line_height(LINE_HEIGHT)
+                    .color(ink(0.75 * alpha))
+                    .into(),
             };
             row![
                 Space::new().width(LIST_INDENT * *depth as f32),
@@ -116,10 +137,7 @@ fn block<'a>(
             .padding(Padding::new(2.0).left(10))
             .style(move |_theme: &Theme| container::Style {
                 background: Some(ink(0.06 * alpha).into()),
-                border: Border {
-                    radius: 3.0.into(),
-                    ..Default::default()
-                },
+                border: border::rounded(theme::RADIUS_BAR),
                 ..Default::default()
             })
             .into(),
@@ -128,15 +146,13 @@ fn block<'a>(
             .padding(Padding::new(4.0).left(8).right(8))
             .style(move |_theme: &Theme| container::Style {
                 background: Some(ink(0.08 * alpha).into()),
-                border: Border {
-                    radius: 4.0.into(),
-                    ..Default::default()
-                },
+                border: border::rounded(theme::RADIUS_CONTROL),
                 ..Default::default()
             })
             .into(),
         BlockKind::Image { path, .. } if broken.contains(path) => text("image not found")
             .size(BODY_SIZE)
+            .line_height(LINE_HEIGHT)
             .color(ink(0.45 * alpha))
             .into(),
         BlockKind::Image { path, .. } => image(dir.join(path))
@@ -193,7 +209,7 @@ fn lines<'a>(
     size: f32,
     bold: bool,
     mono: bool,
-    ink: impl Fn(f32) -> Color + Copy + 'a,
+    theme: theme::Theme,
     alpha: f32,
 ) -> Element<'a, Message> {
     column(
@@ -204,7 +220,7 @@ fn lines<'a>(
                     .into_iter()
                     .map(|(i, range)| {
                         let s = &block.spans[i];
-                        styled(s, &s.text[range], size, bold, mono, ink, alpha)
+                        styled(s, &s.text[range], size, bold, mono, theme, alpha)
                     })
                     .collect();
                 if spans.is_empty() {
@@ -212,6 +228,7 @@ fn lines<'a>(
                     spans.push(text::Span::new(" ").size(size));
                 }
                 let line = rich_text(spans.clone())
+                    .line_height(LINE_HEIGHT)
                     .on_link_click(Message::LinkClicked)
                     .width(Fill);
                 hit_text(line, spans, move |offset| {
@@ -230,14 +247,14 @@ fn styled<'a>(
     size: f32,
     bold: bool,
     mono: bool,
-    ink: impl Fn(f32) -> Color,
+    theme: theme::Theme,
     alpha: f32,
 ) -> text::Span<'a, String> {
     let font = Font {
         family: if mono || s.code {
             font::Family::Monospace
         } else {
-            Font::DEFAULT.family
+            BODY_FONT.family
         },
         weight: if bold || s.bold {
             font::Weight::Bold
@@ -251,14 +268,7 @@ fn styled<'a>(
         },
         ..Font::DEFAULT
     };
-    let color = s
-        .color
-        .map(|c| note_color(c, alpha))
-        .unwrap_or_else(|| ink(0.9 * alpha));
-    let background = s
-        .background
-        .map(|c| note_color(c, alpha))
-        .or_else(|| (s.code && !mono).then(|| ink(0.08 * alpha)));
+    let (color, background) = span_colors(s, mono, theme, alpha);
     text::Span::new(content)
         .size(s.size.unwrap_or(size))
         .font(font)
@@ -269,9 +279,26 @@ fn styled<'a>(
         .link_maybe(s.link.clone())
 }
 
+/// A span's text and background colors.
+fn span_colors(s: &Span, mono: bool, theme: theme::Theme, alpha: f32) -> (Color, Option<Color>) {
+    // Text on a background takes the ink that reads on it (a highlight is
+    // light in both modes); a span's own color always wins.
+    let color = match (s.color, s.background) {
+        (Some(c), _) => note_color(c, alpha),
+        (None, Some(bg)) => theme.text_on(note_color(bg, 1.0), alpha),
+        (None, None) => theme.ink(0.9 * alpha),
+    };
+    let background = s
+        .background
+        .map(|c| note_color(c, alpha))
+        .or_else(|| (s.code && !mono).then(|| theme.ink(0.08 * alpha)));
+    (color, background)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::note::PALETTE;
 
     fn span(text: &str) -> Span {
         Span {
@@ -287,6 +314,38 @@ mod tests {
             pieces,
             vec![(0, vec![(0, 0..1)]), (2, vec![(0, 2..3), (1, 0..1)])]
         );
+    }
+
+    #[test]
+    fn highlight_text_contrasts_in_dark_mode() {
+        let theme = theme::Theme::new(theme::Mode::Dark);
+        let s = Span {
+            background: Some(PALETTE[5]),
+            ..span("hi")
+        };
+        let (fg, bg) = span_colors(&s, false, theme, 1.0);
+        let bg = bg.unwrap();
+        assert!(theme::contrast(fg, bg) >= 4.5);
+
+        // A span's own text color is kept over a background.
+        let s = Span {
+            color: Some(PALETTE[0]),
+            ..s
+        };
+        assert_eq!(
+            span_colors(&s, false, theme, 1.0).0,
+            note_color(PALETTE[0], 1.0)
+        );
+
+        // Without a background the text keeps the softened ink.
+        assert_eq!(span_colors(&span("x"), false, theme, 1.0).0, theme.ink(0.9));
+    }
+
+    #[test]
+    fn heading_sizes_follow_type_scale() {
+        assert_eq!(heading_size(1), theme::TEXT_XL);
+        assert_eq!(heading_size(2), theme::TEXT_LG);
+        assert_eq!(heading_size(3), theme::TEXT_MD);
     }
 
     #[test]

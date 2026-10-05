@@ -3,25 +3,25 @@
 
 use crate::app::Message;
 use crate::color_picker::swatch;
+use crate::icons::{icon, Icon};
+use crate::note_panel::pressable;
 #[cfg(any(windows, target_os = "macos", test))]
 use crate::settings::SettingToggle;
 use crate::settings::{SettingKey, Settings, SettingsGroup, PRESETS};
+use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM, TEXT_XS};
 
 #[cfg(any(windows, target_os = "macos"))]
 use iced::widget::toggler;
 use iced::widget::{button, column, container, row, scrollable, slider, text, Space};
-use iced::{
-    Background, Border, Color, Element, Fill, Length, Padding, Shadow, Size, Theme, Vector,
-};
+use iced::{border, Color, Element, Fill, Length, Padding, Shadow, Size, Theme};
 
 pub const PANEL_WIDTH: f32 = 360.0;
 pub const PANEL_MAX_HEIGHT: f32 = 600.0;
-
-/// Card color while open; it starts as the gear slot's gray.
-const CARD: [f32; 3] = [0.13, 0.13, 0.15];
-const SLOT: [f32; 3] = [0.45, 0.46, 0.5];
+/// The adhesive band across the card's top, as tall as the note's.
+const BAND_HEIGHT: f32 = 16.0;
 
 pub struct SettingsView<'a> {
+    pub theme: theme::Theme,
     pub settings: &'a Settings,
     pub size: Size,
     pub morph_progress: f32,
@@ -34,52 +34,66 @@ pub struct SettingsView<'a> {
     pub dock_forced: bool,
 }
 
-fn white(alpha: f32) -> Color {
-    Color::from_rgba(1.0, 1.0, 1.0, alpha)
+fn text_button<'a>(
+    label: impl Into<Element<'a, Message>>,
+    message: Message,
+    theme: theme::Theme,
+    alpha: f32,
+) -> Element<'a, Message> {
+    pressable(
+        label,
+        Padding::new(2.0).left(space(2)).right(space(2)),
+        message,
+    )
+    .style(move |_theme: &Theme, status| button::Style {
+        background: match status {
+            button::Status::Hovered => Some(theme.ink(0.1 * alpha).into()),
+            button::Status::Pressed => Some(theme.ink(0.2 * alpha).into()),
+            _ => None,
+        },
+        text_color: theme.ink(0.6 * alpha),
+        border: border::rounded(RADIUS_CONTROL),
+        ..Default::default()
+    })
+    .into()
 }
 
-fn text_button<'a>(label: &'a str, message: Message, alpha: f32) -> Element<'a, Message> {
-    button(text(label).size(12))
-        .on_press(message)
-        .padding(Padding::new(2.0).left(8).right(8))
-        .style(move |_theme: &Theme, status| button::Style {
-            background: match status {
-                button::Status::Hovered | button::Status::Pressed => {
-                    Some(white(0.1 * alpha).into())
-                }
-                _ => None,
-            },
-            text_color: white(0.6 * alpha),
-            border: Border {
-                radius: 4.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into()
-}
-
-fn group_header<'a>(group: SettingsGroup, a: f32) -> Element<'a, Message> {
+fn group_header<'a>(group: SettingsGroup, theme: theme::Theme, a: f32) -> Element<'a, Message> {
     row![
-        text(group.label()).size(13).color(white(0.9 * a)),
+        text(group.label())
+            .size(TEXT_SM)
+            .font(theme::TITLE_FONT)
+            .color(theme.ink(0.9 * a)),
         Space::new().width(Fill),
-        text_button("Reset", Message::ResetGroup(group), a),
+        text_button(
+            text("Reset").size(TEXT_XS),
+            Message::ResetGroup(group),
+            theme,
+            a
+        ),
     ]
     .align_y(iced::Alignment::Center)
     .into()
 }
 
-fn slider_row<'a>(settings: &Settings, key: SettingKey, a: f32) -> Element<'a, Message> {
+fn slider_row<'a>(
+    settings: &Settings,
+    key: SettingKey,
+    theme: theme::Theme,
+    a: f32,
+) -> Element<'a, Message> {
     let value = settings.get(key);
     column![
         row![
-            text(key.label()).size(12).color(white(0.75 * a)),
+            text(key.label()).size(TEXT_XS).color(theme.ink(0.75 * a)),
             Space::new().width(Fill),
-            text(key.format(value)).size(12).color(white(0.55 * a)),
+            text(key.format(value))
+                .size(TEXT_XS)
+                .color(theme.ink(0.55 * a)),
         ],
         slider(key.range(), value, move |v| Message::SettingChanged(key, v)).step(key.step()),
     ]
-    .spacing(4)
+    .spacing(space(1))
     .into()
 }
 
@@ -111,18 +125,19 @@ fn app_section<'a>(
     settings: &Settings,
     tray_ok: bool,
     dock_forced: bool,
+    theme: theme::Theme,
     a: f32,
 ) -> Element<'a, Message> {
-    let mut col = column![group_header(SettingsGroup::App, a)].spacing(10);
+    let mut col = column![group_header(SettingsGroup::App, theme, a)].spacing(space(2));
     for t in SettingToggle::ALL {
         let forced = t == SettingToggle::DockIcon && dock_forced;
         let mut switch = toggler(settings.is_on(t) || forced)
             .label(toggle_label(t))
-            .text_size(12)
-            .style(move |theme: &Theme, status| {
-                let style = toggler::default(theme, status);
+            .text_size(TEXT_XS)
+            .style(move |iced_theme: &Theme, status| {
+                let style = toggler::default(iced_theme, status);
                 toggler::Style {
-                    text_color: Some(white(0.75 * a)),
+                    text_color: Some(theme.ink(0.75 * a)),
                     ..style
                 }
             });
@@ -137,10 +152,11 @@ fn app_section<'a>(
 fn palette_section<'a>(
     settings: &Settings,
     selected: Option<usize>,
+    theme: theme::Theme,
     a: f32,
 ) -> Element<'a, Message> {
     const PER_ROW: usize = 5;
-    let mut col = column![group_header(SettingsGroup::Palette, a)].spacing(8);
+    let mut col = column![group_header(SettingsGroup::Palette, theme, a)].spacing(space(2));
     for (r, chunk) in settings.palette.chunks(PER_ROW).enumerate() {
         let slots = chunk.iter().enumerate().map(|(j, color)| {
             let i = r * PER_ROW + j;
@@ -152,17 +168,22 @@ fn palette_section<'a>(
                 28.0,
                 is_selected,
                 Message::PaletteSlotSelected(next),
+                theme,
             )
         });
-        col = col.push(row(slots).spacing(6));
+        col = col.push(row(slots).spacing(6.0));
     }
     if selected.is_some() {
-        col = col.push(text("Replace with").size(12).color(white(0.55 * a)));
+        col = col.push(
+            text("Replace with")
+                .size(TEXT_XS)
+                .color(theme.ink(0.55 * a)),
+        );
         for chunk in PRESETS.chunks(12) {
             col = col.push(
                 row(chunk
                     .iter()
-                    .map(|c| swatch(*c, 18.0, false, Message::PaletteColorChosen(*c))))
+                    .map(|c| swatch(*c, 18.0, false, Message::PaletteColorChosen(*c), theme)))
                 .spacing(0),
             );
         }
@@ -170,8 +191,24 @@ fn palette_section<'a>(
     col.into()
 }
 
+/// A solid quad under `content` that casts `shadow`.
+fn solid_layer<'a>(
+    content: impl Into<Element<'a, Message>>,
+    color: Color,
+    radius: f32,
+    shadow: Shadow,
+) -> container::Container<'a, Message> {
+    container(content).style(move |_theme: &Theme| container::Style {
+        background: Some(color.into()),
+        border: border::rounded(radius),
+        shadow,
+        ..Default::default()
+    })
+}
+
 pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
     let SettingsView {
+        theme,
         settings,
         size,
         morph_progress: t,
@@ -180,64 +217,117 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         tray_ok,
         dock_forced,
     } = v;
-    let mix = |i: usize| SLOT[i] + (CARD[i] - SLOT[i]) * t;
-    let card = Color::from_rgb(mix(0), mix(1), mix(2));
+    // The card starts as the gear slot's ink wash and settles into paper.
+    let paper = theme.card();
+    let card = theme::mix(theme::over(theme.ink(0.8), paper), paper, t);
+    let [contact, ambient] = theme.shadows(t);
 
     let inner: Element<'_, Message> = if a < 0.01 {
         Space::new().width(Fill).height(Fill).into()
     } else {
         let header = row![
-            text("Settings").size(16).color(white(a)),
+            text("Settings")
+                .size(TEXT_MD)
+                .font(theme::TITLE_FONT)
+                .color(theme.ink(a)),
             Space::new().width(Fill),
-            text_button("✕", Message::CloseSettings, a),
+            text_button(icon(Icon::Close, TEXT_SM), Message::CloseSettings, theme, a),
         ]
         .align_y(iced::Alignment::Center);
 
-        let mut body = column![].spacing(18).padding(Padding::ZERO.right(14));
+        let mut body = column![]
+            .spacing(space(4))
+            .padding(Padding::ZERO.right(space(3)));
         #[cfg(any(windows, target_os = "macos"))]
         {
-            body = body.push(app_section(settings, tray_ok, dock_forced, a));
+            body = body.push(app_section(settings, tray_ok, dock_forced, theme, a));
         }
         #[cfg(not(any(windows, target_os = "macos")))]
         let _ = (tray_ok, dock_forced);
         for group in SettingsGroup::SLIDERS {
-            let mut section = column![group_header(group, a)].spacing(10);
+            let mut section = column![group_header(group, theme, a)].spacing(space(2));
             for key in SettingKey::ALL.into_iter().filter(|k| k.group() == group) {
-                section = section.push(slider_row(settings, key, a));
+                section = section.push(slider_row(settings, key, theme, a));
             }
             body = body.push(section);
         }
-        body = body.push(palette_section(settings, selected_slot, a));
+        body = body.push(palette_section(settings, selected_slot, theme, a));
 
         column![header, scrollable(body).height(Fill)]
-            .spacing(12)
-            .padding(Padding::new(16.0).right(4))
+            .spacing(space(3))
+            .padding(Padding::new(space(4)).right(space(1)))
             .into()
     };
 
-    container(inner)
+    // Gradient quads draw no shadow, so each shadow sits on its own solid
+    // layer under the gradient one, as on the open note.
+    let radius = 3.0 + (RADIUS_SURFACE - 3.0) * t;
+    let sheet = container(inner)
         .width(Length::Fixed(size.width))
         .height(Length::Fixed(size.height))
         .clip(true)
         .style(move |_theme: &Theme| container::Style {
-            background: Some(Background::Color(card)),
-            border: Border {
-                radius: (3.0 + 7.0 * t).into(),
-                ..Default::default()
-            },
-            shadow: Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, 0.28 * t),
-                offset: Vector::new(4.0, 10.0),
-                blur_radius: 22.0,
-            },
+            background: Some(theme.paper_gradient(card, 1.0).into()),
+            border: border::rounded(radius),
             ..Default::default()
-        })
-        .into()
+        });
+    let highlight = container(container(Space::new().width(Fill).height(1)).style(
+        move |_theme: &Theme| {
+            container::Style {
+                background: Some(
+                    Color {
+                        a: theme.highlight().a * t,
+                        ..theme.highlight()
+                    }
+                    .into(),
+                ),
+                ..Default::default()
+            }
+        },
+    ))
+    .padding(Padding::ZERO.left(radius).right(radius))
+    .width(Length::Fixed(size.width));
+    // The adhesive band across the top, as on the note; it fades in with
+    // the morph like the highlight.
+    let band = container(Space::new().width(Fill).height(Fill))
+        .width(Length::Fixed(size.width))
+        .height(BAND_HEIGHT)
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(
+                Color {
+                    a: theme.band().a * t,
+                    ..theme.band()
+                }
+                .into(),
+            ),
+            border: border::rounded(border::top(radius)),
+            ..Default::default()
+        });
+    let top = iced::widget::stack![sheet, band, highlight];
+    solid_layer(
+        solid_layer(top, card, radius, contact),
+        card,
+        radius,
+        ambient,
+    )
+    .into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::{self, contrast, Mode};
+
+    #[test]
+    fn settings_text_is_readable_in_both_modes() {
+        for mode in [Mode::Light, Mode::Dark] {
+            let theme = theme::Theme::new(mode);
+            let card = theme.card();
+            assert!(contrast(theme.ink(1.0), card) >= 7.0, "{mode:?} ink");
+            let muted = theme::over(theme.ink(0.55), card);
+            assert!(contrast(muted, card) > 3.0, "{mode:?} muted");
+        }
+    }
 
     #[test]
     fn dock_toggle_locked_without_tray() {

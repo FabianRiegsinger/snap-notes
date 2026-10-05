@@ -1,10 +1,17 @@
 use crate::app::Message;
 use crate::note::NoteColor;
 
-use iced::widget::{button, column, container, row, text, Space};
-use iced::{Color, Element, Theme};
+use crate::icons::{icon, Icon};
+use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE};
 
-pub fn color_picker<'a>(current: &NoteColor, palette: &'a [NoteColor]) -> Element<'a, Message> {
+use iced::widget::{button, column, container, row, Space};
+use iced::{border, Color, Element, Theme};
+
+pub fn color_picker<'a>(
+    current: &NoteColor,
+    palette: &'a [NoteColor],
+    theme: theme::Theme,
+) -> Element<'a, Message> {
     let rows: Vec<Element<'a, Message>> = palette
         .chunks(5)
         .map(|chunk| {
@@ -16,37 +23,45 @@ pub fn color_picker<'a>(current: &NoteColor, palette: &'a [NoteColor]) -> Elemen
                         24.0,
                         *color == *current,
                         Message::ColorChosen(*color),
+                        theme,
                     )
                 })
                 .collect();
-            row(btns).spacing(4).into()
+            row(btns).spacing(space(1)).into()
         })
         .collect();
 
-    container(column(rows).spacing(4))
-        .padding(8)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(Color::from_rgba(0.15, 0.15, 0.15, 0.95).into()),
+    container(column(rows).spacing(space(1)))
+        .padding(space(2))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(theme.card().into()),
             border: iced::Border {
-                radius: 8.0.into(),
+                radius: RADIUS_SURFACE.into(),
                 width: 1.0,
-                color: Color::from_rgba(0.4, 0.4, 0.4, 0.5),
+                color: theme.ink(0.15),
             },
             ..Default::default()
         })
         .into()
 }
 
-/// A round color button; `selected` adds a white ring and a check mark.
+/// A color button; `selected` adds an ink ring and a check mark.
 pub(crate) fn swatch<'a>(
     color: NoteColor,
     size: f32,
     selected: bool,
     on_press: Message,
+    theme: theme::Theme,
 ) -> Element<'a, Message> {
     let [r, g, b, _] = color.rgba;
+    let fill = Color::from_rgb(r, g, b);
     let mark: Element<'a, Message> = if selected {
-        text("✓").size(size / 2.0).into()
+        let on_fill = if theme::relative_luminance(fill) > 0.4 {
+            Color::BLACK
+        } else {
+            Color::WHITE
+        };
+        icon(Icon::Check, size / 2.0).color(on_fill).into()
     } else {
         Space::new().into()
     };
@@ -56,11 +71,11 @@ pub(crate) fn swatch<'a>(
         .align_x(iced::Alignment::Center)
         .align_y(iced::Alignment::Center)
         .style(move |_theme: &Theme| container::Style {
-            background: Some(Color::from_rgb(r, g, b).into()),
+            background: Some(fill.into()),
             border: iced::Border {
-                radius: (size / 2.0).into(),
                 width: if selected { 2.0 } else { 0.0 },
-                color: Color::WHITE,
+                color: theme.ink(1.0),
+                ..border::rounded(RADIUS_CONTROL)
             },
             ..Default::default()
         });

@@ -131,6 +131,11 @@ impl Morph {
         Self::with_durations(PEEK_OPEN_SECS, PEEK_CLOSE_SECS, speed)
     }
 
+    /// One duration for both directions; `speed` 2 runs twice as fast.
+    pub fn with_secs(secs: f32, speed: f32) -> Self {
+        Self::with_durations(secs, secs, speed)
+    }
+
     fn with_durations(base_open_secs: f32, base_close_secs: f32, speed: f32) -> Self {
         Self {
             progress: 0.0,
@@ -292,6 +297,20 @@ mod tests {
         m.open();
         m.tick(OPEN_SECS / 2.0 + 1e-4);
         assert_eq!(m.progress(), 1.0);
+    }
+
+    #[test]
+    fn with_secs_finishes_in_its_duration() {
+        for (speed, ticks) in [(1.0, 12), (2.0, 6)] {
+            let mut m = Morph::with_secs(0.18, speed);
+            m.open();
+            let mut running = true;
+            for _ in 0..ticks {
+                running = m.tick(1.0 / 60.0);
+            }
+            assert!(!running, "speed {speed}");
+            assert_eq!(m.progress(), 1.0);
+        }
     }
 
     #[test]

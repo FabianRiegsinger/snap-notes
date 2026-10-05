@@ -3,28 +3,36 @@
 //! first lines of the body below, laid out like the open note.
 
 use crate::animation::{ease_out_cubic, lerp};
+use crate::icons::{Icon, ICON_FONT};
 use crate::note::Note;
-use crate::note_panel::{ink, shade, NOTE_RADIUS, TITLE_FONT};
+use crate::note_panel::{morph_paper, PLACEHOLDER};
 use crate::rich;
+use crate::theme::{self, Theme, TITLE_FONT};
 
 use iced::advanced::renderer::{self, Quad};
 use iced::advanced::text::Renderer as _;
 use iced::advanced::Text;
 use iced::alignment;
+use iced::border;
 use iced::widget::text::{LineHeight, Shaping, Wrapping};
-use iced::{Border, Color, Font, Pixels, Point, Rectangle, Shadow, Size, Vector};
+use iced::{Border, Color, Font, Pixels, Point, Rectangle, Shadow, Size};
 
 pub const PEEK_WIDTH: f32 = 260.0;
 /// Same insets and type sizes as the open note.
 const PADDING_X: f32 = 18.0;
-const PADDING_TOP: f32 = 12.0;
+/// Under the adhesive band, plus the open note's 2 px title padding.
+const PADDING_TOP: f32 = BAND_HEIGHT + 2.0;
+const BAND_HEIGHT: f32 = 16.0;
 const PADDING_BOTTOM: f32 = 14.0;
-const TITLE_SIZE: f32 = 16.0;
+const TITLE_SIZE: f32 = theme::TEXT_MD;
 const TITLE_LINE: f32 = 21.0;
-const BODY_SIZE: f32 = 14.0;
-const BODY_LINE: f32 = 19.0;
+const BODY_SIZE: f32 = theme::TEXT_SM;
+/// The open note's body font, for the body, confirmation and buttons.
+const BODY_FONT: Font = theme::BODY_FONT;
+/// The open note's body line height, as whole pixels for layout.
+const BODY_LINE: f32 = (theme::TEXT_SM * theme::BODY_LINE_HEIGHT + 0.5).floor();
 /// Space between the title and the divider, and the divider and the body.
-const DIVIDER_GAP: f32 = 6.0;
+const DIVIDER_GAP: f32 = 8.0;
 const BODY_GAP: f32 = 8.0;
 /// The divider is inset like the note's.
 const DIVIDER_INSET: f32 = 14.0;
@@ -36,8 +44,6 @@ const TRASH_INSET: f32 = 8.0;
 const CONFIRM_BUTTON: Size = Size::new(68.0, 24.0);
 const CONFIRM_GAP: f32 = 8.0;
 const CONFIRM_HEIGHT: f32 = BODY_LINE + CONFIRM_GAP + 24.0;
-/// The open note's confirmation colors.
-const DANGER: Color = Color::from_rgba(0.75, 0.18, 0.18, 0.95);
 /// Rough glyph widths as a share of the font size, kept generous so the
 /// estimated text height never cuts text off.
 const TITLE_GLYPH: f32 = 0.62;
@@ -170,7 +176,7 @@ pub fn peek_layout(
 
 /// Corner radius while opening: the bar's, rounding into the note's.
 fn peek_radius(bar_radius: f32, progress: f32) -> f32 {
-    lerp(bar_radius, NOTE_RADIUS, ease_out_cubic(progress))
+    lerp(bar_radius, theme::RADIUS_SURFACE, ease_out_cubic(progress))
 }
 
 /// Draws `label` centered in `rect`, clipped to `clip`.
@@ -178,6 +184,7 @@ fn draw_label(
     renderer: &mut iced::Renderer,
     label: &str,
     rect: Rectangle,
+    font: Font,
     size: f32,
     color: Color,
     clip: Rectangle,
@@ -188,7 +195,7 @@ fn draw_label(
             bounds: rect.size(),
             size: Pixels(size),
             line_height: LineHeight::default(),
-            font: Font::DEFAULT,
+            font,
             align_x: alignment::Horizontal::Center.into(),
             align_y: alignment::Vertical::Center,
             shaping: Shaping::Advanced,
@@ -214,7 +221,7 @@ fn draw_button(
         Quad {
             bounds: rect,
             border: Border {
-                radius: 4.0.into(),
+                radius: theme::RADIUS_CONTROL.into(),
                 ..Default::default()
             },
             shadow: Shadow::default(),
@@ -222,7 +229,15 @@ fn draw_button(
         },
         fill,
     );
-    draw_label(renderer, label, rect, 13.0, text_color, clip);
+    draw_label(
+        renderer,
+        label,
+        rect,
+        BODY_FONT,
+        theme::TEXT_SM,
+        text_color,
+        clip,
+    );
 }
 
 /// Draws the peek: the bar's color turning into paper, then the title,
@@ -235,6 +250,7 @@ pub fn draw_peek(
     note: &Note,
     bar: Rectangle,
     bounds: Rectangle,
+    theme: &Theme,
     radius: f32,
     progress: f32,
     paper_tint: f32,
@@ -245,22 +261,69 @@ pub fn draw_peek(
     let layout = peek_layout(bar, bounds, progress, &text, confirming);
     let rect = layout.rect;
     let t = ease_out_cubic(progress);
+    // Gradient quads draw no shadow, so each shadow sits on its own solid
+    // paper quad under the gradient one: ambient first, then contact.
+    let paper = morph_paper(theme, note.color, paper_tint, progress);
+    let corner = peek_radius(radius, progress);
+    let [contact, ambient] = theme.shadows(progress);
+    for shadow in [ambient, contact] {
+        renderer::Renderer::fill_quad(
+            renderer,
+            Quad {
+                bounds: rect,
+                border: Border {
+                    radius: corner.into(),
+                    ..Default::default()
+                },
+                shadow,
+                snap: true,
+            },
+            paper,
+        );
+    }
     renderer::Renderer::fill_quad(
         renderer,
         Quad {
             bounds: rect,
             border: Border {
-                radius: peek_radius(radius, progress).into(),
+                radius: corner.into(),
                 ..Default::default()
             },
-            shadow: Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, 0.25 * progress),
-                offset: Vector::new(-2.0, 4.0),
-                blur_radius: 12.0,
-            },
+            shadow: Shadow::default(),
             snap: true,
         },
-        shade(note, paper_tint * t, 1.0),
+        theme.paper_gradient(paper, 1.0),
+    );
+    // The adhesive band and 1 px highlight fade in as the bar becomes paper.
+    let fade = |c: Color| Color { a: c.a * t, ..c };
+    renderer::Renderer::fill_quad(
+        renderer,
+        Quad {
+            bounds: Rectangle {
+                height: BAND_HEIGHT.min(rect.height),
+                ..rect
+            },
+            border: Border {
+                radius: border::top(corner),
+                ..Default::default()
+            },
+            shadow: Shadow::default(),
+            snap: true,
+        },
+        fade(theme.band()),
+    );
+    renderer::Renderer::fill_quad(
+        renderer,
+        Quad {
+            bounds: Rectangle::new(
+                Point::new(rect.x + corner, rect.y),
+                Size::new((rect.width - 2.0 * corner).max(0.0), 1.0),
+            ),
+            border: Border::default(),
+            shadow: Shadow::default(),
+            snap: true,
+        },
+        fade(theme.highlight()),
     );
 
     let alpha = ease_out_cubic((progress - 0.7) / 0.3);
@@ -269,35 +332,41 @@ pub fn draw_peek(
     }
 
     let hovered = |r: Rectangle| cursor.is_some_and(|c| r.contains(c));
-    let mut draw_text =
-        |content: String, at: Point, font: Font, size: f32, line: f32, rows: usize, color| {
-            // The title stays clear of the delete button.
-            let width = if font == TITLE_FONT {
-                title_width()
-            } else {
-                inner_width()
-            };
-            renderer.fill_text(
-                Text {
-                    content,
-                    bounds: Size::new(width, rows as f32 * line),
-                    size: Pixels(size),
-                    line_height: LineHeight::Absolute(Pixels(line)),
-                    font,
-                    align_x: alignment::Horizontal::Left.into(),
-                    align_y: alignment::Vertical::Top,
-                    shaping: Shaping::Advanced,
-                    wrapping: if rows > 1 {
-                        Wrapping::WordOrGlyph
-                    } else {
-                        Wrapping::None
-                    },
-                },
-                at,
-                color,
-                rect,
-            );
+    let mut draw_text = |content: String,
+                         at: Point,
+                         font: Font,
+                         size: f32,
+                         line: f32,
+                         line_height: LineHeight,
+                         rows: usize,
+                         color| {
+        // The title stays clear of the delete button.
+        let width = if font == TITLE_FONT {
+            title_width()
+        } else {
+            inner_width()
         };
+        renderer.fill_text(
+            Text {
+                content,
+                bounds: Size::new(width, rows as f32 * line),
+                size: Pixels(size),
+                line_height,
+                font,
+                align_x: alignment::Horizontal::Left.into(),
+                align_y: alignment::Vertical::Top,
+                shaping: Shaping::Advanced,
+                wrapping: if rows > 1 {
+                    Wrapping::WordOrGlyph
+                } else {
+                    Wrapping::None
+                },
+            },
+            at,
+            color,
+            rect,
+        );
+    };
 
     // Header: the title, or the note's faint placeholder.
     match &text.title {
@@ -307,8 +376,9 @@ pub fn draw_peek(
             TITLE_FONT,
             TITLE_SIZE,
             TITLE_LINE,
+            LineHeight::Absolute(Pixels(TITLE_LINE)),
             title_rows(title),
-            ink(alpha),
+            theme.ink(alpha),
         ),
         None => draw_text(
             "Title".into(),
@@ -316,8 +386,9 @@ pub fn draw_peek(
             TITLE_FONT,
             TITLE_SIZE,
             TITLE_LINE,
+            LineHeight::Absolute(Pixels(TITLE_LINE)),
             1,
-            ink(0.35 * alpha),
+            theme.ink(0.35 * alpha),
         ),
     }
 
@@ -326,21 +397,23 @@ pub fn draw_peek(
         draw_text(
             "Delete this note?".into(),
             layout.body,
-            Font::DEFAULT,
-            13.0,
+            BODY_FONT,
+            theme::TEXT_SM,
             BODY_LINE,
+            LineHeight::Relative(theme::BODY_LINE_HEIGHT),
             1,
-            ink(alpha),
+            theme.ink(alpha),
         );
     } else if text.lines.is_empty() {
         draw_text(
-            "Write something…".into(),
+            PLACEHOLDER.into(),
             layout.body,
-            Font::DEFAULT,
+            BODY_FONT,
             BODY_SIZE,
             BODY_LINE,
+            LineHeight::Relative(theme::BODY_LINE_HEIGHT),
             1,
-            ink(0.35 * alpha),
+            theme.ink(0.35 * alpha),
         );
     }
     for (i, content) in text
@@ -353,11 +426,12 @@ pub fn draw_peek(
         draw_text(
             content,
             at,
-            Font::DEFAULT,
+            BODY_FONT,
             BODY_SIZE,
             BODY_LINE,
+            LineHeight::Relative(theme::BODY_LINE_HEIGHT),
             1,
-            ink(0.8 * alpha),
+            theme.ink(0.8 * alpha),
         );
     }
 
@@ -372,7 +446,7 @@ pub fn draw_peek(
             shadow: Shadow::default(),
             snap: true,
         },
-        ink(0.12 * alpha),
+        theme.ink(0.12 * alpha),
     );
 
     let trash_alpha = if hovered(layout.trash) || confirming {
@@ -382,10 +456,11 @@ pub fn draw_peek(
     };
     draw_label(
         renderer,
-        "🗑",
+        &Icon::Trash.codepoint().to_string(),
         layout.trash,
+        ICON_FONT,
         14.0,
-        ink(trash_alpha * alpha),
+        theme.ink(trash_alpha * alpha),
         rect,
     );
     if confirming {
@@ -394,10 +469,7 @@ pub fn draw_peek(
             renderer,
             "Delete",
             layout.delete,
-            Color {
-                a: shade_if(layout.delete, DANGER.a - 0.08) * alpha,
-                ..DANGER
-            },
+            theme.danger(shade_if(layout.delete, 0.87) * alpha),
             Color::WHITE,
             rect,
         );
@@ -405,8 +477,8 @@ pub fn draw_peek(
             renderer,
             "Cancel",
             layout.cancel,
-            ink(shade_if(layout.cancel, 0.12) * alpha),
-            ink(alpha),
+            theme.ink(shade_if(layout.cancel, 0.12) * alpha),
+            theme.ink(alpha),
             rect,
         );
     }
@@ -422,6 +494,20 @@ mod tests {
         n.title = title.to_string();
         n.content = content.to_string();
         n
+    }
+
+    #[test]
+    fn peek_body_line_follows_type_scale() {
+        assert_eq!(
+            BODY_LINE,
+            (theme::TEXT_SM * theme::BODY_LINE_HEIGHT).round()
+        );
+        assert_eq!(TITLE_SIZE, theme::TEXT_MD);
+    }
+
+    #[test]
+    fn peek_uses_bundled_font() {
+        assert_eq!(BODY_FONT, theme::BODY_FONT);
     }
 
     #[test]
@@ -467,7 +553,7 @@ mod tests {
     #[test]
     fn peek_corners_round_like_the_note() {
         assert_eq!(peek_radius(3.0, 0.0), 3.0);
-        assert_eq!(peek_radius(3.0, 1.0), NOTE_RADIUS);
+        assert_eq!(peek_radius(3.0, 1.0), theme::RADIUS_SURFACE);
     }
 
     #[test]

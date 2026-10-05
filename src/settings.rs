@@ -57,10 +57,13 @@ pub struct NoteSettings {
     pub idle_control_alpha: f32,
 }
 
+/// Default note sizes of earlier versions.
+const OLD_DEFAULT_NOTE_SIZES: [f32; 3] = [320.0, 380.0, 420.0];
+
 impl Default for NoteSettings {
     fn default() -> Self {
         Self {
-            size: 320.0,
+            size: 500.0,
             paper_tint: -0.12,
             idle_control_alpha: 0.3,
         }
@@ -224,7 +227,7 @@ impl SettingKey {
             SettingKey::Magnification => 0.0..=5.0,
             SettingKey::Spread => 20.0..=150.0,
             SettingKey::PeekDelay => 0.0..=3.0,
-            SettingKey::NoteSize => 240.0..=440.0,
+            SettingKey::NoteSize => 240.0..=600.0,
             SettingKey::PaperTint => -0.3..=0.3,
             SettingKey::IdleControlAlpha => 0.0..=1.0,
             SettingKey::Speed => 0.25..=3.0,
@@ -339,6 +342,12 @@ impl Settings {
             {
                 settings.set(key, v as f32);
             }
+        }
+        // Every value is saved, defaults included, so a file written before
+        // the default note size grew still holds an old default. Treat those
+        // as "default" rather than as the user's choice.
+        if OLD_DEFAULT_NOTE_SIZES.contains(&settings.notes.size) {
+            settings.notes.size = NoteSettings::default().size;
         }
         if let Some(entries) = value.get("palette").and_then(|p| p.as_array()) {
             if entries.len() == PALETTE.len() {
@@ -618,7 +627,7 @@ mod tests {
         );
         assert_eq!(
             (s.notes.size, s.notes.paper_tint, s.notes.idle_control_alpha),
-            (320.0, -0.12, 0.3)
+            (500.0, -0.12, 0.3)
         );
         assert_eq!(s.motion.speed, 1.0);
         assert_eq!(s.window.height_fraction, 0.9);
@@ -663,6 +672,24 @@ mod tests {
         let mut s = Settings::default();
         s.set(SettingKey::Speed, f32::NAN);
         assert_eq!(s.motion.speed, 1.0);
+    }
+
+    #[test]
+    fn default_note_fits_the_toolbar_on_one_line_with_room_to_spare() {
+        let size = Settings::default().notes.size;
+        assert!(size >= crate::toolbar::ONE_LINE_WIDTH + 40.0, "{size}");
+        assert!(SettingKey::NoteSize.range().contains(&size));
+    }
+
+    #[test]
+    fn saved_old_default_size_upgrades_to_the_new_default() {
+        for old in [320.0, 380.0, 420.0] {
+            let s = Settings::from_json(&format!(r#"{{"notes":{{"size":{old}}}}}"#));
+            assert_eq!(s.notes.size, Settings::default().notes.size, "{old}");
+        }
+        // A size the user picked themselves stays.
+        let s = Settings::from_json(r#"{"notes":{"size":350}}"#);
+        assert_eq!(s.notes.size, 350.0);
     }
 
     #[test]
@@ -875,7 +902,7 @@ mod tests {
         let mut s = Settings::default();
         let width = STRIP_WIDTH + NOTE_GAP + MAX_NOTE_WIDTH + NOTE_MARGIN;
         assert_eq!(s.open_width(), width);
-        s.set(SettingKey::NoteSize, 440.0);
+        s.set(SettingKey::NoteSize, 600.0);
         assert_eq!(s.open_width(), width);
     }
 }
