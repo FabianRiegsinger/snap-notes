@@ -53,8 +53,6 @@ pub struct ExportState {
     pub format: ExportFormat,
     /// The last export's result and when it happened.
     pub status: Option<(ExportStatus, Instant)>,
-    /// The save dialog is open.
-    pub picking: bool,
     /// Tells this opening of the panel from earlier ones, so a dialog an
     /// earlier one started doesn't report into it.
     pub generation: u64,
@@ -67,7 +65,6 @@ impl ExportState {
             selected: notes.iter().map(|n| n.id).collect(),
             format: ExportFormat::Markdown,
             status: None,
-            picking: false,
             generation,
         }
     }
@@ -90,10 +87,10 @@ impl ExportState {
             .collect()
     }
 
-    /// Whether Export can start: no dialog is open and at least one
-    /// selected note still exists.
+    /// Whether Export can start, as far as the panel goes: at least one
+    /// selected note still exists. No save dialog may be open either.
     pub fn can_export(&self, notes: &[Note]) -> bool {
-        !self.picking && notes.iter().any(|note| self.selected.contains(&note.id))
+        notes.iter().any(|note| self.selected.contains(&note.id))
     }
 }
 
@@ -101,6 +98,8 @@ pub struct ExportView<'a> {
     pub theme: theme::Theme,
     pub notes: &'a [Note],
     pub state: &'a ExportState,
+    /// The Export button can start a dialog.
+    pub can_export: bool,
     pub size: Size,
     pub morph_progress: f32,
     pub content_alpha: f32,
@@ -213,6 +212,7 @@ pub fn export_panel(v: ExportView<'_>) -> Element<'_, Message> {
         theme,
         notes,
         state,
+        can_export,
         size,
         morph_progress: t,
         content_alpha: a,
@@ -273,7 +273,7 @@ pub fn export_panel(v: ExportView<'_>) -> Element<'_, Message> {
             }
             None => Space::new().width(Fill).into(),
         };
-        let footer = row![status, export_button(state.can_export(notes), theme, a)]
+        let footer = row![status, export_button(can_export, theme, a)]
             .spacing(space(2))
             .padding(Padding::ZERO.right(space(3)))
             .align_y(iced::Alignment::Center);

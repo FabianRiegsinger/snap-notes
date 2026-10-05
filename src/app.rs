@@ -304,6 +304,10 @@ pub struct App {
     /// Counts fresh openings of the export panel; see
     /// [`ExportState::generation`].
     export_generation: u64,
+    /// The export's save dialog is open. It outlives the panel that opened
+    /// it (the dialog doesn't block the app everywhere), so a reopened
+    /// panel can't start a second one.
+    export_dialog_open: bool,
     /// Keyboard focus to give once the panel or note showing it has
     /// faded its content in (the widget doesn't exist before).
     pending_focus: Option<PendingFocus>,
@@ -461,6 +465,7 @@ impl App {
             export_morph,
             export_anchor_y: 0.0,
             export_generation: 0,
+            export_dialog_open: false,
             search_anchor_y: 0.0,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -565,16 +570,10 @@ impl App {
             }
             Message::ExportRequested => return self.request_export(),
             Message::ExportPicked(job) => {
-                if let Some(state) = self.export_opened_by(job.generation) {
-                    state.picking = false;
-                }
+                self.export_dialog_open = false;
                 return self.run_export(job);
             }
-            Message::ExportCancelled(generation) => {
-                if let Some(state) = self.export_opened_by(generation) {
-                    state.picking = false;
-                }
-            }
+            Message::ExportCancelled(_) => self.export_dialog_open = false,
             Message::ExportStatusExpired(generation, at) => {
                 let still_shown = self
                     .export_opened_by(generation)
@@ -1200,7 +1199,7 @@ impl App {
                 // the note and the panels.
                 self.close_search();
                 // The save dialog takes the focus as long as it is open.
-                if !self.export.as_ref().is_some_and(|state| state.picking) {
+                if !self.export_dialog_open {
                     self.close_export();
                 }
                 let close_settings = self.update(Message::CloseSettings);
@@ -1349,7 +1348,7 @@ impl App {
                 // dialog is open a click beside the panel does nothing.
                 if self.export_morph.is_opening() {
                     let backdrop = Space::new().width(Fill).height(Fill);
-                    layers.push(if state.picking {
+                    layers.push(if self.export_dialog_open {
                         opaque(backdrop)
                     } else {
                         mouse_area(backdrop).on_press(Message::ToggleExport).into()
@@ -1359,6 +1358,7 @@ impl App {
                     theme: self.theme,
                     notes: self.store.notes(),
                     state,
+                    can_export: self.export_enabled(),
                     size: rect.size(),
                     morph_progress: self.export_morph.progress(),
                     content_alpha: frame.content_alpha,
@@ -2069,18 +2069,18 @@ impl App {
     }
 
     /// Opens the save dialog for the selected notes, unless one is open
-    /// already or none of them exists any more. The dialog's task carries
-    /// the notes and the format, so the export happens even if the panel
-    /// folds meanwhile.
+    /// already (from this panel or an earlier one) or none of them exists
+    /// any more. The dialog's task carries the notes and the format, so the
+    /// export happens even if the panel folds meanwhile.
     fn request_export(&mut self) -> Task<Message> {
+        if !self.export_enabled() {
+            return Task::none();
+        }
         let Some(state) = &mut self.export else {
             return Task::none();
         };
-        if !state.can_export(self.store.notes()) {
-            return Task::none();
-        }
         state.status = None;
-        state.picking = true;
+        self.export_dialog_open = true;
         let notes = state.selected_in(self.store.notes());
         let format = state.format;
         let generation = state.generation;
@@ -2109,6 +2109,16 @@ impl App {
             }),
             None => Message::ExportCancelled(generation),
         })
+    }
+
+    /// Whether the export panel's Export button can start a dialog: no
+    /// save dialog is open and a selected note still exists.
+    fn export_enabled(&self) -> bool {
+        !self.export_dialog_open
+            && self
+                .export
+                .as_ref()
+                .is_some_and(|state| state.can_export(self.store.notes()))
     }
 
     /// The export panel, if it is the opening `generation` belongs to.
@@ -3887,10 +3897,10 @@ mod tests {
         let _ = app.update(Message::ToggleExport);
         settle(&mut app);
         let _ = app.update(Message::ExportRequested);
-        assert!(app.export.as_ref().unwrap().picking);
+        assert!(app.export_dialog_open);
         let generation = app.export.as_ref().unwrap().generation;
         let _ = app.update(Message::ExportCancelled(generation));
-        assert!(!app.export.as_ref().unwrap().picking);
+        assert!(!app.export_dialog_open);
         assert!(export_status(&app).is_none());
         assert!(export_showing(&app));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
@@ -3935,10 +3945,37 @@ mod tests {
         settle(&mut app);
         let first = app.update(Message::ExportRequested);
         assert!(first.units() > 0);
-        assert!(app.export.as_ref().unwrap().picking);
+        assert!(app.export_dialog_open);
         let second = app.update(Message::ExportRequested);
         assert_eq!(second.units(), 0, "a second dialog was started");
-        assert!(!app.export.as_ref().unwrap().can_export(app.store.notes()));
+        assert!(!app.export_enabled());
+    }
+
+    #[test]
+    fn reopened_panel_cannot_start_a_second_dialog() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let old = app.export.as_ref().unwrap().generation;
+        let first = app.update(Message::ExportRequested);
+        assert!(first.units() > 0, "no dialog was started");
+        // Esc closes the panel while its dialog is still open.
+        let _ = app.update(escape());
+        settle(&mut app);
+        assert!(app.export.is_none());
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        assert!(export_showing(&app));
+        let second = app.update(Message::ExportRequested);
+        assert_eq!(second.units(), 0, "a second dialog was started");
+        assert!(!app.export_enabled());
+        // The first dialog returning, even cancelled, frees the button.
+        let _ = app.update(Message::ExportCancelled(old));
+        assert!(!app.export_dialog_open);
+        assert!(app.export_enabled());
+        let third = app.update(Message::ExportRequested);
+        assert!(third.units() > 0, "no dialog was started");
     }
 
     #[test]
@@ -3982,18 +4019,16 @@ mod tests {
         settle(&mut app);
         let old = app.export.as_ref().unwrap().generation;
         let _ = app.update(Message::ExportRequested);
-        // The panel folds away and opens afresh, starting its own dialog.
+        // The panel folds away and opens afresh.
         let _ = app.update(Message::ToggleExport);
         settle(&mut app);
         let _ = app.update(Message::ToggleExport);
         settle(&mut app);
         assert_ne!(app.export.as_ref().unwrap().generation, old);
-        let _ = app.update(Message::ExportRequested);
-        assert!(app.export.as_ref().unwrap().picking);
 
         // The first dialog's result still writes, but not into this panel.
         let path = dir.path().join("stale.md");
-        let _ = app.update(Message::ExportPicked(ExportJob {
+        let task = app.update(Message::ExportPicked(ExportJob {
             generation: old,
             path: path.clone(),
             notes: ids,
@@ -4001,9 +4036,10 @@ mod tests {
         }));
         assert!(path.exists());
         assert!(export_status(&app).is_none());
-        assert!(app.export.as_ref().unwrap().picking);
-        let _ = app.update(Message::ExportCancelled(old));
-        assert!(app.export.as_ref().unwrap().picking);
+        assert_eq!(task.units(), 0, "no close timer for another panel");
+        assert!(export_showing(&app));
+        // It frees the Export button all the same.
+        assert!(app.export_enabled());
     }
 
     #[test]
