@@ -16,6 +16,7 @@ mod press_through;
 mod resize;
 mod rich;
 mod rich_view;
+mod search;
 mod settings;
 mod settings_panel;
 mod store;
