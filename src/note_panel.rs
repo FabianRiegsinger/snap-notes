@@ -1,12 +1,14 @@
 use crate::animation::ease_out_cubic;
 use crate::app::Message;
 use crate::color_picker::color_picker;
+use crate::command_passthrough::command_passthrough;
 use crate::icons::{icon, Icon};
 use crate::note::{Note, NoteColor};
 use crate::pass_wheel::pass_wheel;
 use crate::press_shift::press_shift;
 use crate::press_through::press_through;
 use crate::rich::Doc;
+use crate::rich_highlight;
 use crate::rich_view;
 use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM};
 use crate::toolbar::{slide_padding, toolbar};
@@ -109,6 +111,8 @@ pub struct PostIt<'a> {
     pub morph_progress: f32,
     pub content_alpha: f32,
     pub confirm_delete: bool,
+    /// The note was just copied; the copy button shows a check.
+    pub copied: bool,
     pub color_picker_open: bool,
     /// The toolbar's text color grid is open.
     pub text_color_picker_open: bool,
@@ -287,6 +291,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         morph_progress,
         content_alpha: a,
         confirm_delete,
+        copied,
         color_picker_open,
         text_color_picker_open,
         hovered,
@@ -363,8 +368,15 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         let header = press_through(
             container(
                 row![
-                    title,
+                    // Cmd shortcuts reach the app instead of typing.
+                    command_passthrough(title),
                     color_btn,
+                    header_button(
+                        if copied { Icon::Check } else { Icon::Copy },
+                        Message::CopyNote,
+                        theme,
+                        controls
+                    ),
                     header_button(Icon::Trash, Message::DeleteRequested, theme, controls),
                     header_button(Icon::Close, Message::ClosePanel, theme, controls),
                 ]
@@ -421,10 +433,24 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         // appears only once the text no longer fits. Its minimum height
         // fills exactly the space the body gets (measured, not estimated),
         // so clicks below short text still land in the editor.
+        // The editor styles the Markdown it shows; see `rich_highlight`.
+        let highlight_settings = rich_highlight::HighlightSettings {
+            palette: palette.to_vec(),
+            text: if editing {
+                content.text()
+            } else {
+                String::new()
+            },
+            mode: theme.mode,
+        };
         let body: Element<'_, Message> = if editing {
             body_inset(responsive(move |available| {
                 let editor = text_editor(content)
                     .id(BODY_EDITOR_ID)
+                    .highlight_with::<rich_highlight::Highlighter>(
+                        highlight_settings.clone(),
+                        rich_highlight::format,
+                    )
                     .placeholder(PLACEHOLDER)
                     .on_action(Message::NoteEdited)
                     .key_binding(body_key_binding)
@@ -594,7 +620,9 @@ pub(crate) fn history_key(key: &str, modifiers: keyboard::Modifiers) -> Option<M
 
 /// The body editor's key bindings while it has focus: Cmd/Ctrl+V asks the
 /// app to paste (text or image), and the undo/redo keys step its history;
-/// everything else is iced's default.
+/// other command shortcuts (Cmd+F, Cmd+N, Cmd+,) pass through to the app
+/// instead of typing their letter, unless Alt is held too; everything else
+/// is iced's default.
 fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     if !matches!(press.status, text_editor::Status::Focused { .. }) {
         return text_editor::Binding::from_key_press(press);
@@ -605,7 +633,17 @@ fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding
         }
         keyboard::Key::Character(c) => match history_key(c, press.modifiers) {
             Some(step) => Some(text_editor::Binding::Custom(step)),
-            None => text_editor::Binding::from_key_press(press),
+            None => {
+                // Command without Alt: Ctrl+Alt is AltGr on Windows layouts
+                // and types characters such as `{` and `@`.
+                let command = press.modifiers.command() && !press.modifiers.alt();
+                // iced binds only c/x/v/a under command; any other letter
+                // would be inserted (macOS reports it as text).
+                match text_editor::Binding::from_key_press(press) {
+                    Some(text_editor::Binding::Insert(_)) if command => None,
+                    binding => binding,
+                }
+            }
         },
         _ => text_editor::Binding::from_key_press(press),
     }
@@ -629,6 +667,37 @@ mod tests {
             text: Some(ch.into()),
             status,
         }
+    }
+
+    #[test]
+    fn command_shortcuts_pass_through_the_editor() {
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        for key in ["f", "n", ","] {
+            assert!(
+                body_key_binding(press(key, true, focused)).is_none(),
+                "{key}"
+            );
+        }
+        assert!(matches!(
+            body_key_binding(press("c", true, focused)),
+            Some(text_editor::Binding::Copy)
+        ));
+        assert!(matches!(
+            body_key_binding(press("f", false, focused)),
+            Some(text_editor::Binding::Insert('f'))
+        ));
+    }
+
+    #[test]
+    fn ctrl_alt_characters_still_type() {
+        // LCtrl+LAlt is AltGr on Windows layouts, which types `{`, `}`, `@`.
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        let mut brace = press("{", true, focused);
+        brace.modifiers |= keyboard::Modifiers::ALT;
+        assert!(matches!(
+            body_key_binding(brace),
+            Some(text_editor::Binding::Insert('{'))
+        ));
     }
 
     #[test]

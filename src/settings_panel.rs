@@ -34,7 +34,8 @@ pub struct SettingsView<'a> {
     pub dock_forced: bool,
 }
 
-fn text_button<'a>(
+/// A quiet text or icon button: an ink wash while hovered or pressed.
+pub(crate) fn text_button<'a>(
     label: impl Into<Element<'a, Message>>,
     message: Message,
     theme: theme::Theme,
@@ -59,20 +60,36 @@ fn text_button<'a>(
 }
 
 fn group_header<'a>(group: SettingsGroup, theme: theme::Theme, a: f32) -> Element<'a, Message> {
-    row![
+    let mut header = row![
         text(group.label())
             .size(TEXT_SM)
             .font(theme::TITLE_FONT)
             .color(theme.ink(0.9 * a)),
         Space::new().width(Fill),
-        text_button(
+    ]
+    .align_y(iced::Alignment::Center);
+    if group.resettable() {
+        header = header.push(text_button(
             text("Reset").size(TEXT_XS),
             Message::ResetGroup(group),
             theme,
-            a
-        ),
+            a,
+        ));
+    }
+    header.into()
+}
+
+/// The Data group: the button that opens the export panel in place of the
+/// settings.
+fn data_section<'a>(theme: theme::Theme, a: f32) -> Element<'a, Message> {
+    let label = row![icon(Icon::Download, TEXT_SM), text("Export…").size(TEXT_XS)]
+        .spacing(space(2))
+        .align_y(iced::Alignment::Center);
+    column![
+        group_header(SettingsGroup::Data, theme, a),
+        text_button(label, Message::ToggleExport, theme, a),
     ]
-    .align_y(iced::Alignment::Center)
+    .spacing(space(2))
     .into()
 }
 
@@ -217,11 +234,6 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         tray_ok,
         dock_forced,
     } = v;
-    // The card starts as the gear slot's ink wash and settles into paper.
-    let paper = theme.card();
-    let card = theme::mix(theme::over(theme.ink(0.8), paper), paper, t);
-    let [contact, ambient] = theme.shadows(t);
-
     let inner: Element<'_, Message> = if a < 0.01 {
         Space::new().width(Fill).height(Fill).into()
     } else {
@@ -238,26 +250,48 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         let mut body = column![]
             .spacing(space(4))
             .padding(Padding::ZERO.right(space(3)));
-        #[cfg(any(windows, target_os = "macos"))]
-        {
-            body = body.push(app_section(settings, tray_ok, dock_forced, theme, a));
-        }
         #[cfg(not(any(windows, target_os = "macos")))]
         let _ = (tray_ok, dock_forced);
-        for group in SettingsGroup::SLIDERS {
-            let mut section = column![group_header(group, theme, a)].spacing(space(2));
-            for key in SettingKey::ALL.into_iter().filter(|k| k.group() == group) {
-                section = section.push(slider_row(settings, key, theme, a));
-            }
+        for group in SettingsGroup::ALL {
+            let section = match group {
+                // Only macOS and Windows have the menu bar / tray icon.
+                #[cfg(any(windows, target_os = "macos"))]
+                SettingsGroup::App => app_section(settings, tray_ok, dock_forced, theme, a),
+                #[cfg(not(any(windows, target_os = "macos")))]
+                SettingsGroup::App => continue,
+                SettingsGroup::Palette => palette_section(settings, selected_slot, theme, a),
+                SettingsGroup::Data => data_section(theme, a),
+                _ => {
+                    let mut section = column![group_header(group, theme, a)].spacing(space(2));
+                    for key in SettingKey::ALL.into_iter().filter(|k| k.group() == group) {
+                        section = section.push(slider_row(settings, key, theme, a));
+                    }
+                    section.into()
+                }
+            };
             body = body.push(section);
         }
-        body = body.push(palette_section(settings, selected_slot, theme, a));
 
         column![header, scrollable(body).height(Fill)]
             .spacing(space(3))
             .padding(Padding::new(space(4)).right(space(1)))
             .into()
     };
+    paper_card(inner, size, theme, t)
+}
+
+/// The card a panel's `inner` content sits on, `t` of the way through its
+/// morph out of a strip slot: it starts as the slot's ink wash and settles
+/// into paper with the note's band, highlight and shadows.
+pub(crate) fn paper_card<'a>(
+    inner: Element<'a, Message>,
+    size: Size,
+    theme: theme::Theme,
+    t: f32,
+) -> Element<'a, Message> {
+    let paper = theme.card();
+    let card = theme::mix(theme::over(theme.ink(0.8), paper), paper, t);
+    let [contact, ambient] = theme.shadows(t);
 
     // Gradient quads draw no shadow, so each shadow sits on its own solid
     // layer under the gradient one, as on the open note.
@@ -343,5 +377,17 @@ mod tests {
         s.toggle(SettingToggle::DockIcon);
         assert!(!toggle_enabled(&s, SettingToggle::MenuBarIcon, true));
         assert!(toggle_enabled(&s, SettingToggle::DockIcon, true));
+    }
+
+    #[test]
+    fn settings_data_group_has_export_button() {
+        assert!(SettingsGroup::ALL.contains(&SettingsGroup::Data));
+        assert_eq!(SettingsGroup::Data.label(), "Data");
+        // Data holds nothing to reset.
+        assert!(!SettingsGroup::Data.resettable());
+        assert!(SettingsGroup::ALL
+            .iter()
+            .filter(|g| **g != SettingsGroup::Data)
+            .all(|g| g.resettable()));
     }
 }

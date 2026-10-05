@@ -6,13 +6,15 @@ use crate::app::Message;
 
 /// Ids of the menu items, in menu order.
 #[cfg(any(windows, target_os = "macos", test))]
-pub const MENU_IDS: [&str; 4] = ["toggle", "new", "settings", "quit"];
+pub const MENU_IDS: [&str; 6] = ["toggle", "new", "search", "export", "settings", "quit"];
 
 /// The app message a menu item id stands for.
 pub fn message_for(id: &str) -> Option<Message> {
     match id {
         "toggle" => Some(Message::ToggleVisibility),
         "new" => Some(Message::AddNote),
+        "search" => Some(Message::ToggleSearch),
+        "export" => Some(Message::ToggleExport),
         "settings" => Some(Message::ToggleSettings),
         "quit" => Some(Message::Quit),
         _ => None,
@@ -80,12 +82,14 @@ mod native {
     /// Creates the icon (hidden unless `visible`). Returns whether it worked.
     pub fn create(_window: &dyn iced::window::Window, notes_shown: bool, visible: bool) -> bool {
         let build = || -> Option<(TrayIcon, MenuItem)> {
-            let [toggle, new, settings, quit] = MENU_IDS;
+            let [toggle, new, search, export, settings, quit] = MENU_IDS;
             let toggle_item = MenuItem::with_id(toggle, toggle_label(notes_shown), true, None);
             let menu = Menu::new();
             menu.append_items(&[
                 &toggle_item,
                 &MenuItem::with_id(new, "New Note", true, None),
+                &MenuItem::with_id(search, "Search…", true, None),
+                &MenuItem::with_id(export, "Export…", true, None),
                 &MenuItem::with_id(settings, "Settings…", true, None),
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(quit, "Quit Snap Notes", true, None),
@@ -178,6 +182,8 @@ mod tests {
             Some(Message::ToggleVisibility)
         ));
         assert!(matches!(message_for("new"), Some(Message::AddNote)));
+        assert!(matches!(message_for("search"), Some(Message::ToggleSearch)));
+        assert!(matches!(message_for("export"), Some(Message::ToggleExport)));
         assert!(matches!(
             message_for("settings"),
             Some(Message::ToggleSettings)
