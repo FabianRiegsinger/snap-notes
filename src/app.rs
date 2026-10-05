@@ -6,6 +6,7 @@ use crate::bar_strip::{
 use crate::export::{self, ExportFormat};
 use crate::export_panel::{export_panel, ExportJob, ExportState, ExportStatus, ExportView};
 use crate::history::History;
+use crate::hotkey;
 use crate::images;
 use crate::note::NoteColor;
 use crate::note_panel::{focus_body, post_it, PostIt};
@@ -179,6 +180,8 @@ pub enum Message {
     /// Fires the reminders that have come due.
     ReminderTick,
     ToggleVisibility,
+    /// The global hotkey: shows the notes and opens a new one.
+    HotkeyPressed,
     /// The tray icon was created (or failed to be).
     TrayReady(bool),
     TrayMenu(String),
@@ -346,6 +349,8 @@ pub struct App {
     /// Keyboard focus to give once the panel or note showing it has
     /// faded its content in (the widget doesn't exist before).
     pending_focus: Option<PendingFocus>,
+    /// The registered global hotkey; dropping it unregisters it.
+    hotkey: Option<hotkey::Manager>,
     /// The menu bar / tray icon exists.
     tray_ok: bool,
     /// The tray icon could not be created, so the Dock icon is shown this
@@ -518,6 +523,7 @@ impl App {
             strip_progress,
             entries_synced,
             pending_focus: None,
+            hotkey: None,
             tray_ok: false,
             tray_failed: false,
             keep_open_until: None,
@@ -642,6 +648,7 @@ impl App {
                 if toggle == SettingToggle::DockIcon {
                     self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
                 }
+                self.sync_hotkey();
                 return self.apply_app_visibility();
             }
             Message::ResetGroup(SettingsGroup::Data) => {}
@@ -657,6 +664,7 @@ impl App {
                 }
                 if group == SettingsGroup::App {
                     self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
+                    self.sync_hotkey();
                     return self.apply_app_visibility();
                 }
                 return self.apply_settings();
@@ -1162,6 +1170,21 @@ impl App {
                 tasks.push(self.update_passthrough(self.last_cursor));
                 return Task::batch(tasks);
             }
+            Message::HotkeyPressed => {
+                let mut tasks = Vec::new();
+                if !self.visible {
+                    tasks.push(self.update(Message::ToggleVisibility));
+                }
+                // Opening the new note closes settings, search and export.
+                tasks.push(self.update(Message::AddNote));
+                self.pending_focus = Some(PendingFocus::Body);
+                // The hotkey is pressed in another app; bring the window to
+                // the front (on macOS this also activates the app).
+                if let Some(id) = self.window_id {
+                    tasks.push(window::gain_focus(id));
+                }
+                return Task::batch(tasks);
+            }
             Message::TrayReady(ok) => {
                 self.tray_ok = ok;
                 // Without a tray icon the Dock icon is the only way back in.
@@ -1217,6 +1240,7 @@ impl App {
                 let show_icon = self.settings.settings().app.show_menu_bar_icon;
                 let tray = window::run(id, move |w| tray::create(w, true, show_icon))
                     .map(Message::TrayReady);
+                self.sync_hotkey();
                 return Task::batch([
                     shadow,
                     dock,
@@ -1536,6 +1560,8 @@ impl App {
         if self.tray_ok {
             subs.push(tray::menu_events().map(Message::TrayMenu));
         }
+        // Always on: the hotkey's event handler can only be installed once.
+        subs.push(hotkey::events().map(|()| Message::HotkeyPressed));
         if self.hover_bar.is_some() && !self.peek.is_opening() {
             subs.push(iced::time::every(PEEK_POLL).map(Message::PeekTick));
         }
@@ -2524,6 +2550,22 @@ impl App {
 
     fn dock_icon_shown(&self) -> bool {
         self.settings.settings().app.show_dock_icon || self.tray_failed
+    }
+
+    /// Registers or unregisters the global hotkey to match the setting.
+    /// Only the macOS/Windows settings show the toggle; elsewhere it is
+    /// always on. Waits for the window, so the event loop is running.
+    fn sync_hotkey(&mut self) {
+        if self.window_id.is_none() {
+            return;
+        }
+        let wanted = !cfg!(any(windows, target_os = "macos"))
+            || self.settings.settings().is_on(SettingToggle::GlobalHotkey);
+        if !wanted {
+            self.hotkey = None;
+        } else if self.hotkey.is_none() {
+            self.hotkey = hotkey::register();
+        }
     }
 
     /// Shows or hides the menu bar icon and the Dock icon to match settings.
@@ -4627,6 +4669,46 @@ mod tests {
         assert!(!state.can_export(app.store.notes()));
         let task = app.update(Message::ExportRequested);
         assert_eq!(task.units(), 0);
+    }
+
+    #[test]
+    fn hotkey_shows_hidden_notes_and_opens_new_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleVisibility);
+        assert!(!app.visible);
+        let _ = app.update(Message::HotkeyPressed);
+        assert!(app.visible);
+        assert_eq!(app.store.notes().len(), 2);
+        let new = app.store.notes()[1].id;
+        assert_eq!(app.active_note, Some(new));
+        assert!(app.editing && app.morph.is_opening());
+        assert_eq!(app.pending_focus, Some(PendingFocus::Body));
+    }
+
+    #[test]
+    fn hotkey_closes_panels_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        for panel in [
+            Message::ToggleSettings,
+            Message::ToggleSearch,
+            Message::ToggleExport,
+        ] {
+            let _ = app.update(panel);
+            settle(&mut app);
+            let before = app.store.notes().len();
+            let _ = app.update(Message::HotkeyPressed);
+            assert_eq!(app.store.notes().len(), before + 1);
+            assert!(!app.settings_morph.is_opening());
+            assert!(!app.search_morph.is_opening() && !app.export_morph.is_opening());
+            assert!(app.active_note.is_some() && app.morph.is_opening());
+            settle(&mut app);
+            assert!(!app.settings_open && !app.search_open && app.export.is_none());
+            assert!(app.active_note.is_some());
+            let _ = app.update(Message::ClosePanel);
+            settle(&mut app);
+        }
     }
 
     #[test]

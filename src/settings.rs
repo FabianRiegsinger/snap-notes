@@ -96,12 +96,14 @@ impl Default for WindowSettings {
     }
 }
 
-/// Where the app shows up besides its notes. At least one stays visible so
-/// the app can always be reached.
+/// Where the app shows up besides its notes. At least one icon stays
+/// visible so the app can always be reached.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AppSettings {
     pub show_menu_bar_icon: bool,
     pub show_dock_icon: bool,
+    /// Cmd/Ctrl+Shift+Space adds a note from anywhere.
+    pub global_hotkey: bool,
 }
 
 impl Default for AppSettings {
@@ -109,6 +111,7 @@ impl Default for AppSettings {
         Self {
             show_menu_bar_icon: true,
             show_dock_icon: true,
+            global_hotkey: true,
         }
     }
 }
@@ -155,16 +158,23 @@ pub enum SettingsGroup {
 pub enum SettingToggle {
     MenuBarIcon,
     DockIcon,
+    GlobalHotkey,
 }
 
 impl SettingToggle {
     #[cfg(any(windows, target_os = "macos"))]
-    pub const ALL: [SettingToggle; 2] = [SettingToggle::MenuBarIcon, SettingToggle::DockIcon];
+    pub const ALL: [SettingToggle; 3] = [
+        SettingToggle::MenuBarIcon,
+        SettingToggle::DockIcon,
+        SettingToggle::GlobalHotkey,
+    ];
 
-    fn other(self) -> SettingToggle {
+    /// The other icon, which must stay visible while this one is hidden.
+    fn other_icon(self) -> Option<SettingToggle> {
         match self {
-            SettingToggle::MenuBarIcon => SettingToggle::DockIcon,
-            SettingToggle::DockIcon => SettingToggle::MenuBarIcon,
+            SettingToggle::MenuBarIcon => Some(SettingToggle::DockIcon),
+            SettingToggle::DockIcon => Some(SettingToggle::MenuBarIcon),
+            SettingToggle::GlobalHotkey => None,
         }
     }
 }
@@ -379,6 +389,7 @@ impl Settings {
         for (field, target) in [
             ("show_menu_bar_icon", &mut settings.app.show_menu_bar_icon),
             ("show_dock_icon", &mut settings.app.show_dock_icon),
+            ("global_hotkey", &mut settings.app.global_hotkey),
         ] {
             if let Some(v) = app.and_then(|a| a.get(field)).and_then(|v| v.as_bool()) {
                 *target = v;
@@ -394,13 +405,14 @@ impl Settings {
         match toggle {
             SettingToggle::MenuBarIcon => self.app.show_menu_bar_icon,
             SettingToggle::DockIcon => self.app.show_dock_icon,
+            SettingToggle::GlobalHotkey => self.app.global_hotkey,
         }
     }
 
-    /// Whether `toggle` may flip: turning it off is refused while the other
+    /// Whether `toggle` may flip: hiding an icon is refused while the other
     /// icon is already hidden.
     pub fn can_toggle(&self, toggle: SettingToggle) -> bool {
-        !self.is_on(toggle) || self.is_on(toggle.other())
+        !self.is_on(toggle) || toggle.other_icon().is_none_or(|other| self.is_on(other))
     }
 
     /// Flips `toggle` if allowed. Returns whether anything changed.
@@ -411,6 +423,7 @@ impl Settings {
         let value = match toggle {
             SettingToggle::MenuBarIcon => &mut self.app.show_menu_bar_icon,
             SettingToggle::DockIcon => &mut self.app.show_dock_icon,
+            SettingToggle::GlobalHotkey => &mut self.app.global_hotkey,
         };
         *value = !*value;
         true
@@ -876,6 +889,24 @@ mod tests {
         s.toggle(SettingToggle::MenuBarIcon);
         let back = Settings::from_json(&serde_json::to_string(&s).unwrap());
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn global_hotkey_setting_defaults_on_and_persists() {
+        let mut s = Settings::default();
+        assert!(s.app.global_hotkey && s.is_on(SettingToggle::GlobalHotkey));
+        assert!(s.can_toggle(SettingToggle::GlobalHotkey));
+        assert!(s.toggle(SettingToggle::GlobalHotkey));
+        assert!(!s.is_on(SettingToggle::GlobalHotkey));
+        let json = serde_json::to_string(&s).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["app"]["global_hotkey"], serde_json::json!(false));
+        assert_eq!(Settings::from_json(&json), s);
+        // Turning it off never touches the icons, and they never lock it.
+        s.toggle(SettingToggle::DockIcon);
+        assert!(s.can_toggle(SettingToggle::GlobalHotkey));
+        s.reset(SettingsGroup::App);
+        assert!(s.app.global_hotkey);
     }
 
     #[test]

@@ -121,11 +121,15 @@ pub fn toggle_enabled(settings: &Settings, toggle: SettingToggle, tray_ok: bool)
     settings.can_toggle(toggle) && !dock_is_lifeline
 }
 
+#[cfg(any(windows, target_os = "macos"))]
+const HOTKEY_LABEL: &str = "Global hotkey (Cmd/Ctrl+Shift+Space)";
+
 #[cfg(target_os = "macos")]
 fn toggle_label(toggle: SettingToggle) -> &'static str {
     match toggle {
         SettingToggle::MenuBarIcon => "Show menu bar icon",
         SettingToggle::DockIcon => "Show Dock icon",
+        SettingToggle::GlobalHotkey => HOTKEY_LABEL,
     }
 }
 
@@ -134,6 +138,7 @@ fn toggle_label(toggle: SettingToggle) -> &'static str {
     match toggle {
         SettingToggle::MenuBarIcon => "Show tray icon",
         SettingToggle::DockIcon => "Show taskbar button",
+        SettingToggle::GlobalHotkey => HOTKEY_LABEL,
     }
 }
 

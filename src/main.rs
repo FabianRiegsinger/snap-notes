@@ -7,6 +7,7 @@ mod export;
 mod export_panel;
 mod history;
 mod hit_text;
+mod hotkey;
 mod icons;
 mod images;
 mod note;
