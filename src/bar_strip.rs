@@ -875,6 +875,38 @@ mod tests {
     }
 
     #[test]
+    fn narrow_window_peek_target_keeps_minimum_width() {
+        let notes = [crate::note::Note::new(crate::note::PALETTE[0])];
+        let magnification = MagnificationState::new();
+        let drag = None;
+        let bars = BarSettings::default();
+        let strip = BarStrip {
+            notes: &notes,
+            magnification: &magnification,
+            drag: &drag,
+            scroll_offset: 0.0,
+            peek: Some((0, 1.0)),
+            bars: &bars,
+            height_fraction: 1.0,
+            paper_tint: 0.0,
+            default_note_width: 500.0,
+            peek_confirm: false,
+            theme: theme::Theme::default(),
+            open: None,
+            collapse: None,
+        };
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
+        let bar = strip.layout_in(bounds).bars[0];
+        let width = note_peek_width(&notes[0], strip.default_note_width, bar);
+        assert_eq!(
+            peek_target(bar, bounds, &notes[0], false, width).width,
+            260.0
+        );
+        let inside = Point::new(bar.x + bar.width - 100.0, bar.center().y);
+        assert_eq!(strip.peek_hit(bounds, inside), Some(0));
+    }
+
+    #[test]
     fn peek_hit_covers_open_peek_only() {
         let notes = [crate::note::Note::new(crate::note::PALETTE[0])];
         let magnification = MagnificationState::new();

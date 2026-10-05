@@ -3,7 +3,6 @@
 //! first lines of the body below, laid out like the open note.
 
 use crate::animation::{ease_out_cubic, lerp};
-use crate::app::NOTE_MARGIN;
 use crate::icons::{Icon, ICON_FONT};
 use crate::note::Note;
 use crate::note_panel::{morph_paper, PLACEHOLDER};
@@ -76,11 +75,19 @@ pub fn peek_width(note: &Note, default: f32) -> f32 {
     note.size.map_or(default, |s| s[0])
 }
 
+/// Narrowest peek, the width before it followed the note. In a window too
+/// narrow for more, the window clips the peek.
+const MIN_PEEK_WIDTH: f32 = 260.0;
+/// Space kept free left of the peek.
+const PEEK_MARGIN: f32 = 24.0;
+
 /// `width` kept on screen: the peek grows left from `bar`, so it stops
-/// `NOTE_MARGIN` short of the window's left edge, and never gets narrower
-/// than the bar.
+/// `PEEK_MARGIN` short of the window's left edge, but never gets narrower
+/// than `MIN_PEEK_WIDTH`.
 pub fn fit_peek_width(width: f32, bar: Rectangle) -> f32 {
-    width.min(bar.x + bar.width - NOTE_MARGIN).max(bar.width)
+    width
+        .min(bar.x + bar.width - PEEK_MARGIN)
+        .max(MIN_PEEK_WIDTH)
 }
 
 /// The width the peek of `note` on `bar` is drawn and hit-tested with.
@@ -698,9 +705,20 @@ mod tests {
     #[test]
     fn peek_width_stays_on_screen() {
         let bar = Rectangle::new(Point::new(300.0, 0.0), Size::new(30.0, 40.0));
-        assert_eq!(fit_peek_width(900.0, bar), 330.0 - NOTE_MARGIN);
-        assert_eq!(fit_peek_width(100.0, bar), 100.0);
+        assert_eq!(fit_peek_width(900.0, bar), 330.0 - PEEK_MARGIN);
+        assert_eq!(fit_peek_width(280.0, bar), 280.0);
+        assert_eq!(fit_peek_width(100.0, bar), 260.0);
         let edge = Rectangle::new(Point::new(0.0, 0.0), Size::new(30.0, 40.0));
-        assert_eq!(fit_peek_width(900.0, edge), 30.0);
+        assert_eq!(fit_peek_width(900.0, edge), 260.0);
+    }
+
+    #[test]
+    fn narrow_window_peek_keeps_minimum_width_and_sane_height() {
+        let bar = Rectangle::new(Point::new(40.0, 400.0), Size::new(14.0, 40.0));
+        let width = fit_peek_width(500.0, bar);
+        let text = peek_text(&note(&"a".repeat(20), "milk"), width);
+        let l = peek_layout(bar, screen(), 1.0, &text, false, width);
+        assert_eq!(l.rect.width, 260.0);
+        assert!(peek_height(&text, false) < 200.0);
     }
 }
