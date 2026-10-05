@@ -7,6 +7,7 @@ use crate::pass_wheel::pass_wheel;
 use crate::press_shift::press_shift;
 use crate::press_through::press_through;
 use crate::rich::Doc;
+use crate::rich_highlight;
 use crate::rich_view;
 use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM};
 use crate::toolbar::{slide_padding, toolbar};
@@ -421,10 +422,19 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         // appears only once the text no longer fits. Its minimum height
         // fills exactly the space the body gets (measured, not estimated),
         // so clicks below short text still land in the editor.
+        // The editor styles the Markdown it shows; see `rich_highlight`.
+        let highlight_settings = rich_highlight::HighlightSettings {
+            palette: palette.to_vec(),
+            mode: theme.mode,
+        };
         let body: Element<'_, Message> = if editing {
             body_inset(responsive(move |available| {
                 let editor = text_editor(content)
                     .id(BODY_EDITOR_ID)
+                    .highlight_with::<rich_highlight::Highlighter>(
+                        highlight_settings.clone(),
+                        rich_highlight::format,
+                    )
                     .placeholder(PLACEHOLDER)
                     .on_action(Message::NoteEdited)
                     .key_binding(body_key_binding)

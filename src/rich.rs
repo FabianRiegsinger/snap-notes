@@ -93,11 +93,35 @@ impl Span {
 }
 
 /// An open `{...}` tag. A color naming a slot the palette lacks is `None`.
-enum OpenTag {
+pub(crate) enum OpenTag {
     Color(Option<NoteColor>),
     Background(Option<NoteColor>),
     Size(f32),
     Highlight,
+}
+
+fn resolve_color(name: &str, palette: &[NoteColor]) -> Option<Option<NoteColor>> {
+    if name.starts_with('#') {
+        return NoteColor::parse_hex(name).map(Some);
+    }
+    COLOR_NAMES
+        .iter()
+        .position(|n| n.eq_ignore_ascii_case(name))
+        .map(|slot| palette.get(slot).copied())
+}
+
+/// Parses the inside of a `{...}` tag; `None` means it is not a tag.
+pub(crate) fn parse_tag(inner: &str, palette: &[NoteColor]) -> Option<OpenTag> {
+    if let Some(value) = inner.strip_prefix("size:") {
+        let size: f32 = value.parse().ok()?;
+        return size
+            .is_finite()
+            .then(|| OpenTag::Size(size.clamp(8.0, 48.0)));
+    }
+    if let Some(value) = inner.strip_prefix("bg:") {
+        return resolve_color(value, palette).map(OpenTag::Background);
+    }
+    resolve_color(inner, palette).map(OpenTag::Color)
 }
 
 struct Builder<'a> {
@@ -244,30 +268,6 @@ impl<'a> Builder<'a> {
         self.push_span(span, text, offset);
     }
 
-    fn resolve_color(&self, name: &str) -> Option<Option<NoteColor>> {
-        if name.starts_with('#') {
-            return NoteColor::parse_hex(name).map(Some);
-        }
-        COLOR_NAMES
-            .iter()
-            .position(|n| n.eq_ignore_ascii_case(name))
-            .map(|slot| self.palette.get(slot).copied())
-    }
-
-    /// Parses the inside of a `{...}` tag; `None` means it is not a tag.
-    fn parse_tag(&self, inner: &str) -> Option<OpenTag> {
-        if let Some(value) = inner.strip_prefix("size:") {
-            let size: f32 = value.parse().ok()?;
-            return size
-                .is_finite()
-                .then(|| OpenTag::Size(size.clamp(8.0, 48.0)));
-        }
-        if let Some(value) = inner.strip_prefix("bg:") {
-            return self.resolve_color(value).map(OpenTag::Background);
-        }
-        self.resolve_color(inner).map(OpenTag::Color)
-    }
-
     /// Scans a Markdown text event for `{...}` tags and `==` highlights.
     fn push_text(&mut self, text: &str, range_start: usize, range_end: usize) {
         let escaped = text.starts_with('{') && {
@@ -298,7 +298,7 @@ impl<'a> Builder<'a> {
                         first = false;
                         continue;
                     }
-                    if let Some(tag) = self.parse_tag(inner) {
+                    if let Some(tag) = parse_tag(inner, self.palette) {
                         self.mark_removed(verbatim, range_start, text, rest, end + 1);
                         self.flush_literal(&mut literal, literal_at);
                         self.tags.push(tag);

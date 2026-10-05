@@ -16,6 +16,7 @@ mod press_shift;
 mod press_through;
 mod resize;
 mod rich;
+mod rich_highlight;
 mod rich_view;
 mod search;
 mod settings;
