@@ -436,6 +436,11 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         // The editor styles the Markdown it shows; see `rich_highlight`.
         let highlight_settings = rich_highlight::HighlightSettings {
             palette: palette.to_vec(),
+            text: if editing {
+                content.text()
+            } else {
+                String::new()
+            },
             mode: theme.mode,
         };
         let body: Element<'_, Message> = if editing {

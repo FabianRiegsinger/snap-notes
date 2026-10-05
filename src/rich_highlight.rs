@@ -1,6 +1,12 @@
 //! Markdown styling for the body editor: markup stays visible but faint,
 //! and the text it marks takes the style it will have when formatted.
-//! Works line by line; only a fenced code block carries over between lines.
+//! Works line by line, handing each line's open state to the next: a fenced
+//! code block, and within a block the open tags, `==`, bold, italic and
+//! strike, as the parser keeps them open across line breaks. A blank line
+//! and a line that starts a block (a heading, list item, quote or fence)
+//! drop the inline state. An opener without a closer on its own line opens
+//! only if a closer follows before its block ends, which the highlighter
+//! looks ahead for. Code spans and links stay within one line.
 
 use crate::note::NoteColor;
 use crate::rich::{self, OpenTag};
@@ -27,16 +33,44 @@ pub enum Style {
     CodeBlock,
 }
 
-/// Styles one editor line. `in_code_block` says whether a fenced code block
-/// is open before the line; the returned flag says whether one is open after
-/// it. Unstyled text gets no range.
-pub fn spans(
-    line: &str,
+/// What one editor line hands the next.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LineState {
+    /// A fenced code block is open.
     in_code_block: bool,
+    /// The line was part of a block quote, so a `>` line after it
+    /// continues the quote rather than starting one.
+    quote: bool,
+    /// The delimiter character of the open bold or italic run.
+    bold: Option<char>,
+    italic: Option<char>,
+    strike: bool,
+    /// Open `{...}` tags and `==` highlights, innermost last.
+    tags: Vec<OpenTag>,
+}
+
+impl LineState {
+    fn code_block(open: bool) -> Self {
+        Self {
+            in_code_block: open,
+            ..Self::default()
+        }
+    }
+}
+
+/// Styles one editor line, given the state the line before it left and the
+/// lines after it (only those in its block are read). Returns the styled
+/// ranges, where unstyled text gets none, and the state after the line.
+pub fn spans<S: AsRef<str>>(
+    line: &str,
+    before: &LineState,
+    after: &[S],
     palette: &[NoteColor],
-) -> (Vec<(Range<usize>, Style)>, bool) {
+) -> (Vec<(Range<usize>, Style)>, LineState) {
+    let (opening, quoted) = opening(line);
     let mut scan = Scan {
         line,
+        ahead: &[],
         palette,
         out: Vec::new(),
         heading: false,
@@ -47,23 +81,143 @@ pub fn spans(
         link: None,
     };
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-    let trimmed = &line[indent..];
-    let fence = indent <= 3 && (trimmed.starts_with("```") || trimmed.starts_with("~~~"));
-    if fence {
-        scan.push(0..line.len(), Style::Marker);
-        return (scan.out, !in_code_block);
+    match opening {
+        Opening::Fence => {
+            scan.push(0..line.len(), Style::Marker);
+            return (scan.out, LineState::code_block(!before.in_code_block));
+        }
+        _ if before.in_code_block => {
+            scan.push(0..line.len(), Style::CodeBlock);
+            return (scan.out, LineState::code_block(true));
+        }
+        Opening::Rule => {
+            scan.push(0..line.len(), Style::Marker);
+            return (scan.out, LineState::default());
+        }
+        Opening::Blank => return (scan.out, LineState::default()),
+        _ => {}
     }
-    if in_code_block {
-        scan.push(0..line.len(), Style::CodeBlock);
-        return (scan.out, true);
+    if !starts_block(opening, quoted, before.quote) {
+        scan.bold = before.bold;
+        scan.italic = before.italic;
+        scan.strike = before.strike;
+        scan.tags = before.tags.clone();
     }
-    if is_rule(trimmed) {
-        scan.push(0..line.len(), Style::Marker);
-        return (scan.out, false);
+    if !ends_block(opening) {
+        scan.ahead = block_rest(after, quoted);
     }
     let start = scan.block_prefix(indent);
     scan.inline(start);
-    (scan.out, false)
+    let state = if ends_block(opening) {
+        LineState::default()
+    } else {
+        LineState {
+            in_code_block: false,
+            quote: quoted,
+            bold: scan.bold,
+            italic: scan.italic,
+            strike: scan.strike,
+            tags: scan.tags,
+        }
+    };
+    (scan.out, state)
+}
+
+/// How a line begins, as far as where blocks start and end goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Opening {
+    Blank,
+    Fence,
+    Rule,
+    Heading,
+    /// A list item marker: `-`, `*`, `+` or `1.`/`1)` and a space.
+    Item,
+    Text,
+}
+
+/// How `line` begins, and whether it is in a block quote.
+fn opening(line: &str) -> (Opening, bool) {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let indent = line.len() - trimmed.len();
+    if trimmed.is_empty() {
+        return (Opening::Blank, false);
+    }
+    if indent <= 3 && (trimmed.starts_with("```") || trimmed.starts_with("~~~")) {
+        return (Opening::Fence, false);
+    }
+    if is_rule(trimmed) {
+        return (Opening::Rule, false);
+    }
+    let mut rest = trimmed;
+    let mut quoted = false;
+    while let Some(inner) = rest.strip_prefix('>') {
+        quoted = true;
+        rest = inner.trim_start_matches([' ', '\t']);
+    }
+    let hashes = rest.bytes().take_while(|&b| b == b'#').count();
+    if (1..=6).contains(&hashes) && matches!(rest.as_bytes().get(hashes), None | Some(b' ')) {
+        return (Opening::Heading, quoted);
+    }
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let bullet = matches!(rest.as_bytes().first(), Some(b'-' | b'*' | b'+'));
+    let marker = if bullet {
+        1
+    } else if (1..=9).contains(&digits) && matches!(rest.as_bytes().get(digits), Some(b'.' | b')'))
+    {
+        digits + 1
+    } else {
+        0
+    };
+    if marker > 0 && rest.as_bytes().get(marker) == Some(&b' ') {
+        return (Opening::Item, quoted);
+    }
+    (Opening::Text, quoted)
+}
+
+/// Whether a line starts a new block, so nothing inline carries into it.
+/// A `>` line only starts one when the line before wasn't quoted.
+fn starts_block(opening: Opening, quoted: bool, quoted_before: bool) -> bool {
+    match opening {
+        Opening::Text => quoted && !quoted_before,
+        _ => true,
+    }
+}
+
+/// Whether a line is a block of its own, so nothing inline carries out of it.
+fn ends_block(opening: Opening) -> bool {
+    matches!(
+        opening,
+        Opening::Blank | Opening::Fence | Opening::Rule | Opening::Heading
+    )
+}
+
+/// The leading lines of `after` that continue the block of the line before
+/// them (`quoted` says whether that line was in a quote).
+fn block_rest<S: AsRef<str>>(after: &[S], mut quoted: bool) -> &[S] {
+    let len = after
+        .iter()
+        .take_while(|line| {
+            let (opening, q) = opening(line.as_ref());
+            let continues = !starts_block(opening, q, quoted);
+            quoted = q;
+            continues
+        })
+        .count();
+    &after[..len]
+}
+
+/// The first line of the block that holds line `index` of `lines`.
+fn block_start<S: AsRef<str>>(lines: &[S], mut index: usize) -> usize {
+    index = index.min(lines.len().saturating_sub(1));
+    while index > 0 {
+        let (prev, quoted_before) = opening(lines[index - 1].as_ref());
+        let (this, quoted) = opening(lines[index].as_ref());
+        if ends_block(prev) || starts_block(this, quoted, quoted_before) {
+            break;
+        }
+        index -= 1;
+    }
+    index
 }
 
 /// A thematic break: three or more `-`, `*` or `_`, optionally spaced.
@@ -79,8 +233,10 @@ fn is_rule(trimmed: &str) -> bool {
         && trimmed.chars().filter(|&ch| ch == c).count() >= 3
 }
 
-struct Scan<'a> {
+struct Scan<'a, S> {
     line: &'a str,
+    /// The rest of the line's block, where a closer may be.
+    ahead: &'a [S],
     palette: &'a [NoteColor],
     out: Vec<(Range<usize>, Style)>,
     heading: bool,
@@ -93,7 +249,7 @@ struct Scan<'a> {
     link: Option<(usize, usize)>,
 }
 
-impl Scan<'_> {
+impl<S: AsRef<str>> Scan<'_, S> {
     /// Adds a styled range, merging it into the previous one when they touch
     /// and match. Plain text gets no range.
     fn push(&mut self, range: Range<usize>, style: Style) {
@@ -246,18 +402,14 @@ impl Scan<'_> {
         body
     }
 
-    /// Whether `delim` closes later in the line, after `from`: preceded by
-    /// non-whitespace and, for `_`, not followed by a word character.
+    /// Whether `delim` closes after `from`, later in the line or further
+    /// down its block.
     fn closes(&self, from: usize, delim: &str) -> bool {
-        let tail = &self.line[from..];
-        tail.match_indices(delim).any(|(at, _)| {
-            let at = from + at;
-            let flanked = at > from && self.prev_char(at).is_some_and(|c| !c.is_whitespace());
-            let word_after = self
-                .next_char(at + delim.len())
-                .is_some_and(char::is_alphanumeric);
-            flanked && !(delim.starts_with('_') && word_after)
-        })
+        closes_in(self.line, from, delim)
+            || self
+                .ahead
+                .iter()
+                .any(|line| closes_in(line.as_ref(), 0, delim))
     }
 
     fn emphasis(&mut self, i: usize, c: char) -> usize {
@@ -436,9 +588,32 @@ impl Scan<'_> {
     }
 }
 
+/// Whether `delim` occurs in `line` after `from` as a closer: preceded by
+/// non-whitespace and, for `_`, not followed by a word character. At the
+/// start of a line it follows a line break, which counts as whitespace.
+fn closes_in(line: &str, from: usize, delim: &str) -> bool {
+    line[from..].match_indices(delim).any(|(at, _)| {
+        let at = from + at;
+        let flanked = at > from
+            && line[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_whitespace());
+        let word_after = line[at + delim.len()..]
+            .chars()
+            .next()
+            .is_some_and(char::is_alphanumeric);
+        flanked && !(delim.starts_with('_') && word_after)
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HighlightSettings {
     pub palette: Vec<NoteColor>,
+    /// The editor's text. A line's styles can depend on the lines after it
+    /// in its block (a `**` closed further down), which the highlighter is
+    /// never shown ahead of time.
+    pub text: String,
     /// Not read while highlighting; a mode change re-highlights the text so
     /// [`format`] picks up the new theme.
     pub mode: theme::Mode,
@@ -447,8 +622,17 @@ pub struct HighlightSettings {
 /// The editor's highlighter, built on [`spans`].
 pub struct Highlighter {
     palette: Vec<NoteColor>,
-    /// Whether a code block is open after each line highlighted so far.
-    open_after: Vec<bool>,
+    mode: theme::Mode,
+    /// The editor's lines, for looking ahead in a block.
+    lines: Vec<String>,
+    /// The state after each line highlighted so far.
+    after: Vec<LineState>,
+}
+
+fn split_lines(text: &str) -> Vec<String> {
+    text.split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+        .collect()
 }
 
 impl highlighter::Highlighter for Highlighter {
@@ -459,28 +643,52 @@ impl highlighter::Highlighter for Highlighter {
     fn new(settings: &Self::Settings) -> Self {
         Self {
             palette: settings.palette.clone(),
-            open_after: Vec::new(),
+            mode: settings.mode,
+            lines: split_lines(&settings.text),
+            after: Vec::new(),
         }
     }
 
+    /// New text restyles from the start of the block before the first
+    /// changed line (the editor reports the line itself, but lines above it
+    /// in its block may have looked ahead into it). Anything else restyles
+    /// everything.
     fn update(&mut self, new_settings: &Self::Settings) {
+        let lines = split_lines(&new_settings.text);
+        if new_settings.palette != self.palette || new_settings.mode != self.mode {
+            self.after.clear();
+        } else {
+            let changed = self
+                .lines
+                .iter()
+                .zip(&lines)
+                .take_while(|(old, new)| old == new)
+                .count();
+            if changed < self.lines.len().max(lines.len()) {
+                let from = block_start(&lines, changed.saturating_sub(1));
+                self.after.truncate(from);
+            }
+        }
         self.palette = new_settings.palette.clone();
-        self.open_after.clear();
+        self.mode = new_settings.mode;
+        self.lines = lines;
     }
 
     fn change_line(&mut self, line: usize) {
-        self.open_after.truncate(line);
+        self.after.truncate(line);
     }
 
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
-        let open_before = self.open_after.last().copied().unwrap_or(false);
-        let (spans, open_after) = spans(line, open_before, &self.palette);
-        self.open_after.push(open_after);
+        let index = self.after.len();
+        let before = self.after.last().cloned().unwrap_or_default();
+        let rest = self.lines.get(index + 1..).unwrap_or(&[]);
+        let (spans, after) = spans(line, &before, rest, &self.palette);
+        self.after.push(after);
         spans.into_iter()
     }
 
     fn current_line(&self) -> usize {
-        self.open_after.len()
+        self.after.len()
     }
 }
 
@@ -520,7 +728,9 @@ mod tests {
     /// The style of each byte of `line`, `Plain` where no span covers it,
     /// and whether a code block is open after it.
     fn styles(line: &str, in_code_block: bool) -> (Vec<Style>, bool) {
-        let (spans, open) = spans(line, in_code_block, &PALETTE);
+        let before = LineState::code_block(in_code_block);
+        let (spans, after) = spans::<&str>(line, &before, &[], &PALETTE);
+        let open = after.in_code_block;
         let mut out = vec![Style::Plain; line.len()];
         for (range, style) in spans {
             for s in &mut out[range] {
@@ -583,7 +793,7 @@ mod tests {
         assert_eq!(style_at(line, 0..1), Style::Marker);
         assert_eq!(style_at(line, 1..9), Style::Plain);
         // A color naming a slot the palette lacks is still markup.
-        let (spans, _) = spans("{slate}x", false, &PALETTE[..2]);
+        let (spans, _) = spans::<&str>("{slate}x", &LineState::default(), &[], &PALETTE[..2]);
         assert!(spans.contains(&(0..7, Style::Marker)));
         assert!(!spans.iter().any(|(_, s)| matches!(s, Style::Color(_))));
     }
@@ -652,12 +862,13 @@ mod tests {
     #[test]
     fn highlighter_tracks_code_blocks_across_edits() {
         use iced::advanced::text::Highlighter as _;
+        let lines = ["a", "```", "**b**", "```", "**c**"];
         let settings = HighlightSettings {
             palette: PALETTE.to_vec(),
+            text: lines.join("\n"),
             mode: theme::Mode::Light,
         };
         let mut h = Highlighter::new(&settings);
-        let lines = ["a", "```", "**b**", "```", "**c**"];
         let mut all: Vec<Vec<(Range<usize>, Style)>> = lines
             .iter()
             .map(|l| h.highlight_line(l).collect())
@@ -681,6 +892,117 @@ mod tests {
         h.update(&HighlightSettings {
             mode: theme::Mode::Dark,
             ..settings
+        });
+        assert_eq!(h.current_line(), 0);
+    }
+
+    /// Runs `lines` through the editor's highlighter: the style of each
+    /// byte of each line, `Plain` where no span covers it.
+    fn highlight(lines: &[&str]) -> Vec<Vec<Style>> {
+        use iced::advanced::text::Highlighter as _;
+        let mut h = Highlighter::new(&HighlightSettings {
+            palette: PALETTE.to_vec(),
+            text: lines.join("\n"),
+            mode: theme::Mode::Light,
+        });
+        lines
+            .iter()
+            .map(|line| {
+                let mut out = vec![Style::Plain; line.len()];
+                for (range, style) in h.highlight_line(line) {
+                    for s in &mut out[range] {
+                        *s = style;
+                    }
+                }
+                out
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bold_across_two_lines() {
+        let all = highlight(&["**a", "b**"]);
+        assert_eq!(all[0], [Style::Marker, Style::Marker, Style::Bold]);
+        assert_eq!(all[1], [Style::Bold, Style::Marker, Style::Marker]);
+        // Without a closer in the block the `**` is text.
+        let all = highlight(&["**a", "b"]);
+        assert!(all.iter().flatten().all(|s| *s == Style::Plain), "{all:?}");
+        // Italic, strike and `==` carry over the same way.
+        let all = highlight(&["*a", "b*", "~~c", "d~~ ==e", "f=="]);
+        assert_eq!(all[0][1], Style::Italic);
+        assert_eq!(all[1][0], Style::Italic);
+        assert_eq!(all[2][0], Style::Marker);
+        assert_eq!(all[3][0], Style::Plain);
+        assert_eq!(all[3][2], Style::Marker);
+        assert_eq!(all[4][0], Style::Plain);
+        assert_eq!(all[4][1], Style::Marker);
+    }
+
+    #[test]
+    fn color_tag_across_lines() {
+        let coral = Style::Color(PALETTE[0]);
+        let all = highlight(&["{coral}a", "b{/}", "c"]);
+        assert_eq!(all[0][7], coral);
+        assert_eq!(all[1][0], coral);
+        assert_eq!(all[1][1..], [Style::Marker; 3]);
+        assert_eq!(all[2][0], Style::Plain);
+        // Unclosed, it lasts to the end of the block.
+        let all = highlight(&["{coral}a", "b"]);
+        assert_eq!(all[1][0], coral);
+    }
+
+    #[test]
+    fn blank_line_resets_inline_state() {
+        let all = highlight(&["{coral}a", "", "b{/}"]);
+        assert_eq!(all[0][7], Style::Color(PALETTE[0]));
+        assert_eq!(all[2][0], Style::Plain);
+        // A closer past the blank line opens nothing.
+        let all = highlight(&["**a", "", "b**"]);
+        assert!(all.iter().flatten().all(|s| *s == Style::Plain), "{all:?}");
+    }
+
+    #[test]
+    fn heading_line_resets_inline_state() {
+        let all = highlight(&["{coral}a", "# b", "c"]);
+        assert_eq!(all[1][2], Style::Heading);
+        assert_eq!(all[2][0], Style::Plain);
+        // A heading is one line: its `**` doesn't reach the next.
+        let all = highlight(&["# **a", "b**"]);
+        assert_eq!(all[0][2..4], [Style::Heading; 2]);
+        assert_eq!(all[1][0], Style::Plain);
+        // So is a new list item.
+        let all = highlight(&["- **a", "- b**"]);
+        assert_eq!(all[0][2..4], [Style::Plain; 2]);
+        assert_eq!(all[1][2], Style::Plain);
+        // A list item's continuation line belongs to it.
+        let all = highlight(&["- **a", "  b**"]);
+        assert_eq!(all[0][4], Style::Bold);
+        assert_eq!(all[1][2], Style::Bold);
+    }
+
+    #[test]
+    fn closer_typed_later_restyles_earlier_lines() {
+        use iced::advanced::text::Highlighter as _;
+        let settings = |text: &str| HighlightSettings {
+            palette: PALETTE.to_vec(),
+            text: text.into(),
+            mode: theme::Mode::Light,
+        };
+        let mut h = Highlighter::new(&settings("x\n\n**a\nb"));
+        for line in ["x", "", "**a", "b"] {
+            let _ = h.highlight_line(line).count();
+        }
+        // Typing the closer on the last line restyles its block from the top,
+        // but not the block before it.
+        h.update(&settings("x\n\n**a\nb**"));
+        h.change_line(3);
+        assert_eq!(h.current_line(), 2);
+        let spans: Vec<_> = h.highlight_line("**a").collect();
+        assert!(spans.contains(&(2..3, Style::Bold)), "{spans:?}");
+        // A mode change restyles everything.
+        h.update(&HighlightSettings {
+            mode: theme::Mode::Dark,
+            ..settings("x\n\n**a\nb**")
         });
         assert_eq!(h.current_line(), 0);
     }
@@ -732,7 +1054,7 @@ mod tests {
             "→ *→",
             "\\é",
         ] {
-            let (spans, _) = spans(line, false, &PALETTE);
+            let (spans, _) = spans::<&str>(line, &LineState::default(), &[], &PALETTE);
             for (range, _) in spans {
                 assert!(line.is_char_boundary(range.start), "{line:?} {range:?}");
                 assert!(line.is_char_boundary(range.end), "{line:?} {range:?}");
@@ -775,8 +1097,9 @@ mod tests {
         ] {
             for line in input.split('\n') {
                 for in_code in [false, true] {
-                    spans(line, in_code, &PALETTE);
-                    spans(line, in_code, &[]);
+                    let before = LineState::code_block(in_code);
+                    spans(line, &before, &[line], &PALETTE);
+                    spans(line, &before, &[line], &[]);
                 }
             }
         }

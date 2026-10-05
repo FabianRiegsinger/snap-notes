@@ -93,6 +93,7 @@ impl Span {
 }
 
 /// An open `{...}` tag. A color naming a slot the palette lacks is `None`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum OpenTag {
     Color(Option<NoteColor>),
     Background(Option<NoteColor>),
