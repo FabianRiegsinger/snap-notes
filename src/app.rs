@@ -1121,8 +1121,24 @@ impl App {
             }
             // Hidden notes don't react to the keyboard.
             Message::Key(_) if !self.visible => {}
-            Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+            Message::Key(keyboard::Event::KeyPressed {
+                key,
+                physical_key,
+                modifiers,
+                ..
+            }) => {
                 use keyboard::key::Named;
+                // Shortcuts go by the key's Latin letter, so they work on
+                // any layout.
+                let shortcut = crate::command_passthrough::shortcut_char(&key, physical_key);
+                match shortcut {
+                    Some(',') if modifiers.command() => {
+                        return self.update(Message::ToggleSettings)
+                    }
+                    Some('n') if modifiers.command() => return self.update(Message::AddNote),
+                    Some('f') if modifiers.command() => return self.toggle_search(),
+                    _ => {}
+                }
                 match key.as_ref() {
                     keyboard::Key::Named(Named::Escape) if self.search_morph.is_opening() => {
                         self.close_search()
@@ -1139,19 +1155,12 @@ impl App {
                         return self.update(Message::EditorBlurred)
                     }
                     keyboard::Key::Named(Named::Escape) => return self.update(Message::ClosePanel),
-                    keyboard::Key::Character(",") if modifiers.command() => {
-                        return self.update(Message::ToggleSettings)
-                    }
-                    keyboard::Key::Character("n") if modifiers.command() => {
-                        return self.update(Message::AddNote)
-                    }
-                    keyboard::Key::Character("f") if modifiers.command() => {
-                        return self.toggle_search()
-                    }
                     // In edit mode the body editor's own key binding handles
                     // undo/redo; the title field ignores them, so skip it here.
-                    keyboard::Key::Character(c) if !self.editing && self.active_note.is_some() => {
-                        if let Some(step) = crate::note_panel::history_key(c, modifiers) {
+                    keyboard::Key::Character(_) if !self.editing && self.active_note.is_some() => {
+                        if let Some(step) =
+                            shortcut.and_then(|c| crate::note_panel::history_key(c, modifiers))
+                        {
                             return crate::note_panel::title_focused().then(move |focused| {
                                 if focused {
                                     Task::none()
@@ -3481,6 +3490,37 @@ mod tests {
 
     fn search_showing(app: &App) -> bool {
         app.search_open && app.search_morph.is_opening()
+    }
+
+    fn cmd_key_on(ch: &str, code: keyboard::key::Code) -> Message {
+        let key = keyboard::Key::Character(ch.into());
+        Message::Key(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: keyboard::key::Physical::Code(code),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::COMMAND,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn non_latin_layout_keeps_app_shortcuts() {
+        use keyboard::key::Code;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        // Russian layout: F types "а", N types "т", the comma key types "б".
+        let _ = app.update(cmd_key_on("а", Code::KeyF));
+        assert!(search_showing(&app));
+        let _ = app.update(cmd_key_on("а", Code::KeyF));
+        settle(&mut app);
+        let notes = app.store.notes().len();
+        let _ = app.update(cmd_key_on("т", Code::KeyN));
+        assert_eq!(app.store.notes().len(), notes + 1);
+        settle(&mut app);
+        let _ = app.update(cmd_key_on("б", Code::Comma));
+        assert!(app.settings_open);
     }
 
     #[test]

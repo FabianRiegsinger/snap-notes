@@ -9,10 +9,20 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::event::Event;
-use iced::keyboard::key::Physical;
+use iced::keyboard::key::{Code, Physical};
 use iced::keyboard::{self, Key, Modifiers};
 use iced::mouse;
 use iced::{Element, Length, Rectangle, Size, Theme, Vector};
+
+/// The shortcut letter of a press, lowercased: the key's Latin letter or
+/// digit on any layout (as `text_input` finds it), or `,` for the comma
+/// key, which `to_latin` doesn't map. `None` when there is none, e.g. a
+/// non-Latin character on an unknown physical key.
+pub fn shortcut_char(key: &Key, physical: Physical) -> Option<char> {
+    key.to_latin(physical)
+        .or_else(|| (physical == Physical::Code(Code::Comma)).then_some(','))
+        .map(|c| c.to_ascii_lowercase())
+}
 
 /// Whether a press of `key` (on `physical`) with `modifiers` skips the
 /// field and goes to the app: a command shortcut other than the field's
@@ -25,8 +35,8 @@ pub fn passes_through(key: &Key, physical: Physical, modifiers: Modifiers) -> bo
     if !modifiers.command() || (modifiers.alt() && !cfg!(target_os = "macos")) {
         return false;
     }
-    match key.to_latin(physical) {
-        Some(c) => !matches!(c.to_ascii_lowercase(), 'c' | 'x' | 'v' | 'a'),
+    match shortcut_char(key, physical) {
+        Some(c) => !matches!(c, 'c' | 'x' | 'v' | 'a'),
         None => matches!(key, Key::Character(_)),
     }
 }
@@ -223,5 +233,30 @@ mod tests {
         assert!(!passes_through(&key("ч"), Physical::Code(Code::KeyX), cmd));
         // Other letters still reach the app.
         assert!(passes_through(&key("а"), Physical::Code(Code::KeyF), cmd));
+        // Russian layout: the comma key types "б".
+        assert!(passes_through(&key("б"), Physical::Code(Code::Comma), cmd));
+    }
+
+    #[test]
+    fn shortcut_char_maps_any_layout() {
+        assert_eq!(shortcut_char(&key("f"), unknown()), Some('f'));
+        assert_eq!(shortcut_char(&key("F"), unknown()), Some('f'));
+        assert_eq!(
+            shortcut_char(&key("а"), Physical::Code(Code::KeyF)),
+            Some('f')
+        );
+        assert_eq!(
+            shortcut_char(&key("я"), Physical::Code(Code::KeyZ)),
+            Some('z')
+        );
+        assert_eq!(
+            shortcut_char(&key("б"), Physical::Code(Code::Comma)),
+            Some(',')
+        );
+        assert_eq!(shortcut_char(&key("б"), unknown()), None);
+        assert_eq!(
+            shortcut_char(&Key::Named(keyboard::key::Named::Escape), unknown()),
+            None
+        );
     }
 }
