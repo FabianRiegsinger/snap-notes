@@ -257,6 +257,12 @@ pub struct App {
     /// Search slot center when the panel opened.
     search_anchor_y: f32,
     search_query: String,
+    /// Results for `search_query`, and the ids of every matching note (for
+    /// dimming), as of `search_synced`: the store revision and query they
+    /// were computed for.
+    search_results: Vec<Hit>,
+    search_matches: HashSet<Uuid>,
+    search_synced: Option<(u64, String)>,
     /// Keyboard focus to give once the panel or note showing it has
     /// faded its content in (the widget doesn't exist before).
     pending_focus: Option<PendingFocus>,
@@ -411,6 +417,9 @@ impl App {
             search_morph,
             search_anchor_y: 0.0,
             search_query: String::new(),
+            search_results: Vec::new(),
+            search_matches: HashSet::new(),
+            search_synced: None,
             pending_focus: None,
             tray_ok: false,
             tray_failed: false,
@@ -423,6 +432,12 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        self.sync_search();
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ThemeChanged(mode) => {
                 self.theme = theme::Theme::new(mode);
@@ -447,19 +462,16 @@ impl App {
                 if self.settings_open && self.settings_morph.is_opening() {
                     return self.update(Message::CloseSettings);
                 }
-                if self.settings_open {
-                    // Still folding away: unfold again from where it is.
-                    self.settings_morph.open();
-                    self.animating = true;
-                    return Task::none();
-                }
                 let close_note = self.update(Message::ClosePanel);
                 self.close_search();
                 self.hide_peek();
-                let gear = self.strip_layout().settings_anchor();
-                self.settings_anchor_y = gear.y + gear.height / 2.0;
-                self.settings_open = true;
-                self.palette_slot = None;
+                // Still folding away: unfold again from where it is.
+                if !self.settings_open {
+                    let gear = self.strip_layout().settings_anchor();
+                    self.settings_anchor_y = gear.y + gear.height / 2.0;
+                    self.settings_open = true;
+                    self.palette_slot = None;
+                }
                 self.settings_morph.open();
                 self.animating = true;
                 return Task::batch([close_note, self.dock_window()]);
@@ -1190,11 +1202,15 @@ impl App {
         if let Some(frame) = self.search_frame() {
             let rect = frame.rect;
             if rect.width >= 1.0 && rect.height >= 1.0 {
-                layers.push(
-                    mouse_area(Space::new().width(Fill).height(Fill))
-                        .on_press(Message::CloseSearch)
-                        .into(),
-                );
+                // Only while unfolding: a folding panel mustn't block clicks
+                // on the note opening in its place.
+                if self.search_morph.is_opening() {
+                    layers.push(
+                        mouse_area(Space::new().width(Fill).height(Fill))
+                            .on_press(Message::CloseSearch)
+                            .into(),
+                    );
+                }
                 let panel = search_panel(SearchView {
                     theme: self.theme,
                     query: &self.search_query,
@@ -1838,22 +1854,25 @@ impl App {
             self.close_search();
             return Task::none();
         }
-        self.pending_focus = Some(PendingFocus::SearchField);
-        self.animating = true;
-        if self.search_open {
-            // Still folding away: unfold again from where it is.
-            self.search_morph.open();
-            return focus_field();
-        }
         let close_note = self.update(Message::ClosePanel);
         let close_settings = self.update(Message::CloseSettings);
         self.hide_peek();
-        let slot = self.strip_layout().search_button;
-        self.search_anchor_y = slot.y + slot.height / 2.0;
-        self.search_open = true;
-        self.search_query.clear();
+        // Still folding away: unfold again from where it is, query kept.
+        if !self.search_open {
+            let slot = self.strip_layout().search_button;
+            self.search_anchor_y = slot.y + slot.height / 2.0;
+            self.search_open = true;
+            self.search_query.clear();
+        }
         self.search_morph.open();
-        Task::batch([close_note, close_settings, self.dock_window()])
+        self.pending_focus = Some(PendingFocus::SearchField);
+        self.animating = true;
+        Task::batch([
+            close_note,
+            close_settings,
+            self.dock_window(),
+            focus_field(),
+        ])
     }
 
     /// Folds the search panel back into its slot (if it is showing).
@@ -1875,10 +1894,10 @@ impl App {
             return Task::none();
         };
         let matched = self
-            .search_hits()
-            .into_iter()
+            .search_results
+            .iter()
             .find(|hit| hit.note_id == id)
-            .and_then(|hit| hit.body_match);
+            .and_then(|hit| hit.body_match.clone());
         self.close_search();
         // `open_note` would fold a note that is already open.
         let open = if self.active_note == Some(id) && self.morph.is_opening() {
@@ -1929,9 +1948,29 @@ impl App {
         }
     }
 
+    /// Recomputes the search results while the panel is open and the
+    /// query or the notes changed since they were computed.
+    fn sync_search(&mut self) {
+        if !self.search_open {
+            return;
+        }
+        let key = (self.store.revision(), self.search_query.clone());
+        if self.search_synced.as_ref() == Some(&key) {
+            return;
+        }
+        let notes = self.store.notes();
+        self.search_results = search::find(notes, &self.search_query);
+        self.search_matches = search::matching(notes, &self.search_query)
+            .into_iter()
+            .zip(notes)
+            .filter_map(|(matched, note)| matched.then_some(note.id))
+            .collect();
+        self.search_synced = Some(key);
+    }
+
     /// Search results for the current query, for the panel.
-    fn search_hits(&self) -> Vec<Hit> {
-        search::find(self.store.notes(), &self.search_query)
+    fn search_hits(&self) -> &[Hit] {
+        &self.search_results
     }
 
     /// Bars to dim, by index: while the search is open with a query, the
@@ -1940,9 +1979,10 @@ impl App {
         if !self.search_open || self.search_query.trim().is_empty() {
             return Vec::new();
         }
-        search::matching(self.store.notes(), &self.search_query)
-            .into_iter()
-            .map(|matched| !matched)
+        self.store
+            .notes()
+            .iter()
+            .map(|note| !self.search_matches.contains(&note.id))
             .collect()
     }
 
@@ -3293,6 +3333,83 @@ mod tests {
         assert_eq!(app.dimmed_bars(), vec![false, true, false]);
         let _ = app.update(Message::SearchChanged("  ".into()));
         assert!(app.dimmed_bars().iter().all(|d| !d));
+    }
+
+    /// Ticks a few frames: far enough into a fold that it is still running.
+    fn tick_a_little(app: &mut App) {
+        let mut now = Instant::now();
+        for _ in 0..3 {
+            now += Duration::from_millis(16);
+            let _ = app.update(Message::Tick(now));
+        }
+    }
+
+    #[test]
+    fn reopening_search_mid_fold_closes_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::ToggleSearch);
+        settle(&mut app);
+        let _ = app.update(Message::ToggleSettings);
+        tick_a_little(&mut app);
+        assert!(app.search_open && !app.search_morph.is_opening());
+        let _ = app.update(Message::ToggleSearch);
+        assert!(search_showing(&app));
+        assert!(!app.settings_morph.is_opening());
+        settle(&mut app);
+        assert!(!app.settings_open);
+    }
+
+    #[test]
+    fn reopening_search_mid_fold_folds_the_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "needle")]);
+        let _ = app.update(Message::ToggleSearch);
+        let _ = app.update(Message::SearchChanged("needle".into()));
+        settle(&mut app);
+        let _ = app.update(Message::SearchResultPicked(ids[0]));
+        tick_a_little(&mut app);
+        assert!(app.search_open && app.morph.is_opening());
+        let _ = app.update(Message::ToggleSearch);
+        assert!(search_showing(&app));
+        assert!(!app.morph.is_opening());
+        // The query survives the reopen.
+        assert_eq!(app.search_query, "needle");
+    }
+
+    #[test]
+    fn reopening_settings_mid_fold_closes_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::ToggleSettings);
+        settle(&mut app);
+        let _ = app.update(Message::ToggleSearch);
+        tick_a_little(&mut app);
+        assert!(app.settings_open && !app.settings_morph.is_opening());
+        let _ = app.update(Message::ToggleSettings);
+        assert!(app.settings_morph.is_opening());
+        assert!(!app.search_morph.is_opening());
+        settle(&mut app);
+        assert!(!app.search_open);
+    }
+
+    #[test]
+    fn search_results_follow_store_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "red"), ("b", "blue")]);
+        let _ = app.update(Message::ToggleSearch);
+        let _ = app.update(Message::SearchChanged("red".into()));
+        assert_eq!(app.search_hits().len(), 1);
+        // A note added while the search is open shows up.
+        let added = app.store.add_note(&crate::note::PALETTE);
+        app.store.note_mut(added).unwrap().content = "red too".into();
+        let _ = app.update(Message::SaveTick);
+        let hits: Vec<Uuid> = app.search_hits().iter().map(|h| h.note_id).collect();
+        assert_eq!(hits, vec![ids[0], added]);
+        assert_eq!(app.dimmed_bars(), vec![false, true, false]);
+        // Dimming follows the notes when they are reordered.
+        app.store.reorder(0, 2);
+        assert_eq!(app.dimmed_bars(), vec![true, false, false]);
     }
 
     #[test]

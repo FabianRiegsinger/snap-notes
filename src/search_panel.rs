@@ -22,7 +22,7 @@ pub fn focus_field() -> iced::Task<Message> {
 pub struct SearchView<'a> {
     pub theme: theme::Theme,
     pub query: &'a str,
-    pub hits: Vec<Hit>,
+    pub hits: &'a [Hit],
     pub size: Size,
     pub morph_progress: f32,
     pub content_alpha: f32,
@@ -39,13 +39,13 @@ fn snippet_parts(snippet: &str, highlight: Range<usize>) -> (&str, &str, &str) {
     (&snippet[..start], &snippet[start..end], &snippet[end..])
 }
 
-fn result_row<'a>(hit: Hit, theme: theme::Theme, a: f32) -> Element<'a, Message> {
+fn result_row<'a>(hit: &Hit, theme: theme::Theme, a: f32) -> Element<'a, Message> {
     let title = if hit.title.trim().is_empty() {
         "Untitled".to_string()
     } else {
-        hit.title
+        hit.title.clone()
     };
-    let (before, matched, after) = snippet_parts(&hit.snippet, hit.highlight);
+    let (before, matched, after) = snippet_parts(&hit.snippet, hit.highlight.clone());
     let bold = Font {
         weight: font::Weight::Bold,
         ..theme::BODY_FONT

@@ -19,6 +19,9 @@ pub struct NoteStore {
     dirty: bool,
     last_mark: Option<Instant>,
     load_failed: bool,
+    /// Bumped on every change (or mutable access) to the notes, so derived
+    /// state such as search results knows when to recompute.
+    revision: u64,
 }
 
 impl NoteStore {
@@ -36,6 +39,7 @@ impl NoteStore {
             dirty: false,
             last_mark: None,
             load_failed,
+            revision: 0,
         }
     }
 
@@ -68,7 +72,13 @@ impl NoteStore {
         &self.notes
     }
 
+    /// Changes whenever the notes may have changed.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn note_mut(&mut self, id: Uuid) -> Option<&mut Note> {
+        self.revision += 1;
         self.notes.iter_mut().find(|n| n.id == id)
     }
 
@@ -78,6 +88,7 @@ impl NoteStore {
         note.order = order;
         let id = note.id;
         self.notes.push(note);
+        self.revision += 1;
         id
     }
 
@@ -91,6 +102,7 @@ impl NoteStore {
             note.order = order;
             self.notes.push(note);
         }
+        self.revision += 1;
     }
 
     /// Gives every note colored `old` the color `new`. Returns whether any
@@ -104,6 +116,7 @@ impl NoteStore {
     /// (`a -> b`, `b -> c`) don't feed into each other.
     pub fn recolor_many(&mut self, changes: &[(NoteColor, NoteColor)]) -> bool {
         let mut changed = false;
+        self.revision += 1;
         for note in &mut self.notes {
             if let Some((_, new)) = changes.iter().find(|(old, _)| *old == note.color) {
                 note.color = *new;
@@ -115,6 +128,7 @@ impl NoteStore {
 
     pub fn delete_note(&mut self, id: Uuid) {
         self.notes.retain(|n| n.id != id);
+        self.revision += 1;
         for (i, note) in self.notes.iter_mut().enumerate() {
             note.order = i;
         }
@@ -123,12 +137,14 @@ impl NoteStore {
     pub fn reorder(&mut self, from_index: usize, to_index: usize) {
         let note = self.notes.remove(from_index);
         self.notes.insert(to_index, note);
+        self.revision += 1;
         for (i, note) in self.notes.iter_mut().enumerate() {
             note.order = i;
         }
     }
 
     pub fn mark_dirty(&mut self) {
+        self.revision += 1;
         self.dirty = true;
         self.last_mark = Some(Instant::now());
     }

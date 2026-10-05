@@ -613,7 +613,8 @@ pub(crate) fn history_key(key: &str, modifiers: keyboard::Modifiers) -> Option<M
 
 /// The body editor's key bindings while it has focus: Cmd/Ctrl+V asks the
 /// app to paste (text or image), and the undo/redo keys step its history;
-/// everything else is iced's default.
+/// other command shortcuts (Cmd+F, Cmd+N, Cmd+,) pass through to the app
+/// instead of typing their letter; everything else is iced's default.
 fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     if !matches!(press.status, text_editor::Status::Focused { .. }) {
         return text_editor::Binding::from_key_press(press);
@@ -624,7 +625,15 @@ fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding
         }
         keyboard::Key::Character(c) => match history_key(c, press.modifiers) {
             Some(step) => Some(text_editor::Binding::Custom(step)),
-            None => text_editor::Binding::from_key_press(press),
+            None => {
+                let command = press.modifiers.command();
+                // iced binds only c/x/v/a under command; any other letter
+                // would be inserted (macOS reports it as text).
+                match text_editor::Binding::from_key_press(press) {
+                    Some(text_editor::Binding::Insert(_)) if command => None,
+                    binding => binding,
+                }
+            }
         },
         _ => text_editor::Binding::from_key_press(press),
     }
@@ -648,6 +657,25 @@ mod tests {
             text: Some(ch.into()),
             status,
         }
+    }
+
+    #[test]
+    fn command_shortcuts_pass_through_the_editor() {
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        for key in ["f", "n", ","] {
+            assert!(
+                body_key_binding(press(key, true, focused)).is_none(),
+                "{key}"
+            );
+        }
+        assert!(matches!(
+            body_key_binding(press("c", true, focused)),
+            Some(text_editor::Binding::Copy)
+        ));
+        assert!(matches!(
+            body_key_binding(press("f", false, focused)),
+            Some(text_editor::Binding::Insert('f'))
+        ));
     }
 
     #[test]
