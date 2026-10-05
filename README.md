@@ -13,8 +13,9 @@
 
 ### The bar strip
 - **Dock-style magnification:** move the cursor along the strip and nearby bars grow with smooth spring physics.
-- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. Move onto the preview to keep it open, and click it to open the note. Its trash button deletes the note after asking first.
+- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, and click it to open the note. Its trash button deletes the note after asking first.
 - **Quick add:** click the `+` slot below the bars (the whole strip width counts), or press Cmd/Ctrl+N.
+- **Search:** click the 🔍 slot under `+`, press Cmd/Ctrl+F or choose **Search…** in the tray menu. See [Search](#search).
 - **Reorder:** drag a bar up or down to move the note.
 - **Scroll:** with more notes than fit on screen, scroll the strip with the mouse wheel.
 
@@ -25,6 +26,7 @@
 - **Resize it:** drag any edge or corner. Each note remembers its own size.
 - **Color code it:** pick from a 20-color palette with the swatch in the header.
 - **Delete with confirmation:** the trash button asks first, then folds the note away.
+- **Copy:** the copy button in the header copies the note's title and body. Its icon shows a ✓ for a moment afterwards.
 - **Images:** drop a png, jpg, gif or webp file (up to 20 MB) onto an open note, paste an image-only clipboard with Cmd/Ctrl+V, or use the image button in the toolbar.
 - **Clickable links:** `http`, `https` and `mailto` links in the formatted view open in your browser.
 
@@ -36,8 +38,21 @@
 - **Motion:** a deleted note's bar collapses, the toolbar fades and slides in, the body fades when you switch modes, and buttons have pressed states.
 - **Details:** a focus ring on the title, a faint "…" in empty notes and slimmer scrollbars.
 
+### Search
+- **Open it:** Cmd/Ctrl+F, the 🔍 slot under `+` in the strip, or **Search…** in the tray menu. Esc closes the panel.
+- **As you type:** results update with every keystroke. Matching ignores case and covers titles and bodies.
+- **Results:** each one shows the title and a snippet with the match in bold. Click one to open that note with the match selected.
+- **Dimmed bars:** while you type, the bars of notes that don't match dim.
+
+### Export
+- **Open it:** **Export…** in the Settings group "Data", or in the tray menu.
+- **Pick notes:** every note starts checked. The All and None buttons toggle them all.
+- **Format:** `.md` or `.txt`, saved as one file through a save dialog. The suggested name is `snap-notes-YYYY-MM-DD.<ext>`.
+- **Markdown:** each note becomes a `# Title` heading followed by its Markdown. The custom color, size and highlight tags are removed.
+- **Plain text:** each title is underlined with `=`.
+
 ### Formatting
-Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. In edit mode the toolbar's bold, italic, strikethrough, code, text color, highlight, size (small, normal, large, huge), link and image buttons apply the markup.
+Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. While editing, the editor already shows bold, italic, code, colored text and bold headings, with the Markdown markers drawn faint. Strikethrough, highlight backgrounds, sizes and images only show in the formatted view. In edit mode the toolbar's bold, italic, strikethrough, code, text color, highlight, size (small, normal, large, huge), link and image buttons apply the markup.
 
 | Effect | Syntax |
 |---|---|
@@ -73,18 +88,20 @@ Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies l
 | Motion | Animation speed (0.25–3×) |
 | Window | How much of the screen height the strip may use |
 | Palette | Replace any of the 20 note colors from 60 presets. Notes using the old color follow along. |
+| Data | **Export…** your notes to one file (see [Export](#export)) |
 
 ### Menu bar / tray
-On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Settings…** and **Quit**. Hiding the notes clears the screen completely until you show them again.
+On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Search…**, **Export…**, **Settings…** and **Quit**. Hiding the notes clears the screen completely until you show them again.
 
 ## Keyboard shortcuts
 
 | Shortcut | Action |
 |---|---|
 | Cmd/Ctrl+N | New note |
+| Cmd/Ctrl+F | Open or close search |
 | Cmd/Ctrl+, | Open or close settings |
 | Cmd/Ctrl+V | Paste an image into the open note |
-| Esc | Leave edit mode, close settings, or fold the open note |
+| Esc | Leave edit mode, close search, export or settings, or fold the open note |
 
 ## Platform support
 
