@@ -705,13 +705,7 @@ impl App {
             Message::TitleEdited(title) => {
                 if let Some(id) = self.active_note {
                     if let Some(note) = self.store.note_mut(id) {
-                        // A changed tag counts from now: `@15:00` typed at
-                        // 16:00 means tomorrow.
-                        let now = chrono::Local::now();
-                        if reminder::parse(&note.title, now) != reminder::parse(&title, now) {
-                            note.reminder_set_at = Some(now.with_timezone(&chrono::Utc));
-                        }
-                        note.title = title;
+                        reminder::retitle(note, title, chrono::Local::now());
                         note.updated_at = chrono::Utc::now();
                     }
                     self.store.mark_dirty();
@@ -943,7 +937,8 @@ impl App {
                 if export_closed {
                     self.export = None;
                 }
-                let pulse_active = !self.pulsing.is_empty();
+                // Hidden notes don't pulse; they resume once shown.
+                let pulse_active = self.pulse_running();
                 if pulse_active {
                     self.pulse_phase = (self.pulse_phase + dt) % PULSE_SECS;
                 }
@@ -1095,6 +1090,7 @@ impl App {
                     tasks.push(self.update(Message::ClosePanel));
                     self.hide_peek();
                 }
+                self.animating |= self.pulse_running();
                 if let Some(id) = self.window_id {
                     let shown = self.visible;
                     tasks.push(window::run(id, move |w| tray::set_notes_shown(w, shown)).discard());
@@ -1807,7 +1803,12 @@ impl App {
         }
         let _ = self.store.save();
         self.store.did_save();
-        self.animating |= !self.pulsing.is_empty();
+        self.animating |= self.pulse_running();
+    }
+
+    /// Some bar pulses and the notes are on screen.
+    fn pulse_running(&self) -> bool {
+        self.visible && !self.pulsing.is_empty()
     }
 
     /// Some note has a reminder that hasn't fired yet.
@@ -3701,7 +3702,7 @@ mod tests {
             .map(|(title, content)| {
                 let id = app.store.add_note(&crate::note::PALETTE);
                 let note = app.store.note_mut(id).unwrap();
-                note.title = (*title).into();
+                reminder::retitle(note, (*title).into(), chrono::Local::now());
                 note.content = (*content).into();
                 id
             })
@@ -4463,6 +4464,54 @@ mod tests {
         let _ = app.update(Message::ClosePanel);
         settle(&mut app);
         assert!(!app.animating, "no frames once nothing pulses");
+    }
+
+    #[test]
+    fn body_edit_does_not_rearm_legacy_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut store = NoteStore::load(dir.path().join("notes.json"));
+            let id = store.add_note(&crate::note::PALETTE);
+            let note = store.note_mut(id).unwrap();
+            note.title = "Call @15:00".into();
+            note.updated_at = chrono::Utc::now() - chrono::Duration::days(3);
+            note.reminder_set_at = None;
+            store.save().unwrap();
+        }
+        let mut app = app_in(&dir);
+        assert!(app.store.is_dirty(), "the frozen anchor gets saved");
+        app.window_size = Size::new(1400.0, 900.0);
+        let _ = app.update(Message::ReminderTick);
+        let fired = app.store.notes()[0].reminder_fired;
+        assert!(fired.is_some());
+
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        let _ = app.update(Message::NoteEdited(text_editor::Action::Edit(
+            text_editor::Edit::Insert('x'),
+        )));
+        assert!(app.store.notes()[0].content.contains('x'));
+        let _ = app.update(Message::ClosePanel);
+        settle(&mut app);
+        let _ = app.update(Message::ReminderTick);
+        assert_eq!(app.store.notes()[0].reminder_fired, fired);
+        assert!(app.pulsing.is_empty());
+        assert!(!app.reminders_pending());
+    }
+
+    #[test]
+    fn hidden_notes_do_not_pulse() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[(DUE_TITLE, "")]);
+        let _ = app.update(Message::ReminderTick);
+        let _ = app.update(Message::ToggleVisibility);
+        settle(&mut app);
+        assert!(!app.animating, "no frames while hidden");
+        assert!(app.pulsing.contains(&ids[0]));
+        let _ = app.update(Message::ToggleVisibility);
+        assert!(app.animating, "the pulse resumes once shown");
+        settle(&mut app);
+        assert!(app.animating);
     }
 
     #[test]

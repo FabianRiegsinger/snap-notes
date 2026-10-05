@@ -137,10 +137,36 @@ pub fn parse(title: &str, now: DateTime<Local>) -> Option<DateTime<Local>> {
     }
 }
 
+/// The title's valid reminder tag as typed (with its time, if any).
+pub fn tag_text(title: &str) -> Option<&str> {
+    let tag = tag(title)?;
+    tag.when.map(|_| &title[tag.range])
+}
+
+/// Sets the note's title. A changed tag counts from `now`: `@15:00` typed at
+/// 16:00 means tomorrow. The same tag keeps counting from when it was typed.
+pub fn retitle(note: &mut Note, title: String, now: DateTime<Local>) {
+    if tag_text(&note.title) != tag_text(&title) || note.reminder_set_at.is_none() {
+        note.reminder_set_at = tag_text(&title).map(|_| now.with_timezone(&Utc));
+    }
+    note.title = title;
+}
+
+/// Gives a tagged note without an anchor (written before anchors existed)
+/// its `updated_at` as one, so later edits can't move its reminder. True if
+/// it changed the note.
+pub fn freeze_anchor(note: &mut Note) -> bool {
+    let freeze = note.reminder_set_at.is_none() && tag_text(&note.title).is_some();
+    if freeze {
+        note.reminder_set_at = Some(note.updated_at);
+    }
+    freeze
+}
+
 /// The note's reminder time, if its title sets one. Relative tags count from
 /// when the tag was typed.
 pub fn at(note: &Note) -> Option<DateTime<Local>> {
-    let set_at = note.reminder_set_at.unwrap_or(note.updated_at);
+    let set_at = note.reminder_set_at?;
     parse(&note.title, set_at.with_timezone(&Local))
 }
 
@@ -314,6 +340,42 @@ mod tests {
         // Still set, so the header keeps its bell.
         assert!(at(&n).is_some());
         assert_eq!(due(&note("Plain", now()), now()), None);
+    }
+
+    #[test]
+    fn retyping_a_different_tag_rearms_from_now() {
+        // Typed Monday 10:00, fired Tuesday 09:00.
+        let mut n = note("Call @tomorrow", local(2026, 10, 5, 10, 0));
+        n.reminder_fired = due(&n, local(2026, 10, 6, 9, 0));
+        assert!(n.reminder_fired.is_some());
+        // Wednesday 10:00: `@9:00` resolves to Thursday 09:00 like
+        // `@tomorrow` would now, but it is a new tag.
+        let wed = local(2026, 10, 7, 10, 0);
+        retitle(&mut n, "Call @9:00".into(), wed);
+        assert_eq!(n.reminder_set_at, Some(wed.with_timezone(&Utc)));
+        assert_eq!(
+            pending(&n),
+            Some(local(2026, 10, 8, 9, 0).with_timezone(&Utc))
+        );
+        // Other title edits keep the anchor.
+        retitle(&mut n, "Call Bob @9:00".into(), local(2026, 10, 7, 11, 0));
+        assert_eq!(n.reminder_set_at, Some(wed.with_timezone(&Utc)));
+        // No tag, no anchor.
+        retitle(&mut n, "Call Bob".into(), wed);
+        assert_eq!(n.reminder_set_at, None);
+    }
+
+    #[test]
+    fn legacy_anchor_freezes_at_updated_at() {
+        let mut n = note("Call @15:00", now());
+        n.reminder_set_at = None;
+        assert_eq!(at(&n), None);
+        assert!(freeze_anchor(&mut n));
+        assert_eq!(n.reminder_set_at, Some(n.updated_at));
+        assert!(!freeze_anchor(&mut n));
+        let mut plain = note("Plain", now());
+        plain.reminder_set_at = None;
+        assert!(!freeze_anchor(&mut plain));
     }
 
     #[test]

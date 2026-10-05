@@ -34,11 +34,16 @@ impl NoteStore {
             },
             Err(e) => (Vec::new(), e.kind() != io::ErrorKind::NotFound),
         };
-        let notes = normalize_stacks(notes);
+        let mut notes = normalize_stacks(notes);
+        // Older tagged notes get a fixed reminder anchor, saved soon after.
+        let mut anchored = false;
+        for note in &mut notes {
+            anchored |= crate::reminder::freeze_anchor(note);
+        }
         Self {
             notes,
             path,
-            dirty: false,
+            dirty: anchored,
             last_mark: None,
             load_failed,
             revision: 0,

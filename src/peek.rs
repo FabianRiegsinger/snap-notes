@@ -742,7 +742,7 @@ mod tests {
     #[test]
     fn peek_header_shows_reminder() {
         let mut n = note("Call @2026-10-06 15:00", "- [ ] a");
-        n.updated_at = chrono::Utc::now();
+        n.reminder_set_at = Some(chrono::Utc::now());
         let text = peek_text(&n, PEEK_WIDTH);
         assert_eq!(text.reminder.as_deref(), Some("Tue 15:00"));
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
