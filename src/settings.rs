@@ -147,6 +147,8 @@ pub enum SettingsGroup {
     Window,
     Palette,
     App,
+    /// Export; it holds no settings.
+    Data,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,12 +170,16 @@ impl SettingToggle {
 }
 
 impl SettingsGroup {
-    pub const SLIDERS: [SettingsGroup; 5] = [
+    /// Every group, in panel order.
+    pub const ALL: [SettingsGroup; 8] = [
+        SettingsGroup::App,
         SettingsGroup::Bars,
         SettingsGroup::Hover,
         SettingsGroup::Notes,
         SettingsGroup::Motion,
         SettingsGroup::Window,
+        SettingsGroup::Palette,
+        SettingsGroup::Data,
     ];
 
     pub fn label(self) -> &'static str {
@@ -185,7 +191,13 @@ impl SettingsGroup {
             SettingsGroup::Window => "Window",
             SettingsGroup::Palette => "Palette",
             SettingsGroup::App => "App",
+            SettingsGroup::Data => "Data",
         }
+    }
+
+    /// Whether the group has values its Reset button restores.
+    pub fn resettable(self) -> bool {
+        self != SettingsGroup::Data
     }
 }
 
@@ -454,6 +466,7 @@ impl Settings {
             SettingsGroup::Window => self.window = d.window,
             SettingsGroup::Palette => self.palette = d.palette,
             SettingsGroup::App => self.app = d.app,
+            SettingsGroup::Data => {}
         }
     }
 

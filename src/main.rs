@@ -3,6 +3,7 @@ mod app;
 mod bar_strip;
 mod color_picker;
 mod export;
+mod export_panel;
 mod history;
 mod hit_text;
 mod icons;

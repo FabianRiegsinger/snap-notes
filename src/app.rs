@@ -2,6 +2,10 @@ use crate::animation::{ease_out_cubic, morph_frame, MagnificationState, Morph, M
 use crate::bar_strip::{
     band, compute_layout, peek_target, BarStrip, StripLayout, SETTINGS_SLOT, STRIP_WIDTH,
 };
+use crate::export::{self, ExportFormat};
+use crate::export_panel::{
+    export_panel, exported_message, save_error_message, ExportState, ExportView,
+};
 use crate::history::History;
 use crate::images;
 use crate::note::NoteColor;
@@ -44,6 +48,8 @@ const COLLAPSE_SECS: f32 = 0.18;
 const COPIED_FOR: Duration = Duration::from_millis(1500);
 /// Toolbar and body fade in this long after switching edit/render mode.
 const MODE_FADE_SECS: f32 = 0.12;
+/// How long the export panel shows its success before closing.
+const EXPORTED_FOR: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -60,6 +66,17 @@ pub enum Message {
     /// The panel's close button, a click beside it, or an Esc the focused
     /// search field took (it only drops its focus on Esc).
     CloseSearch,
+    /// Opens the export panel in place of the settings (the Settings'
+    /// button or the tray item), or closes it while it is showing.
+    ToggleExport,
+    ExportToggleNote(Uuid),
+    /// The panel's "All" (`true`) and "None" (`false`).
+    ExportAll(bool),
+    ExportFormatChosen(ExportFormat),
+    /// The Export button: opens the save dialog.
+    ExportRequested,
+    /// The save dialog returned; `None` when it was cancelled.
+    ExportPicked(Option<PathBuf>),
     SettingChanged(SettingKey, f32),
     // Only the macOS/Windows settings panel shows these toggles.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
@@ -263,6 +280,11 @@ pub struct App {
     search_results: Vec<Hit>,
     search_matches: HashSet<Uuid>,
     search_synced: Option<(u64, String)>,
+    /// The export panel is showing (kept while it folds back into the gear).
+    export: Option<ExportState>,
+    export_morph: Morph,
+    /// Gear center when the export panel opened.
+    export_anchor_y: f32,
     /// Keyboard focus to give once the panel or note showing it has
     /// faded its content in (the widget doesn't exist before).
     pending_focus: Option<PendingFocus>,
@@ -364,6 +386,7 @@ impl App {
         let peek = Morph::peek(s.motion.speed);
         let settings_morph = Morph::new(s.motion.speed);
         let search_morph = Morph::new(s.motion.speed);
+        let export_morph = Morph::new(s.motion.speed);
         let mode_fade = Self::settled_fade(s.motion.speed);
         let window_size = Size::new(Self::docked_width(s, false), 600.0);
         let data_dir = store.dir().to_path_buf();
@@ -415,6 +438,9 @@ impl App {
             palette_slot: None,
             search_open: false,
             search_morph,
+            export: None,
+            export_morph,
+            export_anchor_y: 0.0,
             search_anchor_y: 0.0,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -464,6 +490,7 @@ impl App {
                 }
                 let close_note = self.update(Message::ClosePanel);
                 self.close_search();
+                self.close_export();
                 self.hide_peek();
                 // Still folding away: unfold again from where it is.
                 if !self.settings_open {
@@ -486,6 +513,34 @@ impl App {
             Message::SearchChanged(query) => self.search_query = query,
             Message::SearchResultPicked(id) => return self.pick_result(id),
             Message::CloseSearch => self.close_search(),
+            Message::ToggleExport => return self.toggle_export(),
+            Message::ExportToggleNote(id) => {
+                if let Some(state) = &mut self.export {
+                    state.status = None;
+                    if !state.selected.remove(&id) {
+                        state.selected.insert(id);
+                    }
+                }
+            }
+            Message::ExportAll(all) => {
+                if let Some(state) = &mut self.export {
+                    state.status = None;
+                    state.selected = if all {
+                        self.store.notes().iter().map(|n| n.id).collect()
+                    } else {
+                        HashSet::new()
+                    };
+                }
+            }
+            Message::ExportFormatChosen(format) => {
+                if let Some(state) = &mut self.export {
+                    state.status = None;
+                    state.format = format;
+                }
+            }
+            Message::ExportRequested => return self.request_export(),
+            Message::ExportPicked(Some(path)) => self.export_to(&path),
+            Message::ExportPicked(None) => {}
             Message::SettingChanged(key, value) => {
                 self.settings.settings_mut().set(key, value);
                 return self.apply_settings();
@@ -497,6 +552,7 @@ impl App {
                 }
                 return self.apply_app_visibility();
             }
+            Message::ResetGroup(SettingsGroup::Data) => {}
             Message::ResetGroup(group) => {
                 if group == SettingsGroup::Palette {
                     let changes = self.settings.settings_mut().reset_palette();
@@ -770,6 +826,7 @@ impl App {
                     | self.peek.tick(dt)
                     | self.settings_morph.tick(dt)
                     | self.search_morph.tick(dt)
+                    | self.export_morph.tick(dt)
                     | self.mode_fade.tick(dt);
                 let collapse_active = self.collapsing.as_mut().is_some_and(|(_, m)| m.tick(dt));
                 if self.collapsing.is_some() && !collapse_active {
@@ -787,14 +844,34 @@ impl App {
                 if search_closed {
                     self.search_open = false;
                 }
+                let export_done = self
+                    .export
+                    .as_ref()
+                    .and_then(ExportState::succeeded_at)
+                    .is_some_and(|at| now.saturating_duration_since(at) >= EXPORTED_FOR);
+                if export_done && self.export_morph.is_opening() {
+                    self.export_morph.close();
+                }
+                let export_closed = self.export.is_some() && self.export_morph.is_closed();
+                if export_closed {
+                    self.export = None;
+                }
+                // A success keeps ticking until its panel has closed.
+                let export_waiting = self
+                    .export
+                    .as_ref()
+                    .is_some_and(|state| state.succeeded_at().is_some());
                 if self
                     .copied_at
                     .is_some_and(|(_, t)| now.saturating_duration_since(t) >= COPIED_FOR)
                 {
                     self.copied_at = None;
                 }
-                self.animating =
-                    mag_active || morph_active || collapse_active || self.copied_at.is_some();
+                self.animating = mag_active
+                    || morph_active
+                    || collapse_active
+                    || self.copied_at.is_some()
+                    || export_waiting;
                 if !self.animating {
                     self.last_tick = None;
                 }
@@ -803,7 +880,7 @@ impl App {
                 if self.active_note.is_some() && self.morph.is_closed() {
                     return Task::batch([focus, self.finish_close()]);
                 }
-                if settings_closed || search_closed {
+                if settings_closed || search_closed || export_closed {
                     // Without passthrough the window shrinks back to the strip.
                     return Task::batch([focus, self.dock_window()]);
                 }
@@ -934,6 +1011,7 @@ impl App {
                 let mut tasks = Vec::new();
                 if !self.visible {
                     self.close_search();
+                    self.close_export();
                     tasks.push(self.update(Message::CloseSettings));
                     tasks.push(self.update(Message::ClosePanel));
                     self.hide_peek();
@@ -962,9 +1040,11 @@ impl App {
                 // Adding a note or opening a panel needs the notes on screen.
                 let settings_showing = self.settings_open && self.settings_morph.is_opening();
                 let search_showing = self.search_open && self.search_morph.is_opening();
+                let export_showing = self.export.is_some() && self.export_morph.is_opening();
                 let showing = match message {
                     Message::ToggleSettings => settings_showing,
                     Message::ToggleSearch => search_showing,
+                    Message::ToggleExport => export_showing,
                     _ => false,
                 };
                 if showing {
@@ -973,7 +1053,10 @@ impl App {
                 }
                 let needs_notes = matches!(
                     message,
-                    Message::AddNote | Message::ToggleSettings | Message::ToggleSearch
+                    Message::AddNote
+                        | Message::ToggleSettings
+                        | Message::ToggleSearch
+                        | Message::ToggleExport
                 );
                 if needs_notes && !self.visible {
                     tasks.push(self.update(Message::ToggleVisibility));
@@ -1013,6 +1096,11 @@ impl App {
                 match key.as_ref() {
                     keyboard::Key::Named(Named::Escape) if self.search_morph.is_opening() => {
                         self.close_search()
+                    }
+                    keyboard::Key::Named(Named::Escape)
+                        if self.export.is_some() && self.export_morph.is_opening() =>
+                    {
+                        self.close_export()
                     }
                     keyboard::Key::Named(Named::Escape) if self.settings_open => {
                         return self.update(Message::CloseSettings)
@@ -1084,6 +1172,7 @@ impl App {
                 // Clicking another app (through the passthrough area) closes
                 // the note and the panels.
                 self.close_search();
+                self.close_export();
                 let close_settings = self.update(Message::CloseSettings);
                 return Task::batch([close_settings, self.update(Message::ClosePanel)]);
             }
@@ -1223,6 +1312,29 @@ impl App {
             }
         }
 
+        if let (Some(frame), Some(state)) = (self.export_frame(), &self.export) {
+            let rect = frame.rect;
+            if rect.width >= 1.0 && rect.height >= 1.0 {
+                // Only while unfolding, as for the search.
+                if self.export_morph.is_opening() {
+                    layers.push(
+                        mouse_area(Space::new().width(Fill).height(Fill))
+                            .on_press(Message::ToggleExport)
+                            .into(),
+                    );
+                }
+                let panel = export_panel(ExportView {
+                    theme: self.theme,
+                    notes: self.store.notes(),
+                    state,
+                    size: rect.size(),
+                    morph_progress: self.export_morph.progress(),
+                    content_alpha: frame.content_alpha,
+                });
+                layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
+            }
+        }
+
         layers.push(strip.into());
         stack(layers).width(Fill).height(Fill).into()
     }
@@ -1294,6 +1406,7 @@ impl App {
             self.settings_morph.close();
         }
         self.close_search();
+        self.close_export();
         self.active_note = Some(id);
         self.reparse();
         self.pending_delete = None;
@@ -1636,7 +1749,10 @@ impl App {
             Size::new(
                 Self::docked_width(
                     self.settings.settings(),
-                    self.active_note.is_some() || self.settings_open || self.search_open,
+                    self.active_note.is_some()
+                        || self.settings_open
+                        || self.search_open
+                        || self.export.is_some(),
                 ),
                 (monitor.height * self.settings.settings().window.height_fraction).round(),
             )
@@ -1673,6 +1789,7 @@ impl App {
             || over_panel(self.note_frame())
             || over_panel(self.settings_frame())
             || over_panel(self.search_frame())
+            || over_panel(self.export_frame())
     }
 
     /// Whether `id`'s copy button still shows its check.
@@ -1749,7 +1866,9 @@ impl App {
     /// moving to another bar while a peek is showing peeks it right away.
     fn update_hover(&mut self) {
         let hovered = match (self.cursor_y, self.active_note, &self.drag) {
-            (Some(y), None, None) if !self.settings_open && !self.search_open => {
+            (Some(y), None, None)
+                if !self.settings_open && !self.search_open && self.export.is_none() =>
+            {
                 let strip = self.strip_layout();
                 strip
                     .bars
@@ -1828,6 +1947,14 @@ impl App {
         Some(self.panel_frame(source, self.search_anchor_y, &self.search_morph))
     }
 
+    /// The export panel's current frame, morphing out of the gear slot like
+    /// the settings it replaces.
+    fn export_frame(&self) -> Option<MorphFrame> {
+        self.export.as_ref()?;
+        let source = self.strip_layout().settings_anchor();
+        Some(self.panel_frame(source, self.export_anchor_y, &self.export_morph))
+    }
+
     /// A panel's frame on its way from the strip slot `source` to its place
     /// left of the strip, centered on `anchor_y` where it fits.
     fn panel_frame(&self, source: Rectangle, anchor_y: f32, morph: &Morph) -> MorphFrame {
@@ -1856,6 +1983,7 @@ impl App {
         }
         let close_note = self.update(Message::ClosePanel);
         let close_settings = self.update(Message::CloseSettings);
+        self.close_export();
         self.hide_peek();
         // Still folding away: unfold again from where it is, query kept.
         if !self.search_open {
@@ -1873,6 +2001,93 @@ impl App {
             self.dock_window(),
             focus_field(),
         ])
+    }
+
+    /// Opens the export panel with every note selected, or closes it while
+    /// it is showing. It closes the note, the search and the settings.
+    fn toggle_export(&mut self) -> Task<Message> {
+        if self.export.is_some() && self.export_morph.is_opening() {
+            self.close_export();
+            return Task::none();
+        }
+        let close_note = self.update(Message::ClosePanel);
+        let close_settings = self.update(Message::CloseSettings);
+        self.close_search();
+        self.hide_peek();
+        match &mut self.export {
+            // Still folding away: unfold again from where it is, choices kept.
+            Some(state) => state.status = None,
+            None => {
+                let gear = self.strip_layout().settings_anchor();
+                self.export_anchor_y = gear.y + gear.height / 2.0;
+                self.export = Some(ExportState::new(self.store.notes()));
+            }
+        }
+        self.export_morph.open();
+        self.animating = true;
+        Task::batch([close_note, close_settings, self.dock_window()])
+    }
+
+    /// Folds the export panel back into the gear (if it is showing).
+    fn close_export(&mut self) {
+        if self.export.is_some() {
+            self.export_morph.close();
+            self.animating = true;
+        }
+    }
+
+    /// Opens the save dialog for the selected notes, if there are any.
+    fn request_export(&mut self) -> Task<Message> {
+        let Some(state) = &mut self.export else {
+            return Task::none();
+        };
+        if state.selected.is_empty() {
+            return Task::none();
+        }
+        state.status = None;
+        let format = state.format;
+        let name = export::suggested_name(chrono::Local::now().date_naive(), format);
+        let kind = match format {
+            ExportFormat::Markdown => "Markdown",
+            ExportFormat::Text => "Text",
+        };
+        // The dialog steals focus, which must not fold the panel.
+        self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
+        // Built when the task runs, not here: some backends start showing
+        // the dialog as soon as it is created.
+        let dialog = async move {
+            rfd::AsyncFileDialog::new()
+                .set_file_name(name)
+                .add_filter(kind, &[format.extension()])
+                .save_file()
+                .await
+        };
+        Task::perform(dialog, |file| {
+            Message::ExportPicked(file.map(|f| f.path().to_path_buf()))
+        })
+    }
+
+    /// Writes the selected notes, in strip order, to `path` and shows how
+    /// that went.
+    fn export_to(&mut self, path: &std::path::Path) {
+        let Some(state) = &mut self.export else {
+            return;
+        };
+        let notes: Vec<_> = self
+            .store
+            .notes()
+            .iter()
+            .filter(|note| state.selected.contains(&note.id))
+            .collect();
+        if notes.is_empty() {
+            return;
+        }
+        let status = match export::write(path, &export::render(&notes, state.format)) {
+            Ok(()) => exported_message(notes.len()),
+            Err(error) => save_error_message(&error),
+        };
+        state.status = Some((status, Instant::now()));
+        self.animating = true;
     }
 
     /// Folds the search panel back into its slot (if it is showing).
@@ -2048,6 +2263,8 @@ impl App {
         self.morph.set_speed(speed);
         self.peek.set_speed(speed);
         self.settings_morph.set_speed(speed);
+        self.search_morph.set_speed(speed);
+        self.export_morph.set_speed(speed);
         self.mode_fade.set_speed(speed);
         if let Some((_, collapse)) = &mut self.collapsing {
             collapse.set_speed(speed);
@@ -3433,5 +3650,205 @@ mod tests {
         assert!(app.dock_icon_shown());
         assert!(!app.settings.settings().app.show_dock_icon);
         assert!(!app.settings.is_dirty());
+    }
+
+    fn export_showing(app: &App) -> bool {
+        app.export.is_some() && app.export_morph.is_opening()
+    }
+
+    fn export_status(app: &App) -> Option<&str> {
+        app.export
+            .as_ref()?
+            .status
+            .as_ref()
+            .map(|(s, _)| s.as_str())
+    }
+
+    #[test]
+    fn export_opens_with_all_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "1"), ("b", "2")]);
+        let _ = app.update(Message::ToggleSettings);
+        settle(&mut app);
+        let _ = app.update(Message::ToggleExport);
+        assert!(export_showing(&app));
+        let state = app.export.as_ref().unwrap();
+        assert_eq!(state.selected, ids.iter().copied().collect());
+        assert_eq!(state.format, ExportFormat::Markdown);
+        assert!(state.status.is_none());
+        // Export replaces Settings, and closing it doesn't bring them back.
+        assert!(!app.settings_morph.is_opening());
+        let _ = app.update(Message::ToggleExport);
+        assert!(!app.export_morph.is_opening());
+        settle(&mut app);
+        assert!(app.export.is_none());
+        assert!(!app.settings_open);
+    }
+
+    #[test]
+    fn toggling_and_all_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "1"), ("b", "2")]);
+        let _ = app.update(Message::ToggleExport);
+        let _ = app.update(Message::ExportToggleNote(ids[0]));
+        assert_eq!(
+            app.export.as_ref().unwrap().selected,
+            HashSet::from([ids[1]])
+        );
+        let _ = app.update(Message::ExportToggleNote(ids[0]));
+        assert_eq!(app.export.as_ref().unwrap().selected.len(), 2);
+        let _ = app.update(Message::ExportAll(false));
+        assert!(app.export.as_ref().unwrap().selected.is_empty());
+        let _ = app.update(Message::ExportAll(true));
+        assert_eq!(
+            app.export.as_ref().unwrap().selected,
+            ids.iter().copied().collect()
+        );
+        let _ = app.update(Message::ExportFormatChosen(ExportFormat::Text));
+        assert_eq!(app.export.as_ref().unwrap().format, ExportFormat::Text);
+    }
+
+    #[test]
+    fn export_requested_with_nothing_selected_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleExport);
+        let _ = app.update(Message::ExportAll(false));
+        let task = app.update(Message::ExportRequested);
+        assert_eq!(task.units(), 0);
+        assert!(app.keep_open_until.is_none());
+    }
+
+    #[test]
+    fn export_picked_writes_file_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "1"), ("b", "2"), ("c", "3")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let _ = app.update(Message::ExportToggleNote(ids[1]));
+        let path = dir.path().join("out.md");
+        let _ = app.update(Message::ExportPicked(Some(path.clone())));
+        let notes = app.store.notes();
+        let expected = crate::export::render(&[&notes[0], &notes[2]], ExportFormat::Markdown);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        assert_eq!(export_status(&app), Some("Exported 2 notes"));
+        assert!(app.animating, "must keep ticking until the panel closes");
+        let at = app.export.as_ref().unwrap().status.as_ref().unwrap().1;
+        let _ = app.update(Message::Tick(at + Duration::from_millis(1900)));
+        assert!(export_showing(&app));
+        assert!(app.animating);
+        let _ = app.update(Message::Tick(at + Duration::from_secs(2)));
+        assert!(!app.export_morph.is_opening());
+        settle(&mut app);
+        assert!(app.export.is_none());
+
+        // One note is singular.
+        let _ = app.update(Message::ToggleExport);
+        let _ = app.update(Message::ExportAll(false));
+        let _ = app.update(Message::ExportToggleNote(ids[0]));
+        let _ = app.update(Message::ExportPicked(Some(dir.path().join("one.txt"))));
+        assert_eq!(export_status(&app), Some("Exported 1 note"));
+    }
+
+    #[test]
+    fn export_cancelled_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let _ = app.update(Message::ExportPicked(None));
+        assert!(export_status(&app).is_none());
+        assert!(export_showing(&app));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn export_write_error_shows_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let _ = app.update(Message::ExportPicked(Some(dir.path().to_path_buf())));
+        let status = export_status(&app).expect("error shown");
+        assert!(status.starts_with("Couldn't save: "), "{status}");
+        // It stays until the next action.
+        let at = app.export.as_ref().unwrap().status.as_ref().unwrap().1;
+        let _ = app.update(Message::Tick(at + Duration::from_secs(5)));
+        assert!(export_showing(&app));
+        assert!(export_status(&app).is_some());
+        let _ = app.update(Message::ExportToggleNote(ids[0]));
+        assert!(export_status(&app).is_none());
+    }
+
+    #[test]
+    fn export_dialog_keeps_panel_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let task = app.update(Message::ExportRequested);
+        assert!(task.units() > 0, "no dialog was started");
+        assert!(app.keep_open_until.is_some());
+        let _ = app.update(Message::WindowUnfocused);
+        assert!(export_showing(&app));
+    }
+
+    #[test]
+    fn tray_export_item_opens_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::ToggleVisibility);
+        let _ = app.update(Message::TrayMenu("export".into()));
+        assert!(app.visible);
+        assert!(export_showing(&app));
+        settle(&mut app);
+        // The menu item opens the export; it never closes it.
+        let _ = app.update(Message::TrayMenu("export".into()));
+        assert!(export_showing(&app));
+    }
+
+    #[test]
+    fn escape_closes_export_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let _ = app.update(escape());
+        assert!(!app.export_morph.is_opening());
+    }
+
+    #[test]
+    fn reopening_export_mid_fold_closes_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        for other in [
+            Message::ToggleSettings,
+            Message::ToggleSearch,
+            Message::BarClicked(0),
+        ] {
+            let _ = app.update(Message::ToggleExport);
+            settle(&mut app);
+            let _ = app.update(other);
+            tick_a_little(&mut app);
+            assert!(app.export.is_some() && !app.export_morph.is_opening());
+            let _ = app.update(Message::ToggleExport);
+            assert!(export_showing(&app));
+            assert!(!app.settings_morph.is_opening());
+            assert!(!app.search_morph.is_opening());
+            assert!(!app.morph.is_opening());
+            settle(&mut app);
+            assert!(!app.settings_open && !app.search_open && app.active_note.is_none());
+            let _ = app.update(Message::ToggleExport);
+            settle(&mut app);
+        }
+        // And the other panels close the export the same way.
+        for other in [Message::ToggleSettings, Message::ToggleSearch] {
+            let _ = app.update(Message::ToggleExport);
+            settle(&mut app);
+            let _ = app.update(other);
+            assert!(!app.export_morph.is_opening());
+            settle(&mut app);
+            assert!(app.export.is_none());
+        }
     }
 }

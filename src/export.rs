@@ -5,7 +5,6 @@ use std::io;
 use std::path::Path;
 
 /// File format of an export.
-#[allow(dead_code)] // used from Task 8
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ExportFormat {
     Markdown,
@@ -13,7 +12,6 @@ pub enum ExportFormat {
 }
 
 impl ExportFormat {
-    #[allow(dead_code)] // used from Task 8
     pub fn extension(self) -> &'static str {
         match self {
             ExportFormat::Markdown => "md",
@@ -33,7 +31,6 @@ fn title_or_untitled(note: &Note) -> &str {
 
 /// The notes as one document, in order: each a title and its body, separated
 /// by one blank line, ending in a single line break.
-#[allow(dead_code)] // used from Task 8
 pub fn render(notes: &[&Note], format: ExportFormat) -> String {
     let entries: Vec<String> = notes
         .iter()
@@ -61,7 +58,6 @@ pub fn render(notes: &[&Note], format: ExportFormat) -> String {
 }
 
 /// `snap-notes-YYYY-MM-DD.<ext>`.
-#[allow(dead_code)] // used from Task 8
 pub fn suggested_name(date: chrono::NaiveDate, format: ExportFormat) -> String {
     format!(
         "snap-notes-{}.{}",
@@ -72,7 +68,6 @@ pub fn suggested_name(date: chrono::NaiveDate, format: ExportFormat) -> String {
 
 /// Writes `contents` to `path` through `<path>.tmp`, so a failure never
 /// leaves a half-written file behind.
-#[allow(dead_code)] // used from Task 8
 pub fn write(path: &Path, contents: &str) -> io::Result<()> {
     let mut tmp = OsString::from(path);
     tmp.push(".tmp");
