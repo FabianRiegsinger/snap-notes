@@ -2234,13 +2234,9 @@ impl App {
         if self.search_synced.as_ref() == Some(&key) {
             return;
         }
-        let notes = self.store.notes();
-        self.search_results = search::find(notes, &self.search_query);
-        self.search_matches = search::matching(notes, &self.search_query)
-            .into_iter()
-            .zip(notes)
-            .filter_map(|(matched, note)| matched.then_some(note.id))
-            .collect();
+        let result = search::search(self.store.notes(), &self.search_query);
+        self.search_results = result.hits;
+        self.search_matches = result.matches;
         self.search_synced = Some(key);
     }
 

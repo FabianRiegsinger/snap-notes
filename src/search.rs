@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ops::Range;
 
 use uuid::Uuid;
@@ -9,6 +10,7 @@ pub const MAX_RESULTS: usize = 50;
 const CONTEXT_CHARS: usize = 30;
 const FALLBACK_CHARS: usize = 60;
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct Hit {
     pub note_id: Uuid,
     pub title: String,
@@ -45,7 +47,26 @@ fn fold(source: &str) -> Folded {
     Folded { text, starts, ends }
 }
 
+/// The byte range in `source` of the first match of the folded `needle`.
 fn find_in(source: &str, needle: &str) -> Option<Range<usize>> {
+    if source.is_ascii() && needle.is_ascii() {
+        find_ascii(source, needle)
+    } else {
+        find_folded(source, needle)
+    }
+}
+
+/// ASCII lowercasing keeps every byte where it is, so a match's offsets
+/// are its offsets in `source` and no maps are needed.
+fn find_ascii(source: &str, needle: &str) -> Option<Range<usize>> {
+    let at = source
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))?;
+    Some(at..at + needle.len())
+}
+
+fn find_folded(source: &str, needle: &str) -> Option<Range<usize>> {
     let folded = fold(source);
     let at = folded.text.find(needle)?;
     let last = at + needle.len() - 1;
@@ -58,50 +79,63 @@ fn needle(query: &str) -> Option<String> {
     (!query.is_empty()).then(|| fold(query).text)
 }
 
-pub fn find(notes: &[Note], query: &str) -> Vec<Hit> {
-    let Some(needle) = needle(query) else {
-        return Vec::new();
+/// The first `MAX_RESULTS` hits, in strip order, and the ids of every
+/// matching note (uncapped, for dimming). Empty for a blank query.
+pub struct SearchResult {
+    pub hits: Vec<Hit>,
+    pub matches: HashSet<Uuid>,
+}
+
+pub fn search(notes: &[Note], query: &str) -> SearchResult {
+    search_with(notes, query, find_in)
+}
+
+/// [`search`] without the ASCII fast path.
+#[cfg(test)]
+fn search_general(notes: &[Note], query: &str) -> SearchResult {
+    search_with(notes, query, find_folded)
+}
+
+/// One pass over the notes: each title and body is searched once.
+fn search_with(
+    notes: &[Note],
+    query: &str,
+    find: fn(&str, &str) -> Option<Range<usize>>,
+) -> SearchResult {
+    let mut result = SearchResult {
+        hits: Vec::new(),
+        matches: HashSet::new(),
     };
-    notes
-        .iter()
-        .filter_map(|note| hit(note, &needle))
-        .take(MAX_RESULTS)
-        .collect()
-}
-
-/// Per note, whether it matches `query`, without the result cap. All false
-/// for a blank query.
-pub fn matching(notes: &[Note], query: &str) -> Vec<bool> {
-    let needle = needle(query);
-    notes
-        .iter()
-        .map(|note| {
-            needle.as_deref().is_some_and(|needle| {
-                find_in(&note.content, needle).is_some() || find_in(&note.title, needle).is_some()
-            })
-        })
-        .collect()
-}
-
-fn hit(note: &Note, needle: &str) -> Option<Hit> {
-    if let Some(range) = find_in(&note.content, needle) {
-        let (snippet, highlight) = body_snippet(&note.content, range.clone());
-        return Some(Hit {
-            note_id: note.id,
-            title: note.title.clone(),
-            snippet,
-            highlight,
-            body_match: Some(range),
-        });
+    let Some(needle) = needle(query) else {
+        return result;
+    };
+    for note in notes {
+        let body_match = find(&note.content, &needle);
+        if body_match.is_none() && find(&note.title, &needle).is_none() {
+            continue;
+        }
+        result.matches.insert(note.id);
+        if result.hits.len() < MAX_RESULTS {
+            result.hits.push(hit(note, body_match));
+        }
     }
-    find_in(&note.title, needle)?;
-    Some(Hit {
+    result
+}
+
+/// The hit for a matching note: its first body match, or else (a
+/// title-only match) its first body line.
+fn hit(note: &Note, body_match: Option<Range<usize>>) -> Hit {
+    let (snippet, highlight) = match &body_match {
+        Some(range) => body_snippet(&note.content, range.clone()),
+        None => (first_line(&note.content), 0..0),
+    };
+    Hit {
         note_id: note.id,
         title: note.title.clone(),
-        snippet: first_line(&note.content),
-        highlight: 0..0,
-        body_match: None,
-    })
+        snippet,
+        highlight,
+        body_match,
+    }
 }
 
 fn one_line(text: &str) -> String {
@@ -141,6 +175,10 @@ fn first_line(content: &str) -> String {
 mod tests {
     use super::*;
     use crate::note::{Note, PALETTE};
+
+    fn find(notes: &[Note], query: &str) -> Vec<Hit> {
+        search(notes, query).hits
+    }
 
     fn note(title: &str, content: &str) -> Note {
         let mut n = Note::new(PALETTE[0]);
@@ -233,10 +271,49 @@ mod tests {
         let mut notes: Vec<Note> = (0..60).map(|_| note("", "hit")).collect();
         notes.push(note("Hit title", ""));
         notes.push(note("x", "y"));
-        let m = matching(&notes, "HIT");
-        assert_eq!(m.len(), 62);
-        assert!(m[..61].iter().all(|&b| b));
-        assert!(!m[61]);
-        assert!(matching(&notes, " ").iter().all(|&b| !b));
+        let m = search(&notes, "HIT").matches;
+        assert_eq!(m.len(), 61);
+        assert!(notes[..61].iter().all(|n| m.contains(&n.id)));
+        assert!(!m.contains(&notes[61].id));
+        assert!(search(&notes, " ").matches.is_empty());
+    }
+
+    #[test]
+    fn matches_include_beyond_result_cap() {
+        let notes: Vec<Note> = (0..60).map(|i| note("", &format!("match {i}"))).collect();
+        let result = search(&notes, "match");
+        assert_eq!(result.hits.len(), 50);
+        assert_eq!(result.matches.len(), 60);
+    }
+
+    #[test]
+    fn ascii_fast_path_matches_slow_path() {
+        let table = [
+            ("Groceries", "milk and EGGS", "eggs"),
+            ("Plan", "first\nsecond", "PLAN"),
+            ("t", "aaaa", "aa"),
+            ("t", "abc", "abcd"),
+            ("t", "x\r\ny needle", "NEEDLE"),
+            ("", "Needle at the start", "needle"),
+            ("", "at the end: NeEdLe", "needle"),
+            ("t", "no match here", "zzz"),
+            ("t", "punctuation: [a-b] {c}", "[A-B] {C"),
+            (
+                "t",
+                &format!("{}needle{}", "a".repeat(100), "b".repeat(100)),
+                "needle",
+            ),
+            ("t", "spaces  between", "  between"),
+        ];
+        for (title, content, query) in table {
+            let notes = [note(title, content)];
+            let fast = search(&notes, query);
+            let slow = search_general(&notes, query);
+            assert_eq!(fast.hits, slow.hits, "{title:?} {content:?} {query:?}");
+            assert_eq!(
+                fast.matches, slow.matches,
+                "{title:?} {content:?} {query:?}"
+            );
+        }
     }
 }
