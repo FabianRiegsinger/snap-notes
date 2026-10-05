@@ -60,7 +60,7 @@ pub struct NoteSettings {
 impl Default for NoteSettings {
     fn default() -> Self {
         Self {
-            size: 420.0,
+            size: 500.0,
             paper_tint: -0.12,
             idle_control_alpha: 0.3,
         }
@@ -224,7 +224,7 @@ impl SettingKey {
             SettingKey::Magnification => 0.0..=5.0,
             SettingKey::Spread => 20.0..=150.0,
             SettingKey::PeekDelay => 0.0..=3.0,
-            SettingKey::NoteSize => 240.0..=440.0,
+            SettingKey::NoteSize => 240.0..=600.0,
             SettingKey::PaperTint => -0.3..=0.3,
             SettingKey::IdleControlAlpha => 0.0..=1.0,
             SettingKey::Speed => 0.25..=3.0,
@@ -618,7 +618,7 @@ mod tests {
         );
         assert_eq!(
             (s.notes.size, s.notes.paper_tint, s.notes.idle_control_alpha),
-            (420.0, -0.12, 0.3)
+            (500.0, -0.12, 0.3)
         );
         assert_eq!(s.motion.speed, 1.0);
         assert_eq!(s.window.height_fraction, 0.9);
@@ -882,7 +882,7 @@ mod tests {
         let mut s = Settings::default();
         let width = STRIP_WIDTH + NOTE_GAP + MAX_NOTE_WIDTH + NOTE_MARGIN;
         assert_eq!(s.open_width(), width);
-        s.set(SettingKey::NoteSize, 440.0);
+        s.set(SettingKey::NoteSize, 600.0);
         assert_eq!(s.open_width(), width);
     }
 }
