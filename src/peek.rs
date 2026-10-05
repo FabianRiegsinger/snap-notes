@@ -3,6 +3,7 @@
 //! first lines of the body below, laid out like the open note.
 
 use crate::animation::{ease_out_cubic, lerp};
+use crate::app::NOTE_MARGIN;
 use crate::icons::{Icon, ICON_FONT};
 use crate::note::Note;
 use crate::note_panel::{morph_paper, PLACEHOLDER};
@@ -17,7 +18,6 @@ use iced::border;
 use iced::widget::text::{LineHeight, Shaping, Wrapping};
 use iced::{Border, Color, Font, Pixels, Point, Rectangle, Shadow, Size};
 
-pub const PEEK_WIDTH: f32 = 260.0;
 /// Same insets and type sizes as the open note.
 const PADDING_X: f32 = 18.0;
 /// Under the adhesive band, plus the open note's 2 px title padding.
@@ -52,6 +52,8 @@ const BODY_GLYPH: f32 = 0.55;
 pub struct PeekText {
     pub title: Option<String>,
     pub lines: Vec<String>,
+    /// The peek's width, which the text was cut and wrapped for.
+    pub width: f32,
 }
 
 /// Where the peek and its parts are. Text and button positions are those of
@@ -68,21 +70,39 @@ pub struct PeekLayout {
     pub cancel: Rectangle,
 }
 
-fn inner_width() -> f32 {
-    PEEK_WIDTH - 2.0 * PADDING_X
+/// The width the peek of `note` asks for: the open note's, or the default
+/// note width when it has none of its own.
+pub fn peek_width(note: &Note, default: f32) -> f32 {
+    note.size.map_or(default, |s| s[0])
 }
 
-fn body_chars_per_line() -> usize {
-    (inner_width() / (BODY_SIZE * BODY_GLYPH)).floor() as usize
+/// `width` kept on screen: the peek grows left from `bar`, so it stops
+/// `NOTE_MARGIN` short of the window's left edge, and never gets narrower
+/// than the bar.
+pub fn fit_peek_width(width: f32, bar: Rectangle) -> f32 {
+    width.min(bar.x + bar.width - NOTE_MARGIN).max(bar.width)
+}
+
+/// The width the peek of `note` on `bar` is drawn and hit-tested with.
+pub fn note_peek_width(note: &Note, default: f32, bar: Rectangle) -> f32 {
+    fit_peek_width(peek_width(note, default), bar)
+}
+
+fn inner_width(width: f32) -> f32 {
+    width - 2.0 * PADDING_X
+}
+
+fn body_chars_per_line(width: f32) -> usize {
+    (inner_width(width) / (BODY_SIZE * BODY_GLYPH)).floor() as usize
 }
 
 /// The title leaves room for the delete button on its right.
-fn title_width() -> f32 {
-    inner_width() - (TRASH_SIZE + TRASH_INSET - PADDING_X).max(0.0) - 4.0
+fn title_width(width: f32) -> f32 {
+    inner_width(width) - (TRASH_SIZE + TRASH_INSET - PADDING_X).max(0.0) - 4.0
 }
 
-fn title_rows(title: &str) -> usize {
-    let per_row = (title_width() / (TITLE_SIZE * TITLE_GLYPH))
+fn title_rows(title: &str, width: f32) -> usize {
+    let per_row = (title_width(width) / (TITLE_SIZE * TITLE_GLYPH))
         .floor()
         .max(1.0) as usize;
     title.chars().count().div_ceil(per_row).max(1)
@@ -98,12 +118,13 @@ fn truncate(line: &str, max_chars: usize) -> String {
 }
 
 /// The title (if any) and the first lines of the body.
-pub fn peek_text(note: &Note) -> PeekText {
+pub fn peek_text(note: &Note, width: f32) -> PeekText {
     let title = Some(note.title.trim())
         .filter(|t| !t.is_empty())
         .map(str::to_string);
-    let max_chars = body_chars_per_line();
+    let max_chars = body_chars_per_line(width);
     PeekText {
+        width,
         title,
         lines: rich::plain_lines(&note.content, MAX_LINES)
             .iter()
@@ -113,7 +134,10 @@ pub fn peek_text(note: &Note) -> PeekText {
 }
 
 fn title_height(text: &PeekText) -> f32 {
-    text.title.as_deref().map_or(1, title_rows) as f32 * TITLE_LINE
+    text.title
+        .as_deref()
+        .map_or(1, |t| title_rows(t, text.width)) as f32
+        * TITLE_LINE
 }
 
 /// Height of the open peek: header, divider and body (at least one line,
@@ -135,8 +159,9 @@ pub fn peek_layout(
     progress: f32,
     text: &PeekText,
     confirming: bool,
+    width: f32,
 ) -> PeekLayout {
-    let full_width = PEEK_WIDTH.max(bar.width);
+    let full_width = width.max(bar.width);
     let full_height = peek_height(text, confirming).max(bar.height);
     let rect_at = |t: f32| {
         let width = lerp(bar.width, full_width, t);
@@ -256,9 +281,10 @@ pub fn draw_peek(
     paper_tint: f32,
     confirming: bool,
     cursor: Option<Point>,
+    width: f32,
 ) {
-    let text = peek_text(note);
-    let layout = peek_layout(bar, bounds, progress, &text, confirming);
+    let text = peek_text(note, width);
+    let layout = peek_layout(bar, bounds, progress, &text, confirming, width);
     let rect = layout.rect;
     let t = ease_out_cubic(progress);
     // Gradient quads draw no shadow, so each shadow sits on its own solid
@@ -342,9 +368,9 @@ pub fn draw_peek(
                          color| {
         // The title stays clear of the delete button.
         let width = if font == TITLE_FONT {
-            title_width()
+            title_width(width)
         } else {
-            inner_width()
+            inner_width(width)
         };
         renderer.fill_text(
             Text {
@@ -377,7 +403,7 @@ pub fn draw_peek(
             TITLE_SIZE,
             TITLE_LINE,
             LineHeight::Absolute(Pixels(TITLE_LINE)),
-            title_rows(title),
+            title_rows(title, width),
             theme.ink(alpha),
         ),
         None => draw_text(
@@ -489,6 +515,8 @@ mod tests {
     use super::*;
     use crate::note::NoteColor;
 
+    const PEEK_WIDTH: f32 = 260.0;
+
     fn note(title: &str, content: &str) -> Note {
         let mut n = Note::new(NoteColor::new(1.0, 0.85, 0.24));
         n.title = title.to_string();
@@ -512,37 +540,43 @@ mod tests {
 
     #[test]
     fn shows_title_and_next_three_lines() {
-        let t = peek_text(&note("Groceries", "milk\n\neggs\nbread\nbutter\njam"));
+        let t = peek_text(
+            &note("Groceries", "milk\n\neggs\nbread\nbutter\njam"),
+            PEEK_WIDTH,
+        );
         assert_eq!(t.title.as_deref(), Some("Groceries"));
         assert_eq!(t.lines, ["milk", "eggs", "bread"]);
     }
 
     #[test]
     fn missing_title_keeps_first_line_in_body() {
-        let t = peek_text(&note("  ", "Call Anna\nre: offsite\nbook room"));
+        let t = peek_text(&note("  ", "Call Anna\nre: offsite\nbook room"), PEEK_WIDTH);
         assert_eq!(t.title, None);
         assert_eq!(t.lines, ["Call Anna", "re: offsite", "book room"]);
     }
 
     #[test]
     fn markup_is_stripped_in_peek() {
-        let t = peek_text(&note("", "**Buy**\n- [ ] milk"));
+        let t = peek_text(&note("", "**Buy**\n- [ ] milk"), PEEK_WIDTH);
         assert_eq!(t.lines, ["Buy", "☐ milk"]);
     }
 
     #[test]
     fn long_lines_are_truncated_with_ellipsis() {
         let long = "x".repeat(200);
-        let t = peek_text(&note("T", &long));
+        let t = peek_text(&note("T", &long), PEEK_WIDTH);
         let line = &t.lines[0];
         assert!(line.ends_with('…'));
-        assert!(line.chars().count() <= body_chars_per_line());
+        assert!(line.chars().count() <= body_chars_per_line(PEEK_WIDTH));
     }
 
     #[test]
     fn long_titles_get_more_height() {
-        let short = peek_height(&peek_text(&note("Short", "")), false);
-        let long = peek_height(&peek_text(&note(&"word ".repeat(30), "")), false);
+        let short = peek_height(&peek_text(&note("Short", ""), PEEK_WIDTH), false);
+        let long = peek_height(
+            &peek_text(&note(&"word ".repeat(30), ""), PEEK_WIDTH),
+            false,
+        );
         assert!(long > short);
     }
 
@@ -559,15 +593,18 @@ mod tests {
     #[test]
     fn peek_starts_as_the_bar() {
         let bar = Rectangle::new(Point::new(960.0, 300.0), Size::new(30.0, 150.0));
-        let text = peek_text(&note("T", "a\nb"));
-        assert_eq!(peek_layout(bar, screen(), 0.0, &text, false).rect, bar);
+        let text = peek_text(&note("T", "a\nb"), PEEK_WIDTH);
+        assert_eq!(
+            peek_layout(bar, screen(), 0.0, &text, false, PEEK_WIDTH).rect,
+            bar
+        );
     }
 
     #[test]
     fn open_peek_widens_leftward_and_fits_content() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
-        let text = peek_text(&note("Groceries", "milk\neggs\nbread"));
-        let l = peek_layout(bar, screen(), 1.0, &text, false);
+        let text = peek_text(&note("Groceries", "milk\neggs\nbread"), PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
         assert!((l.rect.width - PEEK_WIDTH).abs() < 0.01);
         assert!((l.rect.x + l.rect.width - 990.0).abs() < 0.01);
         assert!((l.rect.height - peek_height(&text, false)).abs() < 0.01);
@@ -578,8 +615,8 @@ mod tests {
     #[test]
     fn header_sits_on_top_and_body_below() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 200.0));
-        let text = peek_text(&note("Groceries", "milk\neggs"));
-        let l = peek_layout(bar, screen(), 1.0, &text, false);
+        let text = peek_text(&note("Groceries", "milk\neggs"), PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
         assert!((l.title.y - (l.rect.y + PADDING_TOP)).abs() < 0.01);
         assert!(l.divider_y >= l.title.y + TITLE_LINE);
         assert!(l.body.y > l.divider_y);
@@ -596,20 +633,20 @@ mod tests {
     #[test]
     fn trash_sits_in_the_header_beside_the_title() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
-        let text = peek_text(&note(&"word ".repeat(30), "milk"));
-        let l = peek_layout(bar, screen(), 1.0, &text, false);
+        let text = peek_text(&note(&"word ".repeat(30), "milk"), PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
         assert!(inside(l.rect, l.trash));
         assert!(l.trash.y + l.trash.height <= l.divider_y);
-        assert!(l.title.x + title_width() <= l.trash.x);
+        assert!(l.title.x + title_width(PEEK_WIDTH) <= l.trash.x);
     }
 
     #[test]
     fn confirmation_buttons_fit_below_the_divider() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
         // An empty body is one line tall; the confirmation needs more.
-        let text = peek_text(&note("T", ""));
-        let open = peek_layout(bar, screen(), 1.0, &text, false);
-        let l = peek_layout(bar, screen(), 1.0, &text, true);
+        let text = peek_text(&note("T", ""), PEEK_WIDTH);
+        let open = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, true, PEEK_WIDTH);
         assert!(l.rect.height > open.rect.height);
         for button in [l.delete, l.cancel] {
             assert!(inside(l.rect, button));
@@ -622,8 +659,48 @@ mod tests {
     #[test]
     fn peek_stays_on_screen() {
         let bar = Rectangle::new(Point::new(960.0, 0.0), Size::new(30.0, 30.0));
-        let text = peek_text(&note("T", "a\nb\nc"));
-        let l = peek_layout(bar, screen(), 1.0, &text, false);
+        let text = peek_text(&note("T", "a\nb\nc"), PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
         assert!(l.rect.y >= 0.0);
+    }
+
+    #[test]
+    fn peek_width_follows_note_or_default() {
+        let mut n = note("T", "");
+        assert_eq!(peek_width(&n, 500.0), 500.0);
+        n.size = Some([320.0, 400.0]);
+        assert_eq!(peek_width(&n, 500.0), 320.0);
+    }
+
+    #[test]
+    fn open_peek_uses_given_width() {
+        let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
+        let width = 480.0;
+        let text = peek_text(&note("Groceries", "milk"), width);
+        let l = peek_layout(bar, screen(), 1.0, &text, false, width);
+        assert!((l.rect.width - width).abs() < 0.01);
+        assert!((l.rect.x + l.rect.width - 990.0).abs() < 0.01);
+        assert!(l.rect.contains(l.trash.position()));
+        assert!(l.rect.contains(Point::new(
+            l.trash.x + l.trash.width,
+            l.trash.y + l.trash.height
+        )));
+    }
+
+    #[test]
+    fn wider_peek_shows_more_of_a_long_line() {
+        let long = "x".repeat(200);
+        let narrow = peek_text(&note("T", &long), 260.0);
+        let wide = peek_text(&note("T", &long), 500.0);
+        assert!(wide.lines[0].chars().count() > narrow.lines[0].chars().count());
+    }
+
+    #[test]
+    fn peek_width_stays_on_screen() {
+        let bar = Rectangle::new(Point::new(300.0, 0.0), Size::new(30.0, 40.0));
+        assert_eq!(fit_peek_width(900.0, bar), 330.0 - NOTE_MARGIN);
+        assert_eq!(fit_peek_width(100.0, bar), 100.0);
+        let edge = Rectangle::new(Point::new(0.0, 0.0), Size::new(30.0, 40.0));
+        assert_eq!(fit_peek_width(900.0, edge), 30.0);
     }
 }

@@ -6,6 +6,7 @@ use crate::history::History;
 use crate::images;
 use crate::note::NoteColor;
 use crate::note_panel::{focus_body, post_it, PostIt};
+use crate::peek::note_peek_width;
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
 use crate::resize::{resize_frame, resized, Edges, MIN_SIZE};
 use crate::rich::{self, BlockKind, Doc};
@@ -1045,6 +1046,7 @@ impl App {
             bars: &self.settings.settings().bars,
             height_fraction: self.strip_fraction(),
             paper_tint: self.settings.settings().notes.paper_tint,
+            default_note_width: self.settings.settings().notes.size,
             peek_confirm: self.peek_confirm_delete.is_some(),
             theme: self.theme,
             open: self
@@ -1689,11 +1691,13 @@ impl App {
             Point::new(self.window_size.width - STRIP_WIDTH, 0.0),
             Size::new(STRIP_WIDTH, self.window_size.height),
         );
+        let note = &self.store.notes()[index];
         Some(peek_target(
             bar,
             strip,
-            &self.store.notes()[index],
+            note,
             self.peek_confirm_delete.is_some(),
+            note_peek_width(note, self.settings.settings().notes.size, bar),
         ))
     }
 

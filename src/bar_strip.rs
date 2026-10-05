@@ -1,7 +1,7 @@
 use crate::animation::MagnificationState;
 use crate::app::{DragState, Message};
 use crate::note::Note;
-use crate::peek::{draw_peek, peek_layout, peek_text};
+use crate::peek::{draw_peek, note_peek_width, peek_layout, peek_text};
 use crate::settings::BarSettings;
 use crate::theme;
 
@@ -201,6 +201,9 @@ pub struct BarStrip<'a> {
     pub height_fraction: f32,
     /// Paper tint of an open note, which the hover peek imitates.
     pub paper_tint: f32,
+    /// Width of a note without a size of its own; the peek is as wide as the
+    /// note it opens.
+    pub default_note_width: f32,
     /// The open peek asks whether to delete its note.
     pub peek_confirm: bool,
     pub theme: theme::Theme,
@@ -229,9 +232,15 @@ impl<'a> BarStrip<'a> {
         let (i, _) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
         let note = self.notes.get(i)?;
-        peek_target(bar, bounds, note, self.peek_confirm)
-            .contains(pos)
-            .then_some(i)
+        peek_target(
+            bar,
+            bounds,
+            note,
+            self.peek_confirm,
+            note_peek_width(note, self.default_note_width, bar),
+        )
+        .contains(pos)
+        .then_some(i)
     }
 
     /// The hover update for a cursor at `pos`: magnify around it inside the
@@ -255,7 +264,15 @@ impl<'a> BarStrip<'a> {
         let (_, progress) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
         let note = self.notes.get(i)?;
-        let parts = peek_layout(bar, bounds, 1.0, &peek_text(note), self.peek_confirm);
+        let width = note_peek_width(note, self.default_note_width, bar);
+        let parts = peek_layout(
+            bar,
+            bounds,
+            1.0,
+            &peek_text(note, width),
+            self.peek_confirm,
+            width,
+        );
         let open = progress >= 0.99;
         Some(if self.peek_confirm {
             if parts.delete.contains(pos) {
@@ -340,6 +357,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             self.paper_tint,
                             self.peek_confirm,
                             cursor.position(),
+                            note_peek_width(note, self.default_note_width, *bar_rect),
                         );
                     }
                     continue;
@@ -650,8 +668,14 @@ fn settings_glyph(slot: Rectangle) -> Vec<Rectangle> {
 
 /// Where the fully open peek of the note on `bar` sits: the area that
 /// keeps it open while hovered and opens the note when clicked.
-pub fn peek_target(bar: Rectangle, bounds: Rectangle, note: &Note, confirming: bool) -> Rectangle {
-    peek_layout(bar, bounds, 1.0, &peek_text(note), confirming).rect
+pub fn peek_target(
+    bar: Rectangle,
+    bounds: Rectangle,
+    note: &Note,
+    confirming: bool,
+    width: f32,
+) -> Rectangle {
+    peek_layout(bar, bounds, 1.0, &peek_text(note, width), confirming, width).rect
 }
 
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
@@ -845,7 +869,7 @@ mod tests {
         let bar = Rectangle::new(Point::new(48.0, 400.0), Size::new(6.0, 30.0));
         let strip = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let note = crate::note::Note::new(crate::note::PALETTE[0]);
-        let rect = peek_target(bar, strip, &note, false);
+        let rect = peek_target(bar, strip, &note, false, 260.0);
         assert!(rect.width > STRIP_WIDTH);
         assert!(rect.contains(Point::new(bar.x - 100.0, bar.center().y)));
     }
@@ -865,6 +889,7 @@ mod tests {
             bars: &bars,
             height_fraction: 1.0,
             paper_tint: 0.0,
+            default_note_width: 260.0,
             peek_confirm: false,
             theme: theme::Theme::default(),
             open: None,
@@ -897,6 +922,7 @@ mod tests {
             bars: &bars,
             height_fraction: 1.0,
             paper_tint: 0.0,
+            default_note_width: 260.0,
             peek_confirm: false,
             theme: theme::Theme::default(),
             open: None,
@@ -904,7 +930,7 @@ mod tests {
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
-        let peek = peek_target(bar, bounds, &notes[0], false);
+        let peek = peek_target(bar, bounds, &notes[0], false, 260.0);
         // The peek's top right corner (where its trash sits) lies inside the
         // strip, above the bar it grew from.
         let on_peek_in_strip = Point::new(peek.x + peek.width - 4.0, peek.y + 4.0);
