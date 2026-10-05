@@ -181,6 +181,13 @@ pub fn toolbar<'a>(
         .into()
 }
 
+/// Width the toolbar needs on one line, from the bundled fonts: eight icon
+/// buttons (14 px glyph + 16 px padding), the size picker ("normal" at 13 px
+/// = 42.2 px, + 13 px handle + 6 px + 12 px padding), 2 px gaps and the
+/// 14 px side padding.
+#[cfg(test)]
+pub const ONE_LINE_WIDTH: f32 = 8.0 * 30.0 + (42.2 + 13.0 + 6.0 + 12.0) + 8.0 * 2.0 + 28.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

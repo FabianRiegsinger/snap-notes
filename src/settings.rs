@@ -60,7 +60,7 @@ pub struct NoteSettings {
 impl Default for NoteSettings {
     fn default() -> Self {
         Self {
-            size: 380.0,
+            size: 420.0,
             paper_tint: -0.12,
             idle_control_alpha: 0.3,
         }
@@ -618,7 +618,7 @@ mod tests {
         );
         assert_eq!(
             (s.notes.size, s.notes.paper_tint, s.notes.idle_control_alpha),
-            (380.0, -0.12, 0.3)
+            (420.0, -0.12, 0.3)
         );
         assert_eq!(s.motion.speed, 1.0);
         assert_eq!(s.window.height_fraction, 0.9);
@@ -663,6 +663,13 @@ mod tests {
         let mut s = Settings::default();
         s.set(SettingKey::Speed, f32::NAN);
         assert_eq!(s.motion.speed, 1.0);
+    }
+
+    #[test]
+    fn default_note_fits_the_toolbar_on_one_line_with_room_to_spare() {
+        let size = Settings::default().notes.size;
+        assert!(size >= crate::toolbar::ONE_LINE_WIDTH + 40.0, "{size}");
+        assert!(SettingKey::NoteSize.range().contains(&size));
     }
 
     #[test]
