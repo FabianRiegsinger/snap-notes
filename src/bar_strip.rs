@@ -58,6 +58,14 @@ fn progress_alpha(progress: Option<(usize, usize)>) -> f32 {
 /// Height of the pinned bar's notch.
 const NOTCH_HEIGHT: f32 = 2.0;
 
+/// The pinned notch: the bar's colour darkened, at the bar's alpha.
+fn notch_color(bar: Color, alpha: f32) -> Color {
+    Color {
+        a: alpha,
+        ..theme::mix(bar, Color::BLACK, 0.25)
+    }
+}
+
 /// The two 1 px "card edge" lines left of a stack's bar, each further out
 /// and shorter than the last.
 fn stack_edges(rect: Rectangle) -> [Rectangle; 2] {
@@ -534,6 +542,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     self.theme.highlight().scale_alpha(dim),
                 );
                 if note.pinned {
+                    let [r, g, b, _] = note.color.rgba;
                     renderer::Renderer::fill_quad(
                         renderer,
                         renderer::Quad {
@@ -548,7 +557,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             shadow: Default::default(),
                             snap: true,
                         },
-                        Color::BLACK.scale_alpha(0.35 * dim),
+                        notch_color(Color::from_rgb(r, g, b), alpha),
                     );
                 }
                 if self.entries.get(i).is_some_and(|e| !e.members.is_empty()) {
@@ -952,6 +961,15 @@ mod tests {
         assert_eq!((half.height, half.y + half.height), (20.0, 140.0));
         assert_eq!((half.x, half.width), (r.x, r.width));
         assert_eq!(progress_fill(r, 4, 4), r);
+    }
+
+    #[test]
+    fn notch_is_darker_than_its_bar() {
+        let bar = Color::from_rgb(1.0, 0.85, 0.24);
+        let notch = notch_color(bar, 0.3);
+        let luma = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        assert!(luma(notch) < luma(bar));
+        assert_eq!(notch.a, 0.3);
     }
 
     #[test]

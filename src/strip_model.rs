@@ -120,4 +120,13 @@ mod tests {
             vec![entry(0, &[2]), entry(1, &[]), entry(3, &[])]
         );
     }
+
+    #[test]
+    fn stack_progress_sums_members() {
+        let mut ns = notes(3);
+        ns[0].content = "- [x] a\n- [ ] b".into();
+        ns[1].content = "- [x] c".into();
+        let entries = [entry(0, &[1]), entry(2, &[])];
+        assert_eq!(progress(&ns, &entries), [Some((2, 3)), None]);
+    }
 }
