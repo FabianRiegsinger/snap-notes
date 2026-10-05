@@ -38,6 +38,8 @@ const FOCUS_GRACE: Duration = Duration::from_millis(500);
 /// A deleted note's bar shrinks away in this long (at speed 1).
 const COLLAPSE_SECS: f32 = 0.18;
 /// Toolbar and body fade in this long after switching edit/render mode.
+/// How long the copy button shows its check.
+const COPIED_FOR: Duration = Duration::from_millis(1500);
 const MODE_FADE_SECS: f32 = 0.12;
 
 #[derive(Debug, Clone)]
@@ -81,6 +83,7 @@ pub enum Message {
     ResizeStart(Edges),
     ClosePanel,
     DeleteRequested,
+    CopyNote,
     ConfirmDelete(bool),
     ToggleColorPicker,
     /// Open or close the toolbar's text color grid.
@@ -209,6 +212,9 @@ pub struct App {
     drag: Option<DragState>,
     scroll_offset: f32,
     confirm_delete: Option<Uuid>,
+    /// When the open note was last copied; the copy button shows a check
+    /// for `COPIED_SECS` after.
+    copied_at: Option<Instant>,
     animating: bool,
     last_tick: Option<Instant>,
     visible: bool,
@@ -355,6 +361,7 @@ impl App {
             drag: None,
             scroll_offset: 0.0,
             confirm_delete: None,
+            copied_at: None,
             animating: false,
             last_tick: None,
             visible: true,
@@ -674,6 +681,17 @@ impl App {
                     self.confirm_delete = Some(id);
                 }
             }
+            Message::CopyNote => {
+                let note = self
+                    .active_note
+                    .and_then(|id| self.store.notes().iter().find(|n| n.id == id));
+                if let Some(note) = note {
+                    let text = crate::note::copy_text(note);
+                    self.copied_at = Some(Instant::now());
+                    self.animating = true;
+                    return iced::clipboard::write(text);
+                }
+            }
             Message::ConfirmDelete(confirmed) => {
                 if confirmed {
                     if let Some(id) = self.confirm_delete.take() {
@@ -716,7 +734,14 @@ impl App {
                     self.settings_open = false;
                     self.palette_slot = None;
                 }
-                self.animating = mag_active || morph_active || collapse_active;
+                if self
+                    .copied_at
+                    .is_some_and(|t| now.saturating_duration_since(t) >= COPIED_FOR)
+                {
+                    self.copied_at = None;
+                }
+                self.animating =
+                    mag_active || morph_active || collapse_active || self.copied_at.is_some();
                 if !self.animating {
                     self.last_tick = None;
                 }
@@ -1062,6 +1087,7 @@ impl App {
                         morph_progress: self.morph.progress(),
                         content_alpha: frame.content_alpha,
                         confirm_delete: self.confirm_delete.is_some(),
+                        copied: self.copied_at.is_some(),
                         color_picker_open: self.color_picker_open,
                         text_color_picker_open: self.text_color_picker_open,
                         hovered: self.note_hovered,
@@ -2422,6 +2448,32 @@ mod tests {
         let task = app.apply_paste(classify(None, None));
         assert!(task.units() > 0, "no clipboard read was started");
         assert_eq!(app.store.notes()[0].content, "ab");
+    }
+
+    #[test]
+    fn copy_note_marks_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "body");
+        let task = app.update(Message::CopyNote);
+        assert!(task.units() > 0, "no clipboard write was started");
+        let at = app.copied_at.expect("copied_at set");
+        assert!(app.animating);
+        let _ = app.update(Message::Tick(at + Duration::from_millis(1000)));
+        assert!(app.copied_at.is_some());
+        assert!(app.animating, "must keep ticking until the icon flips back");
+        let _ = app.update(Message::Tick(at + Duration::from_millis(1600)));
+        assert!(app.copied_at.is_none());
+    }
+
+    #[test]
+    fn copy_note_uses_the_stores_latest_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "ab");
+        let _ = app.update(Message::BodyClicked(Some(0)));
+        type_char(&mut app, 'c');
+        let id = app.active_note.unwrap();
+        let note = app.store.notes().iter().find(|n| n.id == id).unwrap();
+        assert!(crate::note::copy_text(note).contains('c'));
     }
 
     fn type_char(app: &mut App, c: char) {

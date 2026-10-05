@@ -110,6 +110,8 @@ pub struct PostIt<'a> {
     pub morph_progress: f32,
     pub content_alpha: f32,
     pub confirm_delete: bool,
+    /// The note was just copied; the copy button shows a check.
+    pub copied: bool,
     pub color_picker_open: bool,
     /// The toolbar's text color grid is open.
     pub text_color_picker_open: bool,
@@ -288,6 +290,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         morph_progress,
         content_alpha: a,
         confirm_delete,
+        copied,
         color_picker_open,
         text_color_picker_open,
         hovered,
@@ -366,6 +369,12 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 row![
                     title,
                     color_btn,
+                    header_button(
+                        if copied { Icon::Check } else { Icon::Copy },
+                        Message::CopyNote,
+                        theme,
+                        controls
+                    ),
                     header_button(Icon::Trash, Message::DeleteRequested, theme, controls),
                     header_button(Icon::Close, Message::ClosePanel, theme, controls),
                 ]

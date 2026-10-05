@@ -126,10 +126,31 @@ impl Note {
     }
 }
 
+/// What copying a note puts on the clipboard: the title, a blank line and
+/// the body, or just the body when the title is blank.
+pub fn copy_text(note: &Note) -> String {
+    let title = note.title.trim();
+    if title.is_empty() {
+        note.content.clone()
+    } else {
+        format!("{title}\n\n{}", note.content)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn copy_text_joins_title_and_body() {
+        let mut note = Note::new(PALETTE[0]);
+        note.title = "T".into();
+        note.content = "body".into();
+        assert_eq!(copy_text(&note), "T\n\nbody");
+        note.title = "  ".into();
+        assert_eq!(copy_text(&note), "body");
+    }
 
     #[test]
     fn note_color_roundtrip_hex() {
