@@ -118,6 +118,8 @@ struct Builder<'a> {
     /// An image just split its block; the line break after it belongs to it.
     after_image: bool,
     in_code_block: bool,
+    /// Source ranges of the tags and `==` pairs consumed as markup.
+    removed: Vec<(usize, usize)>,
 }
 
 impl<'a> Builder<'a> {
@@ -276,6 +278,9 @@ impl<'a> Builder<'a> {
                 .count();
             backslashes % 2 == 1
         };
+        // Entities and the like make a text event differ from its source;
+        // then offsets into the text are not offsets into the note.
+        let verbatim = self.content.get(range_start..range_end) == Some(text);
         let mut literal = String::new();
         // Where the pending literal starts in the source.
         let mut literal_at = range_start;
@@ -286,6 +291,7 @@ impl<'a> Builder<'a> {
                 if let Some(end) = rest.find('}') {
                     let inner = &rest[1..end];
                     if inner == "/" {
+                        self.mark_removed(verbatim, range_start, text, rest, end + 1);
                         self.flush_literal(&mut literal, literal_at);
                         self.tags.pop();
                         rest = &rest[end + 1..];
@@ -293,6 +299,7 @@ impl<'a> Builder<'a> {
                         continue;
                     }
                     if let Some(tag) = self.parse_tag(inner) {
+                        self.mark_removed(verbatim, range_start, text, rest, end + 1);
                         self.flush_literal(&mut literal, literal_at);
                         self.tags.push(tag);
                         rest = &rest[end + 1..];
@@ -323,6 +330,7 @@ impl<'a> Builder<'a> {
                     }
                 };
                 if flanks {
+                    self.mark_removed(verbatim, range_start, text, rest, 2);
                     self.flush_literal(&mut literal, literal_at);
                     match open {
                         Some(i) => {
@@ -344,6 +352,21 @@ impl<'a> Builder<'a> {
             first = false;
         }
         self.flush_literal(&mut literal, literal_at);
+    }
+
+    /// Records the `len` bytes at the start of `rest` (a tail of `text`) as markup.
+    fn mark_removed(
+        &mut self,
+        verbatim: bool,
+        range_start: usize,
+        text: &str,
+        rest: &str,
+        len: usize,
+    ) {
+        if verbatim {
+            let at = range_start + (text.len() - rest.len());
+            self.removed.push((at, at + len));
+        }
     }
 
     /// Whether a `==` preceded by non-whitespace follows `from` within the same block.
@@ -376,6 +399,12 @@ impl<'a> Builder<'a> {
 /// Parses note content (Markdown plus `{color}`/`{size:N}` tags) into blocks.
 /// Palette lookups are by slot, so a short palette yields no color rather than an error.
 pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
+    scan(content, palette).0
+}
+
+/// Parses like [`parse`] and also returns the source ranges of the tags and
+/// `==` pairs it consumed, in order.
+fn scan(content: &str, palette: &[NoteColor]) -> (Doc, Vec<(usize, usize)>) {
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let line_starts = std::iter::once(0)
         .chain(content.match_indices('\n').map(|(i, _)| i + 1))
@@ -396,6 +425,7 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
         image: None,
         after_image: false,
         in_code_block: false,
+        removed: Vec::new(),
     };
 
     for (event, range) in Parser::new_ext(content, options).into_offset_iter() {
@@ -539,7 +569,21 @@ pub fn parse(content: &str, palette: &[NoteColor]) -> Doc {
         }
     }
     b.flush();
-    Doc { blocks: b.blocks }
+    (Doc { blocks: b.blocks }, b.removed)
+}
+
+/// The note with the `{...}` tags and `==` highlights the formatted view
+/// consumes removed; Markdown, escapes and anything shown literally stay.
+pub fn strip_tags(content: &str) -> String {
+    let (_, removed) = scan(content, &[]);
+    let mut out = String::with_capacity(content.len());
+    let mut at = 0;
+    for (start, end) in removed {
+        out.push_str(&content[at..start]);
+        at = end;
+    }
+    out.push_str(&content[at..]);
+    out
 }
 
 /// The source offset of the character at byte `text_offset` of `block`'s
@@ -1125,6 +1169,30 @@ mod tests {
     fn plain_text_strips_markup() {
         let got = plain_text("# T\n**b** {coral}c{/}\n- [ ] x\n- [x] y\n![a](images/a.png)");
         assert_eq!(got, "T\nb c\n☐ x\n☑ y\nImage");
+    }
+
+    #[test]
+    fn strip_tags_keeps_markdown() {
+        assert_eq!(
+            strip_tags("{coral}**b**{/} ==hi== [l](https://x) {size:20}t{/}"),
+            "**b** hi [l](https://x) t"
+        );
+    }
+
+    #[test]
+    fn strip_tags_follows_the_parser() {
+        for same in [
+            "{foo} {size:abc} {/",
+            "\\{coral}x",
+            "a == b",
+            "x ==y",
+            "`{coral}x{/}`",
+            "```\n{coral}x{/}\n```",
+        ] {
+            assert_eq!(strip_tags(same), same, "{same:?}");
+        }
+        assert_eq!(strip_tags("{/}x"), "x");
+        assert_eq!(strip_tags("a ==b== c ==d"), "a b c ==d");
     }
 
     #[test]
