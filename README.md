@@ -41,18 +41,18 @@
 ### Search
 - **Open it:** Cmd/Ctrl+F, the 🔍 slot under `+` in the strip, or **Search…** in the tray menu. Esc closes the panel.
 - **As you type:** results update with every keystroke. Matching ignores case and covers titles and bodies.
-- **Results:** each one shows the title and a snippet with the match in bold. Click one to open that note with the match selected.
+- **Results:** each one shows the title and a snippet with the match in bold. Click one to open that note with the match selected, or press Enter to open the first one.
 - **Dimmed bars:** while you type, the bars of notes that don't match dim.
 
 ### Export
 - **Open it:** **Export…** in the Settings group "Data", or in the tray menu.
 - **Pick notes:** every note starts checked. The All and None buttons toggle them all.
 - **Format:** `.md` or `.txt`, saved as one file through a save dialog. The suggested name is `snap-notes-YYYY-MM-DD.<ext>`.
-- **Markdown:** each note becomes a `# Title` heading followed by its Markdown. The custom color, size and highlight tags are removed.
+- **Markdown:** each note becomes a `# Title` heading followed by its Markdown. The custom color, size and highlight tags are removed. Single line breaks stay line breaks (as a trailing double space), except in code blocks.
 - **Plain text:** each title is underlined with `=`.
 
 ### Formatting
-Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. While editing, the editor already shows bold, italic, code, colored text and bold headings, with the Markdown markers drawn faint. Strikethrough, highlight backgrounds, sizes and images only show in the formatted view. In edit mode the toolbar's bold, italic, strikethrough, code, text color, highlight, size (small, normal, large, huge), link and image buttons apply the markup.
+Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. While editing, the editor already shows bold, italic, code, colored text and bold headings, with the Markdown markers drawn faint. Bold, italic and colors that span several lines of a paragraph show on each of those lines, as in the formatted view. Strikethrough, highlight backgrounds, sizes and images only show in the formatted view. In edit mode the toolbar's bold, italic, strikethrough, code, text color, highlight, size (small, normal, large, huge), link and image buttons apply the markup.
 
 | Effect | Syntax |
 |---|---|
@@ -77,7 +77,7 @@ Notes are written in Markdown plus a few color and size tags. An open note shows
 - **Older notes:** keep their text, but a line indented by 4 spaces now shows as a code block, and a line followed by `---` as a heading.
 
 ### Settings
-Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group has a Reset button. There is no theme setting: dark mode follows the system.
+Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group except Data has a Reset button. There is no theme setting: dark mode follows the system.
 
 | Group | What you can adjust |
 |---|---|
@@ -101,7 +101,10 @@ On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Se
 | Cmd/Ctrl+F | Open or close search |
 | Cmd/Ctrl+, | Open or close settings |
 | Cmd/Ctrl+V | Paste an image into the open note |
+| Enter | Open the first search result (in the search field) |
 | Esc | Leave edit mode, close search, export or settings, or fold the open note |
+
+The Cmd/Ctrl shortcuts also work while you type in a note's title or body or in the search field.
 
 ## Platform support
 
