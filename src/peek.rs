@@ -50,6 +50,8 @@ const CONFIRM_HEIGHT: f32 = BODY_LINE + CONFIRM_GAP + 24.0;
 const UNSTACK_BUTTON: Size = Size::new(76.0, 24.0);
 /// Shown in a stack's list for a note without a title.
 const UNTITLED: &str = "Untitled";
+/// A stack's list shows at most this many notes, then "+N more".
+const MAX_STACK_ROWS: usize = 8;
 /// Rough glyph widths as a share of the font size, kept generous so the
 /// estimated text height never cuts text off.
 const TITLE_GLYPH: f32 = 0.62;
@@ -67,6 +69,8 @@ pub struct PeekText {
     /// A stack's notes, top first, by id and title: listed in place of the
     /// body lines. Empty for a single note.
     pub stack: Vec<(Uuid, String)>,
+    /// How many of the stack's notes the list leaves out (`+N more`).
+    pub stack_more: usize,
 }
 
 /// Where the peek and its parts are. Text and button positions are those of
@@ -87,7 +91,9 @@ pub struct PeekLayout {
     pub cancel: Rectangle,
     /// A stack's list rows, one per note of `PeekText::stack`.
     pub stack_rows: Vec<Rectangle>,
-    /// A stack's "Unstack" button below its list.
+    /// The faint `+N more` row below a long stack's list; not clickable.
+    pub stack_more: Option<Rectangle>,
+    /// A stack's "Unstack" button below its list, kept inside the peek.
     pub unstack: Option<Rectangle>,
 }
 
@@ -194,12 +200,14 @@ pub fn peek_text(note: &Note, width: f32) -> PeekText {
         progress: rich::task_progress(&note.content),
         reminder: reminder::at(note).map(reminder::label),
         stack: Vec::new(),
+        stack_more: 0,
     }
 }
 
 /// The peek of `entry`'s bar: its top note's, and for a stack the titles of
-/// all its notes in place of the body, with the header counting the whole
-/// stack's tasks like its bar.
+/// its notes in place of the body (at most `MAX_STACK_ROWS`, the top first),
+/// with the header counting the whole stack's tasks like its bar and showing
+/// its earliest pending reminder.
 pub fn entry_peek_text(notes: &[Note], entry: &Entry, width: f32) -> PeekText {
     let mut text = peek_text(&notes[entry.top], width);
     if entry.members.is_empty() {
@@ -208,8 +216,19 @@ pub fn entry_peek_text(notes: &[Note], entry: &Entry, width: f32) -> PeekText {
     let max_chars = body_chars_per_line(width);
     text.lines.clear();
     text.progress = strip_model::progress(notes, std::slice::from_ref(entry))[0];
+    let soonest = entry
+        .notes()
+        .filter_map(|i| Some((reminder::pending(&notes[i])?, i)))
+        .min()
+        .and_then(|(_, i)| reminder::at(&notes[i]));
+    if let Some(at) = soonest {
+        text.reminder = Some(reminder::label(at));
+    }
+    let count = 1 + entry.members.len();
+    text.stack_more = count.saturating_sub(MAX_STACK_ROWS);
     text.stack = entry
         .notes()
+        .take(MAX_STACK_ROWS)
         .map(|i| {
             let title = notes[i].title.trim();
             let title = if title.is_empty() { UNTITLED } else { title };
@@ -230,7 +249,8 @@ pub fn peek_height(text: &PeekText, confirming: bool) -> f32 {
     let mut body = if text.stack.is_empty() {
         text.lines.len().max(1) as f32 * BODY_LINE
     } else {
-        text.stack.len() as f32 * BODY_LINE + CONFIRM_GAP + UNSTACK_BUTTON.height
+        let rows = text.stack.len() + usize::from(text.stack_more > 0);
+        rows as f32 * BODY_LINE + CONFIRM_GAP + UNSTACK_BUTTON.height
     };
     if confirming {
         body = body.max(CONFIRM_HEIGHT);
@@ -239,7 +259,8 @@ pub fn peek_height(text: &PeekText, confirming: bool) -> f32 {
 }
 
 /// The peek grown from `bar` by `progress`: it widens to the left and
-/// grows to fit its text, centered on the bar and kept inside `bounds`.
+/// grows to fit its text, centered on the bar and kept inside `bounds` (a
+/// peek taller than `bounds` is cut to fit).
 pub fn peek_layout(
     bar: Rectangle,
     bounds: Rectangle,
@@ -249,7 +270,9 @@ pub fn peek_layout(
     width: f32,
 ) -> PeekLayout {
     let full_width = width.max(bar.width);
-    let full_height = peek_height(text, confirming).max(bar.height);
+    let full_height = peek_height(text, confirming)
+        .max(bar.height)
+        .min(bounds.height);
     let rect_at = |t: f32| {
         let width = lerp(bar.width, full_width, t);
         let height = lerp(bar.height, full_height, t);
@@ -284,9 +307,18 @@ pub fn peek_layout(
             )
         })
         .collect();
-    let unstack = stack_rows.last().map(|last| {
+    let stack_more = (text.stack_more > 0).then(|| {
         Rectangle::new(
-            Point::new(body.x, last.y + last.height + CONFIRM_GAP),
+            Point::new(body.x, body.y + stack_rows.len() as f32 * BODY_LINE),
+            Size::new(inner_width(text.width), BODY_LINE),
+        )
+    });
+    // In a peek cut to fit, the button rises over the list so it stays
+    // reachable: it is the only way to dissolve the stack.
+    let unstack = stack_more.or(stack_rows.last().copied()).map(|last| {
+        let lowest = full.y + full.height - PADDING_BOTTOM - UNSTACK_BUTTON.height;
+        Rectangle::new(
+            Point::new(body.x, (last.y + last.height + CONFIRM_GAP).min(lowest)),
             UNSTACK_BUTTON,
         )
     });
@@ -310,6 +342,7 @@ pub fn peek_layout(
             CONFIRM_BUTTON,
         ),
         stack_rows,
+        stack_more,
         unstack,
     }
 }
@@ -618,6 +651,18 @@ pub fn draw_peek(
             theme.ink(faint * alpha),
         );
     }
+    if let Some(more) = layout.stack_more.filter(|_| !confirming) {
+        draw_text(
+            format!("+{} more", text.stack_more),
+            more.position(),
+            BODY_FONT,
+            BODY_SIZE,
+            BODY_LINE,
+            LineHeight::Relative(theme::BODY_LINE_HEIGHT),
+            1,
+            theme.ink(0.35 * alpha),
+        );
+    }
     if let Some(unstack) = layout.unstack.filter(|_| !confirming) {
         draw_button(
             renderer,
@@ -898,6 +943,59 @@ mod tests {
         let single = peek_text(&notes[0], PEEK_WIDTH);
         assert!(peek_height(&text, false) > peek_height(&single, false));
         assert!(peek_height(&text, true) >= peek_height(&text, false));
+    }
+
+    #[test]
+    fn stack_peek_shows_a_members_reminder() {
+        let set = |mut n: Note| {
+            n.reminder_set_at = Some(chrono::Utc::now());
+            n
+        };
+        let notes = [
+            note("Top", ""),
+            set(note("Later @2026-10-08 09:00", "")),
+            set(note("Call @2026-10-06 15:00", "")),
+        ];
+        let entry = Entry {
+            top: 0,
+            members: vec![1, 2],
+        };
+        let text = entry_peek_text(&notes, &entry, PEEK_WIDTH);
+        assert_eq!(text.reminder.as_deref(), Some("Tue 15:00"));
+        // A fired reminder no longer counts.
+        let mut fired = notes.clone();
+        fired[2].reminder_fired = reminder::pending(&fired[2]);
+        let text = entry_peek_text(&fired, &entry, PEEK_WIDTH);
+        assert_eq!(text.reminder.as_deref(), Some("Thu 09:00"));
+    }
+
+    #[test]
+    fn long_stack_peek_stays_in_bounds() {
+        let notes: Vec<Note> = (0..31).map(|i| note(&format!("N{i}"), "")).collect();
+        let entry = Entry {
+            top: 0,
+            members: (1..31).collect(),
+        };
+        let text = entry_peek_text(&notes, &entry, PEEK_WIDTH);
+        assert_eq!(text.stack.len(), MAX_STACK_ROWS);
+        assert_eq!(text.stack[0].1, "N0");
+        assert_eq!(text.stack_more, 31 - MAX_STACK_ROWS);
+        let bar = Rectangle::new(Point::new(960.0, 860.0), Size::new(30.0, 40.0));
+        for bounds in [
+            screen(),
+            Rectangle::new(Point::ORIGIN, Size::new(1000.0, 150.0)),
+        ] {
+            let l = peek_layout(bar, bounds, 1.0, &text, false, PEEK_WIDTH);
+            assert_eq!(l.stack_rows.len(), MAX_STACK_ROWS);
+            assert!(l.stack_more.is_some());
+            assert!(inside(bounds, l.rect));
+            let unstack = l.unstack.unwrap();
+            assert!(inside(l.rect, unstack) && inside(bounds, unstack));
+        }
+        let l = peek_layout(bar, screen(), 1.0, &text, false, PEEK_WIDTH);
+        let more = l.stack_more.unwrap();
+        assert_eq!(more.y, l.stack_rows[MAX_STACK_ROWS - 1].y + BODY_LINE);
+        assert!(l.unstack.unwrap().y >= more.y + more.height);
     }
 
     #[test]

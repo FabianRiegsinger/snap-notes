@@ -414,10 +414,12 @@ impl<'a> BarStrip<'a> {
             }
         } else if open && parts.trash.contains(pos) {
             Some(Message::PeekDeleteRequested(i))
-        } else if let Some(row) = row.filter(|_| open) {
-            Some(Message::OpenStackMember(text.stack[row].0))
         } else if open && parts.unstack.is_some_and(|u| u.contains(pos)) {
             Some(Message::Unstack(i))
+        } else if let Some(row) = row.filter(|_| open) {
+            Some(Message::OpenStackMember(text.stack[row].0))
+        } else if open && parts.stack_more.is_some_and(|m| m.contains(pos)) {
+            None
         } else {
             Some(Message::BarClicked(i))
         })
@@ -498,6 +500,8 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     continue;
                 }
             }
+            // A stack whose top is being deleted still draws it: the collapse
+            // lasts 0.18 s and clicks already reach the next note.
             if let Some(note) = self.note(i) {
                 let dim = if self.dimmed.get(i).copied().unwrap_or(false) {
                     DIM_ALPHA
@@ -1273,6 +1277,53 @@ mod tests {
         assert!(matches!(
             press(parts.title),
             Some(Some(Message::BarClicked(0)))
+        ));
+    }
+
+    #[test]
+    fn long_stack_peek_more_row_does_nothing() {
+        let mut notes: Vec<_> = (0..31)
+            .map(|_| crate::note::Note::new(crate::note::PALETTE[0]))
+            .collect();
+        let top = notes[0].id;
+        for n in &mut notes[1..] {
+            n.stack = Some(top);
+        }
+        let entries = crate::strip_model::entries(&notes);
+        let magnification = MagnificationState::new();
+        let drag = None;
+        let bars = BarSettings::default();
+        let strip = BarStrip {
+            notes: &notes,
+            entries: &entries,
+            progress: &[],
+            magnification: &magnification,
+            drag: &drag,
+            scroll_offset: 0.0,
+            peek: Some((0, 1.0)),
+            bars: &bars,
+            height_fraction: 1.0,
+            paper_tint: 0.0,
+            default_note_width: 260.0,
+            peek_confirm: false,
+            theme: theme::Theme::default(),
+            open: None,
+            collapse: None,
+            dimmed: Vec::new(),
+            pulse: Vec::new(),
+        };
+        let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
+        let bar = strip.layout_in(bounds).bars[0];
+        let (_, width, text) = strip.peek_parts(0, bar).unwrap();
+        let parts = peek_layout(bar, bounds, 1.0, &text, false, width);
+        let more = parts.stack_more.unwrap();
+        assert!(matches!(
+            strip.peek_press(bounds, more.center()),
+            Some(None)
+        ));
+        assert!(matches!(
+            strip.peek_press(bounds, parts.unstack.unwrap().center()),
+            Some(Some(Message::Unstack(0)))
         ));
     }
 
