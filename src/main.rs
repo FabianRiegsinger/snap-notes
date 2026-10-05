@@ -25,6 +25,7 @@ mod search_panel;
 mod settings;
 mod settings_panel;
 mod store;
+mod strip_model;
 mod theme;
 mod toolbar;
 mod tray;

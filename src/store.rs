@@ -1,5 +1,6 @@
 use crate::note::{Note, NoteColor};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,7 @@ impl NoteStore {
             },
             Err(e) => (Vec::new(), e.kind() != io::ErrorKind::NotFound),
         };
+        let notes = normalize_stacks(notes);
         Self {
             notes,
             path,
@@ -280,6 +282,43 @@ impl NoteStore {
     }
 }
 
+/// Makes a hand-edited or damaged file's stacks valid: a note stacked on a
+/// missing note, or on a note that is itself stacked, becomes top-level, and
+/// each stack's members move right after its top (in their order).
+fn normalize_stacks(notes: Vec<Note>) -> Vec<Note> {
+    let tops: HashSet<Uuid> = notes
+        .iter()
+        .filter(|n| n.stack.is_none())
+        .map(|n| n.id)
+        .collect();
+    let (mut ordered, mut members): (Vec<Note>, Vec<Note>) = notes
+        .into_iter()
+        .map(|mut n| {
+            if n.stack.is_some_and(|top| !tops.contains(&top)) {
+                n.stack = None;
+            }
+            n
+        })
+        .partition(|n| n.stack.is_none());
+    if members.is_empty() {
+        return ordered;
+    }
+    let mut i = 0;
+    while i < ordered.len() {
+        let top = ordered[i].id;
+        let (mine, rest): (Vec<Note>, Vec<Note>) =
+            members.into_iter().partition(|n| n.stack == Some(top));
+        members = rest;
+        let count = mine.len();
+        ordered.splice(i + 1..i + 1, mine);
+        i += 1 + count;
+    }
+    for (order, note) in ordered.iter_mut().enumerate() {
+        note.order = order;
+    }
+    ordered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +358,26 @@ mod tests {
         let loaded = NoteStore::load(path);
         assert_eq!(loaded.notes().len(), 1);
         assert_eq!(loaded.notes()[0].content, "Hello");
+    }
+
+    #[test]
+    fn orphan_members_are_normalized_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.json");
+        let mut store = NoteStore::load(path.clone());
+        let id: Vec<Uuid> = (0..4).map(|_| store.add_note(&PALETTE)).collect();
+        store.note_mut(id[1]).unwrap().stack = Some(Uuid::new_v4());
+        store.note_mut(id[2]).unwrap().stack = Some(id[0]);
+        // Points at a member, not a top.
+        store.note_mut(id[3]).unwrap().stack = Some(id[2]);
+        store.save().unwrap();
+        let loaded = NoteStore::load(path);
+        // The member moves right after its top.
+        assert_eq!(ids(&loaded), vec![id[0], id[2], id[1], id[3]]);
+        let stacks: Vec<_> = loaded.notes().iter().map(|n| n.stack).collect();
+        assert_eq!(stacks, vec![None, Some(id[0]), None, None]);
+        let orders: Vec<_> = loaded.notes().iter().map(|n| n.order).collect();
+        assert_eq!(orders, vec![0, 1, 2, 3]);
     }
 
     #[test]

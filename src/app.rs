@@ -18,6 +18,7 @@ use crate::search_panel::{focus_field, search_panel, SearchView};
 use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore};
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::NoteStore;
+use crate::strip_model::{self, Entry};
 use crate::theme;
 use crate::tray;
 
@@ -26,6 +27,7 @@ use iced::{
     event, keyboard, mouse, window, Element, Fill, Point, Rectangle, Size, Subscription, Task,
     Vector,
 };
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -298,6 +300,10 @@ pub struct App {
     search_results: Vec<Hit>,
     search_matches: HashSet<Uuid>,
     search_synced: Option<(u64, String)>,
+    /// The strip's bars as of store revision `entries_synced`; see
+    /// [`App::entries`].
+    strip_entries: Vec<Entry>,
+    entries_synced: u64,
     /// The export panel is showing (kept while it folds back into the gear).
     export: Option<ExportState>,
     export_morph: Morph,
@@ -415,6 +421,8 @@ impl App {
         let mode_fade = Self::settled_fade(s.motion.speed);
         let window_size = Size::new(Self::docked_width(s, false), 600.0);
         let data_dir = store.dir().to_path_buf();
+        let strip_entries = strip_model::entries(store.notes());
+        let entries_synced = store.revision();
         Self {
             theme: theme::Theme::default(),
             store,
@@ -474,6 +482,8 @@ impl App {
             search_results: Vec::new(),
             search_matches: HashSet::new(),
             search_synced: None,
+            strip_entries,
+            entries_synced,
             pending_focus: None,
             tray_ok: false,
             tray_failed: false,
@@ -487,6 +497,7 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+        self.sync_entries();
         self.sync_search();
         task
     }
@@ -511,7 +522,11 @@ impl App {
                     }
                 }
             }
-            Message::BarClicked(index) => return self.open_note(index),
+            Message::BarClicked(entry) => {
+                if let Some(index) = self.entry_note(entry) {
+                    return self.open_note(index);
+                }
+            }
             Message::ToggleSettings => {
                 if self.settings_open && self.settings_morph.is_opening() {
                     return self.update(Message::CloseSettings);
@@ -719,8 +734,8 @@ impl App {
                     }
                 }
             }
-            Message::PeekDeleteRequested(index) => {
-                let id = self.store.notes().get(index).map(|n| n.id);
+            Message::PeekDeleteRequested(entry) => {
+                let id = self.entry_note(entry).map(|i| self.store.notes()[i].id);
                 if id.is_some() && id == self.peek_note {
                     self.peek_confirm_delete = id;
                 }
@@ -1024,11 +1039,13 @@ impl App {
                             } else {
                                 target
                             };
-                            self.store.reorder(drag.bar_index, to);
-                            self.store.mark_dirty();
+                            if let Some((from, to)) = self.reorder_notes(drag.bar_index, to) {
+                                self.store.reorder(from, to);
+                                self.store.mark_dirty();
+                            }
                         }
-                    } else {
-                        return self.open_note(drag.bar_index);
+                    } else if let Some(index) = self.entry_note(drag.bar_index) {
+                        return self.open_note(index);
                     }
                 }
             }
@@ -1238,13 +1255,14 @@ impl App {
         }
         let strip = container(BarStrip {
             notes: self.store.notes(),
+            entries: &self.strip_entries,
             magnification: &self.magnification,
             drag: &self.drag,
             scroll_offset: self.scroll_offset,
             peek: self
                 .peek_note
-                .and_then(|id| self.store.notes().iter().position(|n| n.id == id))
-                .map(|index| (index, self.peek.progress())),
+                .and_then(|id| self.id_entry(id))
+                .map(|entry| (entry, self.peek.progress())),
             bars: &self.settings.settings().bars,
             height_fraction: self.strip_fraction(),
             paper_tint: self.settings.settings().notes.paper_tint,
@@ -1253,8 +1271,8 @@ impl App {
             theme: self.theme,
             open: self
                 .active_note
-                .and_then(|id| self.store.notes().iter().position(|n| n.id == id))
-                .map(|index| (index, self.morph.progress())),
+                .and_then(|id| self.id_entry(id))
+                .map(|entry| (entry, self.morph.progress())),
             collapse: self.collapse(),
             dimmed: self.dimmed_bars(),
         })
@@ -1431,8 +1449,8 @@ impl App {
             return Task::none();
         };
         let id = note.id;
-        // A deleted note's bar can't be opened while it collapses.
-        if self.is_collapsing(index) {
+        // A deleted note can't be opened while its bar collapses.
+        if self.collapsing.as_ref().is_some_and(|(c, _)| *c == id) {
             return Task::none();
         }
 
@@ -1458,7 +1476,10 @@ impl App {
         self.color_picker_open = false;
         self.text_color_picker_open = false;
         self.confirm_delete = None;
-        if let Some(bar) = self.strip_layout().bars.get(index) {
+        if let Some(bar) = self
+            .note_entry(index)
+            .and_then(|entry| self.strip_layout().bars.get(entry).copied())
+        {
             self.anchor_y = bar.y + bar.height / 2.0;
         }
         if switching {
@@ -1721,10 +1742,10 @@ impl App {
 
     /// Removes the collapsing note (if any) for good.
     fn finish_collapse(&mut self) {
+        let index = self.collapse().map(|(entry, _)| entry);
         let Some((id, _)) = self.collapsing.take() else {
             return;
         };
-        let index = self.store.notes().iter().position(|n| n.id == id);
         // A bar dragged below the removed one moves up a slot; a drag on
         // the removed bar itself is dropped.
         if let (Some(drag), Some(index)) = (&mut self.drag, index) {
@@ -1740,11 +1761,15 @@ impl App {
         self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
     }
 
-    /// The collapsing bar's index and how far it has shrunk (eased).
+    /// The collapsing bar and how far it has shrunk (eased). A stack's bar
+    /// stays: its other notes remain.
     fn collapse(&self) -> Option<(usize, f32)> {
         let (id, morph) = self.collapsing.as_ref()?;
-        let index = self.store.notes().iter().position(|n| n.id == *id)?;
-        Some((index, ease_out_cubic(morph.progress())))
+        let entry = self.id_entry(*id)?;
+        if !self.entries()[entry].members.is_empty() {
+            return None;
+        }
+        Some((entry, ease_out_cubic(morph.progress())))
     }
 
     fn is_collapsing(&self, index: usize) -> bool {
@@ -1919,6 +1944,7 @@ impl App {
                     .iter()
                     .position(|bar| (bar.y..=bar.y + bar.height).contains(&y))
                     .filter(|i| !self.is_collapsing(*i))
+                    .and_then(|i| self.entry_note(i))
                     .map(|i| self.store.notes()[i].id)
             }
             _ => None,
@@ -1950,13 +1976,13 @@ impl App {
             return None;
         }
         let id = self.peek_note?;
-        let index = self.store.notes().iter().position(|n| n.id == id)?;
-        let bar = *self.strip_layout().bars.get(index)?;
+        let entry = self.id_entry(id)?;
+        let bar = *self.strip_layout().bars.get(entry)?;
         let strip = Rectangle::new(
             Point::new(self.window_size.width - STRIP_WIDTH, 0.0),
             Size::new(STRIP_WIDTH, self.window_size.height),
         );
-        let note = &self.store.notes()[index];
+        let note = &self.store.notes()[self.entry_note(entry)?];
         Some(peek_target(
             bar,
             strip,
@@ -2269,22 +2295,26 @@ impl App {
     }
 
     /// Bars to dim, by index: while the search is open with a query, the
-    /// notes that don't match it. Empty otherwise.
+    /// entries none of whose notes match it. Empty otherwise.
     fn dimmed_bars(&self) -> Vec<bool> {
         if !self.search_open || self.search_query.trim().is_empty() {
             return Vec::new();
         }
-        self.store
-            .notes()
+        let notes = self.store.notes();
+        self.entries()
             .iter()
-            .map(|note| !self.search_matches.contains(&note.id))
+            .map(|entry| {
+                !entry
+                    .notes()
+                    .any(|i| self.search_matches.contains(&notes[i].id))
+            })
             .collect()
     }
 
     fn note_frame(&self) -> Option<MorphFrame> {
         let id = self.active_note?;
-        let index = self.store.notes().iter().position(|n| n.id == id)?;
-        let source = *self.strip_layout().bars.get(index)?;
+        let entry = self.id_entry(id)?;
+        let source = *self.strip_layout().bars.get(entry)?;
         Some(morph_frame(
             source,
             self.note_target_rect(),
@@ -2298,7 +2328,7 @@ impl App {
             Size::new(STRIP_WIDTH, self.window_size.height),
         );
         compute_layout(
-            self.store.notes().len(),
+            self.entries().len(),
             |i| self.magnification.scale(i),
             band(bounds, self.strip_fraction()),
             self.scroll_offset,
@@ -2409,6 +2439,53 @@ impl App {
             .chain(strip.settings_button)
             .map(|r| r.y + r.height / 2.0)
             .collect()
+    }
+
+    /// The strip's entries, one per bar: the cached ones while the store
+    /// hasn't changed since [`App::sync_entries`].
+    fn entries(&self) -> Cow<'_, [Entry]> {
+        if self.entries_synced == self.store.revision() {
+            Cow::Borrowed(&self.strip_entries)
+        } else {
+            Cow::Owned(strip_model::entries(self.store.notes()))
+        }
+    }
+
+    fn sync_entries(&mut self) {
+        if self.entries_synced != self.store.revision() {
+            self.strip_entries = strip_model::entries(self.store.notes());
+            self.entries_synced = self.store.revision();
+        }
+    }
+
+    /// The note bar `entry` shows (the stack's top), by note index.
+    fn entry_note(&self, entry: usize) -> Option<usize> {
+        self.entries().get(entry).map(|e| e.top)
+    }
+
+    /// The bar holding the note at `index`: a stacked note's is its stack's.
+    fn note_entry(&self, index: usize) -> Option<usize> {
+        self.entries().iter().position(|e| e.holds(index))
+    }
+
+    fn id_entry(&self, id: Uuid) -> Option<usize> {
+        let index = self.store.notes().iter().position(|n| n.id == id)?;
+        self.note_entry(index)
+    }
+
+    /// Maps moving bar `from` to slot `to` of the remaining bars onto the
+    /// store: the top's note index and the note index its group lands at.
+    fn reorder_notes(&self, from: usize, to: usize) -> Option<(usize, usize)> {
+        let entries = self.entries();
+        let top = entries.get(from)?.top;
+        let to = entries
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != from)
+            .take(to)
+            .map(|(_, e)| 1 + e.members.len())
+            .sum();
+        Some((top, to))
     }
 
     fn bar_centers(&self) -> Vec<f32> {
@@ -2648,6 +2725,48 @@ mod tests {
             .collect();
         app.window_size = Size::new(1200.0, 900.0);
         (app, ids)
+    }
+
+    #[test]
+    fn stacked_strip_opens_the_right_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 4);
+        assert!(app.store.stack(ids[2], ids[1]));
+        // Bars: 0, 1 (with 2 hidden under it), 3.
+        assert_eq!(app.strip_layout().bars.len(), 3);
+        assert_eq!(app.entry_note(2), Some(3));
+        assert_eq!(app.note_entry(2), Some(1));
+        assert_eq!(app.note_entry(3), Some(2));
+        let _ = app.update(Message::BarClicked(2));
+        assert_eq!(app.active_note, Some(ids[3]));
+        let _ = app.update(Message::BarClicked(1));
+        assert_eq!(app.active_note, Some(ids[1]));
+    }
+
+    #[test]
+    fn reorder_moves_whole_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 4);
+        assert!(app.store.stack(ids[1], ids[0]));
+        let order = |app: &App| app.store.notes().iter().map(|n| n.id).collect::<Vec<_>>();
+        // The stack's bar dragged below the last bar.
+        let bars = app.strip_layout().bars;
+        let _ = app.update(Message::DragStart(0, bars[0].center().y));
+        let _ = app.update(Message::DragMove(bars[2].y + bars[2].height + 1.0));
+        let _ = app.update(Message::DragEnd);
+        assert_eq!(order(&app), vec![ids[2], ids[3], ids[0], ids[1]]);
+        // The stack dragged back above a plain bar.
+        let bars = app.strip_layout().bars;
+        let _ = app.update(Message::DragStart(2, bars[2].center().y));
+        let _ = app.update(Message::DragMove(bars[1].y));
+        let _ = app.update(Message::DragEnd);
+        assert_eq!(order(&app), vec![ids[2], ids[0], ids[1], ids[3]]);
+        // A plain bar dragged past the stack lands after its last member.
+        let bars = app.strip_layout().bars;
+        let _ = app.update(Message::DragStart(0, bars[0].center().y));
+        let _ = app.update(Message::DragMove(bars[2].y));
+        let _ = app.update(Message::DragEnd);
+        assert_eq!(order(&app), vec![ids[0], ids[1], ids[2], ids[3]]);
     }
 
     #[test]

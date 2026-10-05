@@ -3,6 +3,7 @@ use crate::app::{DragState, Message};
 use crate::note::Note;
 use crate::peek::{draw_peek, note_peek_width, peek_layout, peek_text};
 use crate::settings::BarSettings;
+use crate::strip_model::Entry;
 use crate::theme;
 
 use iced::advanced::layout::{self, Layout};
@@ -222,10 +223,12 @@ pub fn compute_layout(
 
 pub struct BarStrip<'a> {
     pub notes: &'a [Note],
+    /// One bar per entry; bar indices below are entry indices.
+    pub entries: &'a [Entry],
     pub magnification: &'a MagnificationState,
     pub drag: &'a Option<DragState>,
     pub scroll_offset: f32,
-    /// Bar index being peeked and the peek's progress (0..=1).
+    /// Bar being peeked and the peek's progress (0..=1).
     pub peek: Option<(usize, f32)>,
     pub bars: &'a BarSettings,
     /// Share of the widget height the bars may use (centered).
@@ -238,20 +241,26 @@ pub struct BarStrip<'a> {
     /// The open peek asks whether to delete its note.
     pub peek_confirm: bool,
     pub theme: theme::Theme,
-    /// Index of the open (or opening) note's bar and the note's morph
+    /// The bar holding the open (or opening) note and the note's morph
     /// progress.
     pub open: Option<(usize, f32)>,
-    /// Bar index of a deleted note and how far its bar has collapsed.
+    /// Bar of a deleted note and how far it has collapsed.
     pub collapse: Option<(usize, f32)>,
-    /// Bars to draw faded, by index: notes that don't match the search.
+    /// Bars to draw faded, by index: entries none of whose notes match the
+    /// search.
     /// Empty when nothing is dimmed.
     pub dimmed: Vec<bool>,
 }
 
 impl<'a> BarStrip<'a> {
+    /// The note bar `i` shows: its entry's top.
+    fn note(&self, i: usize) -> Option<&'a Note> {
+        self.notes.get(self.entries.get(i)?.top)
+    }
+
     fn layout_in(&self, bounds: Rectangle) -> StripLayout {
         compute_layout(
-            self.notes.len(),
+            self.entries.len(),
             |i| self.magnification.scale(i),
             band(bounds, self.height_fraction),
             self.scroll_offset,
@@ -261,11 +270,11 @@ impl<'a> BarStrip<'a> {
         )
     }
 
-    /// Index of the note whose open peek is under `pos`, if any.
+    /// Bar whose open peek is under `pos`, if any.
     fn peek_hit(&self, bounds: Rectangle, pos: Point) -> Option<usize> {
         let (i, _) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
-        let note = self.notes.get(i)?;
+        let note = self.note(i)?;
         peek_target(
             bar,
             bounds,
@@ -297,7 +306,7 @@ impl<'a> BarStrip<'a> {
         let i = self.peek_hit(bounds, pos)?;
         let (_, progress) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
-        let note = self.notes.get(i)?;
+        let note = self.note(i)?;
         let width = note_peek_width(note, self.default_note_width, bar);
         let parts = peek_layout(
             bar,
@@ -379,7 +388,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         for (i, bar_rect) in bars.iter().enumerate() {
             if let Some((peek_index, progress)) = self.peek {
                 if peek_index == i && progress > 0.0 {
-                    if let Some(note) = self.notes.get(i) {
+                    if let Some(note) = self.note(i) {
                         draw_peek(
                             renderer,
                             note,
@@ -397,7 +406,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     continue;
                 }
             }
-            if let Some(note) = self.notes.get(i) {
+            if let Some(note) = self.note(i) {
                 let dim = if self.dimmed.get(i).copied().unwrap_or(false) {
                     DIM_ALPHA
                 } else {
@@ -465,7 +474,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         // hollow outlines the size of a note bar; magnified they fill in and
         // show their glyph.
         let idle = self.drag.is_none();
-        let count = self.notes.len();
+        let count = self.entries.len();
         let add_reveal = Self::reveal(self.magnification.scale(count));
         let add = strip.add_button;
         draw_slot(
@@ -571,7 +580,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
 
         if let Some(drag) = &self.drag {
             if drag_active {
-                if let Some(note) = self.notes.get(drag.bar_index) {
+                if let Some(note) = self.note(drag.bar_index) {
                     let scale = self.magnification.scale(drag.bar_index);
                     let w = self.bars.width * scale;
                     let h = self.bars.height * scale;
@@ -980,11 +989,13 @@ mod tests {
     #[test]
     fn narrow_window_peek_target_keeps_minimum_width() {
         let notes = [crate::note::Note::new(crate::note::PALETTE[0])];
+        let entries = crate::strip_model::entries(&notes);
         let magnification = MagnificationState::new();
         let drag = None;
         let bars = BarSettings::default();
         let strip = BarStrip {
             notes: &notes,
+            entries: &entries,
             magnification: &magnification,
             drag: &drag,
             scroll_offset: 0.0,
@@ -1013,11 +1024,13 @@ mod tests {
     #[test]
     fn peek_hit_covers_open_peek_only() {
         let notes = [crate::note::Note::new(crate::note::PALETTE[0])];
+        let entries = crate::strip_model::entries(&notes);
         let magnification = MagnificationState::new();
         let drag = None;
         let bars = BarSettings::default();
         let strip = |peek| BarStrip {
             notes: &notes,
+            entries: &entries,
             magnification: &magnification,
             drag: &drag,
             scroll_offset: 0.0,
@@ -1047,11 +1060,13 @@ mod tests {
             crate::note::Note::new(crate::note::PALETTE[0]),
             crate::note::Note::new(crate::note::PALETTE[1]),
         ];
+        let entries = crate::strip_model::entries(&notes);
         let magnification = MagnificationState::new();
         let drag = None;
         let bars = BarSettings::default();
         let strip = |peek| BarStrip {
             notes: &notes,
+            entries: &entries,
             magnification: &magnification,
             drag: &drag,
             scroll_offset: 0.0,
