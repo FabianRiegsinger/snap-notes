@@ -9,15 +9,14 @@ pub const MAX_RESULTS: usize = 50;
 const CONTEXT_CHARS: usize = 30;
 const FALLBACK_CHARS: usize = 60;
 
-#[allow(dead_code)] // used from Task 7
 pub struct Hit {
     pub note_id: Uuid,
     pub title: String,
     pub snippet: String,
     /// Byte range of the match inside `snippet`; empty for title-only hits.
     pub highlight: Range<usize>,
-    /// Byte offset of the first match in the note's content.
-    pub body_match: Option<usize>,
+    /// Byte range of the first match in the note's content.
+    pub body_match: Option<Range<usize>>,
 }
 
 /// Lowercased text plus, for every folded byte, the byte range of the
@@ -53,17 +52,34 @@ fn find_in(source: &str, needle: &str) -> Option<Range<usize>> {
     Some(folded.starts[at]..folded.ends[last])
 }
 
-#[allow(dead_code)] // used from Task 7
-pub fn find(notes: &[Note], query: &str) -> Vec<Hit> {
+/// The folded query, or `None` when it is blank (S3).
+fn needle(query: &str) -> Option<String> {
     let query = query.trim();
-    if query.is_empty() {
+    (!query.is_empty()).then(|| fold(query).text)
+}
+
+pub fn find(notes: &[Note], query: &str) -> Vec<Hit> {
+    let Some(needle) = needle(query) else {
         return Vec::new();
-    }
-    let needle = fold(query).text;
+    };
     notes
         .iter()
         .filter_map(|note| hit(note, &needle))
         .take(MAX_RESULTS)
+        .collect()
+}
+
+/// Per note, whether it matches `query`, without the result cap. All false
+/// for a blank query.
+pub fn matching(notes: &[Note], query: &str) -> Vec<bool> {
+    let needle = needle(query);
+    notes
+        .iter()
+        .map(|note| {
+            needle.as_deref().is_some_and(|needle| {
+                find_in(&note.content, needle).is_some() || find_in(&note.title, needle).is_some()
+            })
+        })
         .collect()
 }
 
@@ -75,7 +91,7 @@ fn hit(note: &Note, needle: &str) -> Option<Hit> {
             title: note.title.clone(),
             snippet,
             highlight,
-            body_match: Some(range.start),
+            body_match: Some(range),
         });
     }
     find_in(&note.title, needle)?;
@@ -173,7 +189,7 @@ mod tests {
         assert!(hit.snippet.starts_with('…'));
         assert!(hit.snippet.ends_with('…'));
         assert_eq!(&hit.snippet[hit.highlight.clone()], "NeedLe");
-        assert_eq!(hit.body_match, Some(100));
+        assert_eq!(hit.body_match, Some(100..106));
         assert_eq!(hit.snippet.chars().count(), 1 + 30 + 6 + 30 + 1);
     }
 
@@ -206,9 +222,21 @@ mod tests {
         let content = "İstanbul and Ünal";
         let hits = find(&[note("t", content)], "ünal");
         assert_eq!(hits.len(), 1);
-        let at = hits[0].body_match.unwrap();
-        assert!(content[at..].starts_with('Ü'));
+        let at = hits[0].body_match.clone().unwrap();
+        assert_eq!(&content[at], "Ünal");
         assert_eq!(&hits[0].snippet[hits[0].highlight.clone()], "Ünal");
         assert_eq!(find(&[note("t", content)], "i̇stanbul").len(), 1);
+    }
+
+    #[test]
+    fn matching_is_uncapped_and_covers_titles() {
+        let mut notes: Vec<Note> = (0..60).map(|_| note("", "hit")).collect();
+        notes.push(note("Hit title", ""));
+        notes.push(note("x", "y"));
+        let m = matching(&notes, "HIT");
+        assert_eq!(m.len(), 62);
+        assert!(m[..61].iter().all(|&b| b));
+        assert!(!m[61]);
+        assert!(matching(&notes, " ").iter().all(|&b| !b));
     }
 }

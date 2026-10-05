@@ -19,6 +19,7 @@ mod rich;
 mod rich_highlight;
 mod rich_view;
 mod search;
+mod search_panel;
 mod settings;
 mod settings_panel;
 mod store;

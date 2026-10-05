@@ -11,6 +11,8 @@ use crate::platform::{self, SUPPORTS_PASSTHROUGH};
 use crate::resize::{resize_frame, resized, Edges, MIN_SIZE};
 use crate::rich::{self, BlockKind, Doc};
 use crate::rich_view;
+use crate::search::{self, Hit};
+use crate::search_panel::{focus_field, search_panel, SearchView};
 use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore};
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::NoteStore;
@@ -51,6 +53,13 @@ pub enum Message {
     AddNote,
     ToggleSettings,
     CloseSettings,
+    /// Cmd/Ctrl+F, the strip's search slot or the tray item.
+    ToggleSearch,
+    SearchChanged(String),
+    SearchResultPicked(Uuid),
+    /// The panel's close button, a click beside it, or an Esc the focused
+    /// search field took (it only drops its focus on Esc).
+    CloseSearch,
     SettingChanged(SettingKey, f32),
     // Only the macOS/Windows settings panel shows these toggles.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
@@ -242,6 +251,15 @@ pub struct App {
     /// Gear center when the panel opened; the panel stays centered on it.
     settings_anchor_y: f32,
     palette_slot: Option<usize>,
+    /// The search panel is showing (kept while it folds back into its slot).
+    search_open: bool,
+    search_morph: Morph,
+    /// Search slot center when the panel opened.
+    search_anchor_y: f32,
+    search_query: String,
+    /// Keyboard focus to give once the panel or note showing it has
+    /// faded its content in (the widget doesn't exist before).
+    pending_focus: Option<PendingFocus>,
     /// The menu bar / tray icon exists.
     tray_ok: bool,
     /// The tray icon could not be created, so the Dock icon is shown this
@@ -250,6 +268,12 @@ pub struct App {
     /// Switching the Dock / taskbar icon briefly takes focus away from the
     /// window; until then losing focus doesn't close the note or settings.
     keep_open_until: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PendingFocus {
+    SearchField,
+    Body,
 }
 
 /// Clicks counted from a press on the rendered note.
@@ -333,6 +357,7 @@ impl App {
         let morph = Morph::new(s.motion.speed);
         let peek = Morph::peek(s.motion.speed);
         let settings_morph = Morph::new(s.motion.speed);
+        let search_morph = Morph::new(s.motion.speed);
         let mode_fade = Self::settled_fade(s.motion.speed);
         let window_size = Size::new(Self::docked_width(s, false), 600.0);
         let data_dir = store.dir().to_path_buf();
@@ -382,6 +407,11 @@ impl App {
             settings_morph,
             settings_anchor_y: 0.0,
             palette_slot: None,
+            search_open: false,
+            search_morph,
+            search_anchor_y: 0.0,
+            search_query: String::new(),
+            pending_focus: None,
             tray_ok: false,
             tray_failed: false,
             keep_open_until: None,
@@ -424,6 +454,7 @@ impl App {
                     return Task::none();
                 }
                 let close_note = self.update(Message::ClosePanel);
+                self.close_search();
                 self.hide_peek();
                 let gear = self.strip_layout().settings_anchor();
                 self.settings_anchor_y = gear.y + gear.height / 2.0;
@@ -439,6 +470,10 @@ impl App {
                     self.animating = true;
                 }
             }
+            Message::ToggleSearch => return self.toggle_search(),
+            Message::SearchChanged(query) => self.search_query = query,
+            Message::SearchResultPicked(id) => return self.pick_result(id),
+            Message::CloseSearch => self.close_search(),
             Message::SettingChanged(key, value) => {
                 self.settings.settings_mut().set(key, value);
                 return self.apply_settings();
@@ -722,6 +757,7 @@ impl App {
                 let morph_active = self.morph.tick(dt)
                     | self.peek.tick(dt)
                     | self.settings_morph.tick(dt)
+                    | self.search_morph.tick(dt)
                     | self.mode_fade.tick(dt);
                 let collapse_active = self.collapsing.as_mut().is_some_and(|(_, m)| m.tick(dt));
                 if self.collapsing.is_some() && !collapse_active {
@@ -735,6 +771,10 @@ impl App {
                     self.settings_open = false;
                     self.palette_slot = None;
                 }
+                let search_closed = self.search_open && self.search_morph.is_closed();
+                if search_closed {
+                    self.search_open = false;
+                }
                 if self
                     .copied_at
                     .is_some_and(|(_, t)| now.saturating_duration_since(t) >= COPIED_FOR)
@@ -747,13 +787,15 @@ impl App {
                     self.last_tick = None;
                 }
 
+                let focus = self.take_pending_focus();
                 if self.active_note.is_some() && self.morph.is_closed() {
-                    return self.finish_close();
+                    return Task::batch([focus, self.finish_close()]);
                 }
-                if settings_closed {
+                if settings_closed || search_closed {
                     // Without passthrough the window shrinks back to the strip.
-                    return self.dock_window();
+                    return Task::batch([focus, self.dock_window()]);
                 }
+                return focus;
             }
             Message::SaveTick => {
                 if self.store.should_save() {
@@ -879,6 +921,7 @@ impl App {
                 self.visible = !self.visible;
                 let mut tasks = Vec::new();
                 if !self.visible {
+                    self.close_search();
                     tasks.push(self.update(Message::CloseSettings));
                     tasks.push(self.update(Message::ClosePanel));
                     self.hide_peek();
@@ -904,13 +947,22 @@ impl App {
                     return Task::none();
                 };
                 let mut tasks = Vec::new();
-                // Adding a note or opening settings needs the notes on screen.
+                // Adding a note or opening a panel needs the notes on screen.
                 let settings_showing = self.settings_open && self.settings_morph.is_opening();
-                if matches!(message, Message::ToggleSettings) && settings_showing {
-                    // The menu item opens settings; it never closes them.
+                let search_showing = self.search_open && self.search_morph.is_opening();
+                let showing = match message {
+                    Message::ToggleSettings => settings_showing,
+                    Message::ToggleSearch => search_showing,
+                    _ => false,
+                };
+                if showing {
+                    // The menu items open their panel; they never close it.
                     return Task::none();
                 }
-                let needs_notes = matches!(message, Message::AddNote | Message::ToggleSettings);
+                let needs_notes = matches!(
+                    message,
+                    Message::AddNote | Message::ToggleSettings | Message::ToggleSearch
+                );
                 if needs_notes && !self.visible {
                     tasks.push(self.update(Message::ToggleVisibility));
                 }
@@ -947,6 +999,9 @@ impl App {
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 use keyboard::key::Named;
                 match key.as_ref() {
+                    keyboard::Key::Named(Named::Escape) if self.search_morph.is_opening() => {
+                        self.close_search()
+                    }
                     keyboard::Key::Named(Named::Escape) if self.settings_open => {
                         return self.update(Message::CloseSettings)
                     }
@@ -959,6 +1014,9 @@ impl App {
                     }
                     keyboard::Key::Character("n") if modifiers.command() => {
                         return self.update(Message::AddNote)
+                    }
+                    keyboard::Key::Character("f") if modifiers.command() => {
+                        return self.toggle_search()
                     }
                     // In edit mode the body editor's own key binding handles
                     // undo/redo; the title field ignores them, so skip it here.
@@ -1012,7 +1070,8 @@ impl App {
                 if self.keep_open_until.is_some_and(|t| Instant::now() < t) => {}
             Message::WindowUnfocused => {
                 // Clicking another app (through the passthrough area) closes
-                // the note and the settings.
+                // the note and the panels.
+                self.close_search();
                 let close_settings = self.update(Message::CloseSettings);
                 return Task::batch([close_settings, self.update(Message::ClosePanel)]);
             }
@@ -1054,6 +1113,7 @@ impl App {
                 .and_then(|id| self.store.notes().iter().position(|n| n.id == id))
                 .map(|index| (index, self.morph.progress())),
             collapse: self.collapse(),
+            dimmed: self.dimmed_bars(),
         })
         .width(Fill)
         .height(Fill)
@@ -1127,6 +1187,26 @@ impl App {
             }
         }
 
+        if let Some(frame) = self.search_frame() {
+            let rect = frame.rect;
+            if rect.width >= 1.0 && rect.height >= 1.0 {
+                layers.push(
+                    mouse_area(Space::new().width(Fill).height(Fill))
+                        .on_press(Message::CloseSearch)
+                        .into(),
+                );
+                let panel = search_panel(SearchView {
+                    theme: self.theme,
+                    query: &self.search_query,
+                    hits: self.search_hits(),
+                    size: rect.size(),
+                    morph_progress: self.search_morph.progress(),
+                    content_alpha: frame.content_alpha,
+                });
+                layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
+            }
+        }
+
         layers.push(strip.into());
         stack(layers).width(Fill).height(Fill).into()
     }
@@ -1135,7 +1215,11 @@ impl App {
         let save = iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveTick);
         let resized = window::resize_events().map(|(_id, size)| Message::WindowResized(size));
         let keys = keyboard::listen().map(Message::Key);
-        let pointer = event::listen_with(|event, _status, _id| match event {
+        let pointer = event::listen_with(|event, status, _id| match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                ..
+            }) if status == event::Status::Captured => Some(Message::CloseSearch),
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 Some(Message::CursorMoved(position))
             }
@@ -1189,10 +1273,11 @@ impl App {
         self.rendered_click = None;
         self.editing = note.content.trim().is_empty();
         self.hide_peek();
-        // A note and the settings never show at the same time.
+        // A note and the panels never show at the same time.
         if self.settings_open {
             self.settings_morph.close();
         }
+        self.close_search();
         self.active_note = Some(id);
         self.reparse();
         self.pending_delete = None;
@@ -1535,7 +1620,7 @@ impl App {
             Size::new(
                 Self::docked_width(
                     self.settings.settings(),
-                    self.active_note.is_some() || self.settings_open,
+                    self.active_note.is_some() || self.settings_open || self.search_open,
                 ),
                 (monitor.height * self.settings.settings().window.height_fraction).round(),
             )
@@ -1571,6 +1656,7 @@ impl App {
             || over_peek
             || over_panel(self.note_frame())
             || over_panel(self.settings_frame())
+            || over_panel(self.search_frame())
     }
 
     /// Whether `id`'s copy button still shows its check.
@@ -1647,7 +1733,7 @@ impl App {
     /// moving to another bar while a peek is showing peeks it right away.
     fn update_hover(&mut self) {
         let hovered = match (self.cursor_y, self.active_note, &self.drag) {
-            (Some(y), None, None) if !self.settings_open => {
+            (Some(y), None, None) if !self.settings_open && !self.search_open => {
                 let strip = self.strip_layout();
                 strip
                     .bars
@@ -1714,12 +1800,27 @@ impl App {
             return None;
         }
         let source = self.strip_layout().settings_anchor();
+        Some(self.panel_frame(source, self.settings_anchor_y, &self.settings_morph))
+    }
+
+    /// The search panel's current frame, morphing out of the search slot.
+    fn search_frame(&self) -> Option<MorphFrame> {
+        if !self.search_open {
+            return None;
+        }
+        let source = self.strip_layout().search_button;
+        Some(self.panel_frame(source, self.search_anchor_y, &self.search_morph))
+    }
+
+    /// A panel's frame on its way from the strip slot `source` to its place
+    /// left of the strip, centered on `anchor_y` where it fits.
+    fn panel_frame(&self, source: Rectangle, anchor_y: f32, morph: &Morph) -> MorphFrame {
         let height = (self.window_size.height - 2.0 * NOTE_MARGIN).min(PANEL_MAX_HEIGHT);
         let right = self.window_size.width - STRIP_WIDTH - NOTE_GAP;
         let min_center = NOTE_MARGIN + height / 2.0;
         let max_center = self.window_size.height - NOTE_MARGIN - height / 2.0;
         let center_y = if max_center > min_center {
-            self.settings_anchor_y.clamp(min_center, max_center)
+            anchor_y.clamp(min_center, max_center)
         } else {
             self.window_size.height / 2.0
         };
@@ -1727,7 +1828,122 @@ impl App {
             Point::new(right - PANEL_WIDTH, center_y - height / 2.0),
             Size::new(PANEL_WIDTH, height),
         );
-        Some(morph_frame(source, target, self.settings_morph.progress()))
+        morph_frame(source, target, morph.progress())
+    }
+
+    /// Opens the search panel, or closes it while it is showing. It closes
+    /// the note and the settings, and starts with an empty query.
+    fn toggle_search(&mut self) -> Task<Message> {
+        if self.search_open && self.search_morph.is_opening() {
+            self.close_search();
+            return Task::none();
+        }
+        self.pending_focus = Some(PendingFocus::SearchField);
+        self.animating = true;
+        if self.search_open {
+            // Still folding away: unfold again from where it is.
+            self.search_morph.open();
+            return focus_field();
+        }
+        let close_note = self.update(Message::ClosePanel);
+        let close_settings = self.update(Message::CloseSettings);
+        self.hide_peek();
+        let slot = self.strip_layout().search_button;
+        self.search_anchor_y = slot.y + slot.height / 2.0;
+        self.search_open = true;
+        self.search_query.clear();
+        self.search_morph.open();
+        Task::batch([close_note, close_settings, self.dock_window()])
+    }
+
+    /// Folds the search panel back into its slot (if it is showing).
+    fn close_search(&mut self) {
+        if self.search_open {
+            self.search_morph.close();
+            self.animating = true;
+        }
+        if self.pending_focus == Some(PendingFocus::SearchField) {
+            self.pending_focus = None;
+        }
+    }
+
+    /// Opens the picked note in edit mode with its first body match
+    /// selected, or the cursor at the start of the body for a title-only
+    /// match, and closes the search.
+    fn pick_result(&mut self, id: Uuid) -> Task<Message> {
+        let Some(index) = self.store.notes().iter().position(|n| n.id == id) else {
+            return Task::none();
+        };
+        let matched = self
+            .search_hits()
+            .into_iter()
+            .find(|hit| hit.note_id == id)
+            .and_then(|hit| hit.body_match);
+        self.close_search();
+        // `open_note` would fold a note that is already open.
+        let open = if self.active_note == Some(id) && self.morph.is_opening() {
+            Task::none()
+        } else {
+            self.open_note(index)
+        };
+        let (true, Some(content)) = (self.active_note == Some(id), &mut self.editor_content) else {
+            return open;
+        };
+        let text = content.text();
+        let position = |offset| {
+            let (line, column) = rich::position_of(&text, offset);
+            text_editor::Position { line, column }
+        };
+        let (head, anchor) = match matched {
+            Some(range) => (range.end, Some(range.start)),
+            None => (0, None),
+        };
+        content.move_to(text_editor::Cursor {
+            position: position(head),
+            selection: anchor.map(position),
+        });
+        self.editing = true;
+        self.history.break_step();
+        self.rendered_click = None;
+        self.pending_focus = Some(PendingFocus::Body);
+        Task::batch([open, focus_body()])
+    }
+
+    /// The focus waiting for its widget, once the widget is drawn.
+    fn take_pending_focus(&mut self) -> Task<Message> {
+        let shown = |frame: Option<MorphFrame>| frame.is_some_and(|f| f.content_alpha >= 0.01);
+        match self.pending_focus {
+            Some(PendingFocus::SearchField) if shown(self.search_frame()) => {
+                self.pending_focus = None;
+                focus_field()
+            }
+            Some(PendingFocus::Body) if !self.editing || self.active_note.is_none() => {
+                self.pending_focus = None;
+                Task::none()
+            }
+            Some(PendingFocus::Body) if shown(self.note_frame()) => {
+                self.pending_focus = None;
+                focus_body()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// Search results for the current query, for the panel.
+    fn search_hits(&self) -> Vec<Hit> {
+        search::find(self.store.notes(), &self.search_query)
+    }
+
+    /// Bars to dim, by index: while the search is open with a query, the
+    /// notes that don't match it. Empty otherwise.
+    fn dimmed_bars(&self) -> Vec<bool> {
+        if !self.search_open || self.search_query.trim().is_empty() {
+            return Vec::new();
+        }
+        search::matching(self.store.notes(), &self.search_query)
+            .into_iter()
+            .map(|matched| !matched)
+            .collect()
     }
 
     fn note_frame(&self) -> Option<MorphFrame> {
@@ -1844,14 +2060,15 @@ impl App {
         )
     }
 
-    /// Bar centers plus the add and settings buttons', which magnify along with them.
+    /// Bar centers plus the add, search and settings buttons', which
+    /// magnify along with them.
     fn magnification_centers(&self) -> Vec<f32> {
         let strip = self.strip_layout();
         strip
             .bars
             .iter()
             .copied()
-            .chain([strip.add_button])
+            .chain([strip.add_button, strip.search_button])
             .chain(strip.settings_button)
             .map(|r| r.y + r.height / 2.0)
             .collect()
@@ -2891,6 +3108,202 @@ mod tests {
         settle(&mut app);
         let _ = app.update(Message::TrayMenu("settings".into()));
         assert!(app.settings_open && app.settings_morph.is_opening());
+    }
+
+    fn cmd_f() -> Message {
+        use keyboard::key::{NativeCode, Physical};
+        let key = keyboard::Key::Character("f".into());
+        Message::Key(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: Physical::Unidentified(NativeCode::Unidentified),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::COMMAND,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    /// An app with docked notes holding these (title, content) pairs.
+    fn app_with_notes(dir: &tempfile::TempDir, notes: &[(&str, &str)]) -> (App, Vec<Uuid>) {
+        let mut app = app_in(dir);
+        let ids = notes
+            .iter()
+            .map(|(title, content)| {
+                let id = app.store.add_note(&crate::note::PALETTE);
+                let note = app.store.note_mut(id).unwrap();
+                note.title = (*title).into();
+                note.content = (*content).into();
+                id
+            })
+            .collect();
+        app.store.did_save();
+        app.window_size = Size::new(1400.0, 900.0);
+        (app, ids)
+    }
+
+    fn search_showing(app: &App) -> bool {
+        app.search_open && app.search_morph.is_opening()
+    }
+
+    #[test]
+    fn cmd_f_opens_search_and_closes_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::ToggleSettings);
+        settle(&mut app);
+        let _ = app.update(cmd_f());
+        assert!(search_showing(&app));
+        assert!(!app.settings_morph.is_opening());
+        settle(&mut app);
+        assert!(!app.settings_open);
+        // Settings close the search the same way.
+        let _ = app.update(Message::ToggleSettings);
+        assert!(!app.search_morph.is_opening());
+        assert!(app.settings_morph.is_opening());
+        // Cmd+F again toggles it.
+        let _ = app.update(cmd_f());
+        let _ = app.update(cmd_f());
+        assert!(!app.search_morph.is_opening());
+    }
+
+    #[test]
+    fn typing_filters_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(
+            &dir,
+            &[
+                ("Groceries", "milk"),
+                ("Work", "call Milan"),
+                ("Other", "x"),
+            ],
+        );
+        let _ = app.update(Message::ToggleSearch);
+        assert!(app.search_hits().is_empty());
+        let _ = app.update(Message::SearchChanged("MIL".into()));
+        let hits: Vec<Uuid> = app.search_hits().iter().map(|h| h.note_id).collect();
+        assert_eq!(hits, vec![ids[0], ids[1]]);
+        let _ = app.update(Message::SearchChanged("groc".into()));
+        let hits: Vec<Uuid> = app.search_hits().iter().map(|h| h.note_id).collect();
+        assert_eq!(hits, vec![ids[0]]);
+    }
+
+    #[test]
+    fn picking_a_result_opens_note_with_match_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("t", "first line\nsay Café now")]);
+        let _ = app.update(Message::ToggleSearch);
+        let _ = app.update(Message::SearchChanged("café".into()));
+        let _ = app.update(Message::SearchResultPicked(ids[0]));
+        assert_eq!(app.active_note, Some(ids[0]));
+        assert!(app.editing);
+        assert!(!app.search_morph.is_opening());
+        assert_eq!(selected(&app).as_deref(), Some("Café"));
+        let cursor = app.editor_content.as_ref().unwrap().cursor();
+        assert_eq!(
+            (cursor.position.line, cursor.position.column),
+            (1, "say Café".len())
+        );
+        settle(&mut app);
+        assert!(!app.search_open);
+        assert_eq!(selected(&app).as_deref(), Some("Café"));
+
+        // A title-only match puts the cursor at the start of the body.
+        let (mut app, ids) = app_with_notes(&dir, &[("Plan", "a\nb")]);
+        let _ = app.update(Message::ToggleSearch);
+        let _ = app.update(Message::SearchChanged("plan".into()));
+        let _ = app.update(Message::SearchResultPicked(ids[0]));
+        assert!(app.editing);
+        assert_eq!(selected(&app), None);
+        let at = cursor_of(&app);
+        assert_eq!((at.line, at.column), (0, 0));
+    }
+
+    #[test]
+    fn picking_a_result_switches_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "alpha"), ("b", "beta needle")]);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        let _ = app.update(cmd_f());
+        // Opening the search folds the open note; pick while it folds.
+        assert!(!app.morph.is_opening());
+        let _ = app.update(Message::SearchChanged("needle".into()));
+        let _ = app.update(Message::SearchResultPicked(ids[1]));
+        assert_eq!(app.active_note, Some(ids[1]));
+        assert!(app.morph.is_opening());
+        let text = app.editor_content.as_ref().unwrap().text();
+        assert_eq!(text.trim_end(), "beta needle");
+        assert_eq!(selected(&app).as_deref(), Some("needle"));
+        settle(&mut app);
+        assert_eq!(app.active_note, Some(ids[1]));
+        assert_eq!(selected(&app).as_deref(), Some("needle"));
+        assert!(!app.search_open);
+    }
+
+    #[test]
+    fn escape_closes_search_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::ToggleSearch);
+        settle(&mut app);
+        let _ = app.update(escape());
+        assert!(!app.search_morph.is_opening());
+        settle(&mut app);
+        assert!(!app.search_open);
+
+        // Esc swallowed by the focused search field closes it too.
+        let _ = app.update(Message::ToggleSearch);
+        settle(&mut app);
+        let _ = app.update(Message::CloseSearch);
+        assert!(!app.search_morph.is_opening());
+        // Without the search open a captured Esc does nothing.
+        let (mut app, _) = app_with_notes(&dir, &[("a", "b")]);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        let _ = app.update(Message::CloseSearch);
+        assert!(app.morph.is_opening());
+    }
+
+    #[test]
+    fn tray_search_item_opens_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::ToggleVisibility);
+        assert!(!app.visible);
+        let _ = app.update(Message::TrayMenu("search".into()));
+        assert!(app.visible);
+        assert!(search_showing(&app));
+        settle(&mut app);
+        // The menu item opens the search; it never closes it.
+        let _ = app.update(Message::TrayMenu("search".into()));
+        assert!(search_showing(&app));
+    }
+
+    #[test]
+    fn non_matching_bars_dim() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "red"), ("b", "blue"), ("Red", "")]);
+        let _ = app.update(Message::SearchChanged("red".into()));
+        // Nothing dims while the panel is closed.
+        assert!(app.dimmed_bars().is_empty());
+        let _ = app.update(Message::ToggleSearch);
+        assert!(app.dimmed_bars().iter().all(|d| !d));
+        let _ = app.update(Message::SearchChanged("red".into()));
+        assert_eq!(app.dimmed_bars(), vec![false, true, false]);
+        let _ = app.update(Message::SearchChanged("  ".into()));
+        assert!(app.dimmed_bars().iter().all(|d| !d));
+    }
+
+    #[test]
+    fn search_suppresses_the_hover_peek() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        let _ = app.update(Message::ToggleSearch);
+        assert!(app.peek_note.is_none());
+        let bar = app.strip_layout().bars[0];
+        let _ = app.update(Message::StripHover(Some(bar.center().y)));
+        assert_eq!(app.hover_bar, None);
     }
 
     #[test]

@@ -26,6 +26,8 @@ const EDGE_PADDING: f32 = 16.0;
 const CORNER_RADIUS: f32 = theme::RADIUS_BAR;
 /// The open note's bar is this much wider than a docked one.
 const OPEN_BAR_SCALE: f32 = 1.5;
+/// Opacity factor for bars of notes that don't match the search.
+const DIM_ALPHA: f32 = 0.3;
 
 /// The bar's rectangle: the open note's bar grows to the left from its right
 /// edge as the note unfolds (`progress` 0 is docked, 1 fully open).
@@ -43,7 +45,10 @@ pub struct StripLayout {
     pub add_button: Rectangle,
     /// Generous click target for the add button: the full strip width around it.
     pub add_hit_area: Rectangle,
-    /// Settings slot below the add button, drawn and magnified like it.
+    /// Search slot below the add button, drawn and magnified like it.
+    pub search_button: Rectangle,
+    pub search_hit_area: Rectangle,
+    /// Settings slot below the search slot, drawn and magnified like it.
     /// Only where there is no tray menu to open settings from.
     pub settings_button: Option<Rectangle>,
     pub settings_hit_area: Option<Rectangle>,
@@ -59,8 +64,21 @@ impl StripLayout {
 
     /// Bottom edge of the lowest hit area.
     pub fn hit_bottom(&self) -> f32 {
-        let area = self.settings_hit_area.unwrap_or(self.add_hit_area);
+        let area = self.settings_hit_area.unwrap_or(self.search_hit_area);
         area.y + area.height
+    }
+
+    /// What a press at `pos` on one of the slots below the bars does.
+    pub fn slot_message(&self, pos: Point) -> Option<Message> {
+        if self.add_hit_area.contains(pos) {
+            Some(Message::AddNote)
+        } else if self.search_hit_area.contains(pos) {
+            Some(Message::ToggleSearch)
+        } else if self.settings_hit_area.is_some_and(|hit| hit.contains(pos)) {
+            Some(Message::ToggleSettings)
+        } else {
+            None
+        }
     }
 }
 
@@ -76,7 +94,7 @@ pub fn band(bounds: Rectangle, fraction: f32) -> Rectangle {
     )
 }
 
-/// Size of a slot (add or settings button) at magnification `scale`: it
+/// Size of a slot (add, search or settings button) at magnification `scale`: it
 /// widens like a bar but its height grows less, so it stays compact.
 fn slot_size(bars: &BarSettings, scale: f32) -> Size {
     Size::new(
@@ -85,13 +103,14 @@ fn slot_size(bars: &BarSettings, scale: f32) -> Size {
     )
 }
 
-/// Lays out the bars plus the add and settings slots as one stack, centered
+/// Lays out the bars plus the add, search and settings slots as one stack, centered
 /// vertically in `bounds`. Centering on the *current* (magnified) height keeps
 /// the hovered bar roughly in place while its neighbours grow. If the stack is
 /// taller than the bounds, it is top-aligned and scrolled by `scroll_offset`.
 ///
 /// `scale(count)` is the add button's magnification, `scale(count + 1)` the
-/// settings button's (if `settings_slot`).
+/// search button's and `scale(count + 2)` the settings button's (if
+/// `settings_slot`).
 ///
 /// `collapse` is a deleted bar's index and how far it has collapsed (0..=1):
 /// its height and one gap next to it shrink by that share.
@@ -125,13 +144,15 @@ pub fn compute_layout(
     let bars_height: f32 = heights.iter().sum::<f32>() + gaps.iter().sum::<f32>();
     let add_gap = if count > 0 { ADD_BUTTON_GAP } else { 0.0 };
     let add_size = slot_size(bars_settings, scale(count));
-    let gear_size = slot_size(bars_settings, scale(count + 1));
+    let search_size = slot_size(bars_settings, scale(count + 1));
+    let gear_size = slot_size(bars_settings, scale(count + 2));
     let gear_height = if settings_slot {
         gap + gear_size.height
     } else {
         0.0
     };
-    let content_height = bars_height + add_gap + add_size.height + gear_height;
+    let content_height =
+        bars_height + add_gap + add_size.height + gap + search_size.height + gear_height;
 
     let available = bounds.height - 2.0 * EDGE_PADDING;
     let (mut y, max_scroll) = if content_height <= available {
@@ -154,24 +175,32 @@ pub fn compute_layout(
 
     let add_button = Rectangle::new(Point::new(right - add_size.width, y), add_size);
     let add_top = y - add_gap / 2.0;
-    let gear_y = y + add_size.height + gap;
-    // With a gear slot the two hit areas meet halfway between the slots.
-    let add_bottom = if settings_slot {
-        gear_y - gap / 2.0
-    } else {
-        y + add_size.height + EDGE_PADDING
-    };
+    let search_y = y + add_size.height + gap;
+    // Neighbouring hit areas meet halfway between their slots.
+    let add_bottom = search_y - gap / 2.0;
     let add_hit_area = Rectangle::new(
         Point::new(bounds.x, add_top),
         Size::new(bounds.width, add_bottom - add_top),
     );
+    let search_button =
+        Rectangle::new(Point::new(right - search_size.width, search_y), search_size);
+    let gear_y = search_y + search_size.height + gap;
+    let search_bottom = if settings_slot {
+        gear_y - gap / 2.0
+    } else {
+        search_y + search_size.height + EDGE_PADDING
+    };
+    let search_hit_area = Rectangle::new(
+        Point::new(bounds.x, add_bottom),
+        Size::new(bounds.width, search_bottom - add_bottom),
+    );
     let (settings_button, settings_hit_area) = if settings_slot {
         let button = Rectangle::new(Point::new(right - gear_size.width, gear_y), gear_size);
         let hit = Rectangle::new(
-            Point::new(bounds.x, add_bottom),
+            Point::new(bounds.x, search_bottom),
             Size::new(
                 bounds.width,
-                gear_y + gear_size.height + EDGE_PADDING - add_bottom,
+                gear_y + gear_size.height + EDGE_PADDING - search_bottom,
             ),
         );
         (Some(button), Some(hit))
@@ -183,6 +212,8 @@ pub fn compute_layout(
         bars,
         add_button,
         add_hit_area,
+        search_button,
+        search_hit_area,
         settings_button,
         settings_hit_area,
         max_scroll,
@@ -212,6 +243,9 @@ pub struct BarStrip<'a> {
     pub open: Option<(usize, f32)>,
     /// Bar index of a deleted note and how far its bar has collapsed.
     pub collapse: Option<(usize, f32)>,
+    /// Bars to draw faded, by index: notes that don't match the search.
+    /// Empty when nothing is dimmed.
+    pub dimmed: Vec<bool>,
 }
 
 impl<'a> BarStrip<'a> {
@@ -364,11 +398,16 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 }
             }
             if let Some(note) = self.notes.get(i) {
+                let dim = if self.dimmed.get(i).copied().unwrap_or(false) {
+                    DIM_ALPHA
+                } else {
+                    1.0
+                };
                 let alpha = if drag_active && Some(i) == dragging_index {
                     0.3
                 } else {
                     note.color.rgba[3]
-                };
+                } * dim;
                 let open = self.open.filter(|(o, _)| *o == i);
                 let rect = bar_rect_for(open.map_or(0.0, |(_, p)| p), *bar_rect);
                 let corner = CORNER_RADIUS;
@@ -417,12 +456,12 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                         shadow: Default::default(),
                         snap: true,
                     },
-                    self.theme.highlight(),
+                    self.theme.highlight().scale_alpha(dim),
                 );
             }
         }
 
-        // Add and settings buttons: "empty slot" bars. At rest they are
+        // Add, search and settings buttons: "empty slot" bars. At rest they are
         // hollow outlines the size of a note bar; magnified they fill in and
         // show their glyph.
         let idle = self.drag.is_none();
@@ -461,7 +500,48 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             }
         }
 
-        let gear_reveal = Self::reveal(self.magnification.scale(count + 1));
+        let search = strip.search_button;
+        let search_reveal = Self::reveal(self.magnification.scale(count + 1));
+        draw_slot(
+            renderer,
+            search,
+            idle && cursor.is_over(strip.search_hit_area),
+            search_reveal,
+            &self.theme,
+        );
+        if search_reveal > 0.0 {
+            let glyph = search_glyph(search);
+            let color = self.theme.card().scale_alpha(0.95 * search_reveal);
+            renderer::Renderer::fill_quad(
+                renderer,
+                renderer::Quad {
+                    bounds: glyph.ring,
+                    border: iced::Border {
+                        radius: (glyph.ring.width / 2.0).into(),
+                        width: glyph.stroke,
+                        color,
+                    },
+                    shadow: Default::default(),
+                    snap: true,
+                },
+                Color::TRANSPARENT,
+            );
+            renderer::Renderer::fill_quad(
+                renderer,
+                renderer::Quad {
+                    bounds: glyph.handle,
+                    border: iced::Border {
+                        radius: 1.0.into(),
+                        ..Default::default()
+                    },
+                    shadow: Default::default(),
+                    snap: true,
+                },
+                color,
+            );
+        }
+
+        let gear_reveal = Self::reveal(self.magnification.scale(count + 2));
         if let (Some(gear), Some(gear_hit)) = (strip.settings_button, strip.settings_hit_area) {
             draw_slot(
                 renderer,
@@ -581,11 +661,8 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             return;
                         }
                     }
-                    if strip.add_hit_area.contains(pos) {
-                        shell.publish(Message::AddNote);
-                        shell.capture_event();
-                    } else if strip.settings_hit_area.is_some_and(|hit| hit.contains(pos)) {
-                        shell.publish(Message::ToggleSettings);
+                    if let Some(message) = strip.slot_message(pos) {
+                        shell.publish(message);
                         shell.capture_event();
                     }
                 }
@@ -627,8 +704,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             let strip = self.layout_in(layout.bounds());
             if self.peek_hit(layout.bounds(), pos).is_some()
                 || strip.bars.iter().any(|bar| bar.contains(pos))
-                || strip.add_hit_area.contains(pos)
-                || strip.settings_hit_area.is_some_and(|hit| hit.contains(pos))
+                || strip.slot_message(pos).is_some()
             {
                 return mouse::Interaction::Pointer;
             }
@@ -664,6 +740,33 @@ fn settings_glyph(slot: Rectangle) -> Vec<Rectangle> {
         ));
     }
     quads
+}
+
+/// A magnifier inside a slot: a ring and a short handle at its lower right.
+struct SearchGlyph {
+    ring: Rectangle,
+    /// The ring's line width.
+    stroke: f32,
+    handle: Rectangle,
+}
+
+/// The magnifier for `slot`, drawn from quads so it needs no icon font.
+/// Quads can't rotate, so the handle is an axis-aligned square set
+/// diagonally off the ring.
+fn search_glyph(slot: Rectangle) -> SearchGlyph {
+    let size = slot.width.min(slot.height) * 0.6;
+    let stroke = (size * 0.12).clamp(1.0, 2.0);
+    let radius = size * 0.36;
+    let left = slot.x + (slot.width - size) / 2.0;
+    let top = slot.y + (slot.height - size) / 2.0;
+    // The handle overlaps the ring where its diagonal leaves it.
+    let handle = (stroke * 2.0).min(size * 0.3);
+    let at = radius * (1.0 + std::f32::consts::FRAC_1_SQRT_2) - handle * 0.15;
+    SearchGlyph {
+        ring: Rectangle::new(Point::new(left, top), Size::new(2.0 * radius, 2.0 * radius)),
+        stroke,
+        handle: Rectangle::new(Point::new(left + at, top + at), Size::new(handle, handle)),
+    }
 }
 
 /// Where the fully open peek of the note on `bar` sits: the area that
@@ -806,10 +909,10 @@ mod tests {
     #[test]
     fn bars_keep_margin_from_screen_edge() {
         let l = layout(3, |_| 5.0, 900.0, 0.0);
-        for bar in l
-            .bars
-            .iter()
-            .chain([&l.add_button, &l.settings_button.unwrap()])
+        for bar in
+            l.bars
+                .iter()
+                .chain([&l.add_button, &l.search_button, &l.settings_button.unwrap()])
         {
             assert!((STRIP_WIDTH - (bar.x + bar.width) - EDGE_MARGIN).abs() < 0.01);
         }
@@ -894,6 +997,7 @@ mod tests {
             theme: theme::Theme::default(),
             open: None,
             collapse: None,
+            dimmed: Vec::new(),
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -926,6 +1030,7 @@ mod tests {
             theme: theme::Theme::default(),
             open: None,
             collapse: None,
+            dimmed: Vec::new(),
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -959,6 +1064,7 @@ mod tests {
             theme: theme::Theme::default(),
             open: None,
             collapse: None,
+            dimmed: Vec::new(),
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -1004,9 +1110,11 @@ mod tests {
             );
             assert!(l.settings_button.is_none() && l.settings_hit_area.is_none());
             let top = l.bars.first().map_or(l.add_button.y, |b| b.y);
-            let bottom = l.add_button.y + l.add_button.height;
+            let bottom = l.search_button.y + l.search_button.height;
             assert!(((top + bottom) / 2.0 - 450.0).abs() < 0.01, "count {count}");
             assert!(l.add_hit_area.contains(l.add_button.center()));
+            assert!(l.search_hit_area.contains(l.search_button.center()));
+            assert_eq!(l.hit_bottom(), bottom + EDGE_PADDING);
             assert_eq!(l.settings_anchor(), l.add_button);
         }
     }
@@ -1016,9 +1124,10 @@ mod tests {
         for count in [0, 1, 5] {
             let l = layout(count, |_| 1.0, 900.0, 0.0);
             let gear = center(&l.settings_button.unwrap());
-            assert!(l.settings_button.unwrap().y >= l.add_button.y + l.add_button.height);
+            assert!(l.settings_button.unwrap().y >= l.search_button.y + l.search_button.height);
             assert!(l.settings_hit_area.unwrap().contains(gear), "count {count}");
             assert!(!l.add_hit_area.contains(gear), "count {count}");
+            assert!(!l.search_hit_area.contains(gear), "count {count}");
             assert!(l.add_hit_area.contains(center(&l.add_button)));
         }
     }
@@ -1026,8 +1135,68 @@ mod tests {
     #[test]
     fn magnified_gear_uses_its_own_scale() {
         let d = BarSettings::default();
-        let l = layout(2, |i| if i == 3 { 4.0 } else { 1.0 }, 900.0, 0.0);
+        let l = layout(2, |i| if i == 4 { 4.0 } else { 1.0 }, 900.0, 0.0);
         assert!((l.settings_button.unwrap().width - d.width * 4.0).abs() < 0.01);
         assert_eq!(l.add_button.size(), l.bars[0].size());
+        assert_eq!(l.search_button.size(), l.bars[0].size());
+    }
+
+    #[test]
+    fn search_slot_hit_test() {
+        for settings_slot in [false, true] {
+            for count in [0, 3] {
+                let l = compute_layout(
+                    count,
+                    |_| 1.0,
+                    bounds(900.0),
+                    0.0,
+                    &BarSettings::default(),
+                    settings_slot,
+                    None,
+                );
+                let search = l.search_button;
+                assert!(search.y >= l.add_button.y + l.add_button.height);
+                if let Some(gear) = l.settings_button {
+                    assert!(gear.y >= search.y + search.height);
+                }
+                assert!(matches!(
+                    l.slot_message(search.center()),
+                    Some(Message::ToggleSearch)
+                ));
+                // Full strip width, like the add slot.
+                assert!(matches!(
+                    l.slot_message(Point::new(1.0, search.center().y)),
+                    Some(Message::ToggleSearch)
+                ));
+                assert!(matches!(
+                    l.slot_message(l.add_button.center()),
+                    Some(Message::AddNote)
+                ));
+                assert!(!l.add_hit_area.contains(search.center()));
+            }
+        }
+    }
+
+    #[test]
+    fn magnified_search_slot_uses_its_own_scale() {
+        let d = BarSettings::default();
+        let l = layout(2, |i| if i == 3 { 4.0 } else { 1.0 }, 900.0, 0.0);
+        assert!((l.search_button.width - d.width * 4.0).abs() < 0.01);
+        assert_eq!(l.add_button.size(), l.bars[0].size());
+    }
+
+    #[test]
+    fn search_glyph_fits_its_slot() {
+        let slot = Rectangle::new(Point::new(10.0, 20.0), Size::new(24.0, 36.0));
+        let glyph = search_glyph(slot);
+        for q in [glyph.ring, glyph.handle] {
+            assert!(q.width > 0.0 && q.height > 0.0);
+            assert!(slot.contains(q.position()));
+            assert!(slot.contains(Point::new(q.x + q.width, q.y + q.height)));
+        }
+        assert_eq!(glyph.ring.width, glyph.ring.height);
+        // The handle sits at the ring's lower right.
+        assert!(glyph.handle.center().x > glyph.ring.center().x);
+        assert!(glyph.handle.center().y > glyph.ring.center().y);
     }
 }

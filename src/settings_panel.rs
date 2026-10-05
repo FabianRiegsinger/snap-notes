@@ -34,7 +34,8 @@ pub struct SettingsView<'a> {
     pub dock_forced: bool,
 }
 
-fn text_button<'a>(
+/// A quiet text or icon button: an ink wash while hovered or pressed.
+pub(crate) fn text_button<'a>(
     label: impl Into<Element<'a, Message>>,
     message: Message,
     theme: theme::Theme,
@@ -217,11 +218,6 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         tray_ok,
         dock_forced,
     } = v;
-    // The card starts as the gear slot's ink wash and settles into paper.
-    let paper = theme.card();
-    let card = theme::mix(theme::over(theme.ink(0.8), paper), paper, t);
-    let [contact, ambient] = theme.shadows(t);
-
     let inner: Element<'_, Message> = if a < 0.01 {
         Space::new().width(Fill).height(Fill).into()
     } else {
@@ -258,6 +254,21 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
             .padding(Padding::new(space(4)).right(space(1)))
             .into()
     };
+    paper_card(inner, size, theme, t)
+}
+
+/// The card a panel's `inner` content sits on, `t` of the way through its
+/// morph out of a strip slot: it starts as the slot's ink wash and settles
+/// into paper with the note's band, highlight and shadows.
+pub(crate) fn paper_card<'a>(
+    inner: Element<'a, Message>,
+    size: Size,
+    theme: theme::Theme,
+    t: f32,
+) -> Element<'a, Message> {
+    let paper = theme.card();
+    let card = theme::mix(theme::over(theme.ink(0.8), paper), paper, t);
+    let [contact, ambient] = theme.shadows(t);
 
     // Gradient quads draw no shadow, so each shadow sits on its own solid
     // layer under the gradient one, as on the open note.
