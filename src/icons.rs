@@ -46,12 +46,15 @@ pub enum Icon {
     Search,
     Copy,
     Download,
+    Pin,
+    Bell,
+    Layers,
 }
 
 impl Icon {
     /// Every icon in the subset.
     #[allow(dead_code)] // used by tests only
-    pub const ALL: [Icon; 18] = [
+    pub const ALL: [Icon; 21] = [
         Icon::Trash,
         Icon::Close,
         Icon::Bold,
@@ -70,6 +73,9 @@ impl Icon {
         Icon::Search,
         Icon::Copy,
         Icon::Download,
+        Icon::Pin,
+        Icon::Bell,
+        Icon::Layers,
     ];
 
     /// The icon's Private Use Area codepoint in the Lucide font.
@@ -93,6 +99,9 @@ impl Icon {
             Icon::Search => '\u{e151}',
             Icon::Copy => '\u{e09e}',
             Icon::Download => '\u{e0b2}',
+            Icon::Pin => '\u{e259}',
+            Icon::Bell => '\u{e059}',
+            Icon::Layers => '\u{e529}',
         }
     }
 }

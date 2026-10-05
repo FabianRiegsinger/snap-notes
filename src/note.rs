@@ -105,6 +105,16 @@ pub struct Note {
     #[serde(default)]
     pub size: Option<[f32; 2]>,
     pub order: usize,
+    /// Pinned notes stay first in strip order.
+    #[serde(default)]
+    pub pinned: bool,
+    /// The id of the top note of the stack this note is in; `None` for a top
+    /// note or one that is not stacked.
+    #[serde(default)]
+    pub stack: Option<Uuid>,
+    /// The reminder time that has already fired for this note.
+    #[serde(default)]
+    pub reminder_fired: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -120,6 +130,9 @@ impl Note {
             position: None,
             size: None,
             order: 0,
+            pinned: false,
+            stack: None,
+            reminder_fired: None,
             created_at: now,
             updated_at: now,
         }
@@ -141,6 +154,15 @@ pub fn copy_text(note: &Note) -> String {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn old_notes_json_loads_with_defaults() {
+        let json = r##"{"id":"6f1c2c1e-6c1a-4a8e-9a43-2a1f0e0f9b11","color":"#FF6B6B","content":"hi","order":0,"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}"##;
+        let note: Note = serde_json::from_str(json).unwrap();
+        assert!(!note.pinned);
+        assert_eq!(note.stack, None);
+        assert_eq!(note.reminder_fired, None);
+    }
 
     #[test]
     fn copy_text_joins_title_and_body() {

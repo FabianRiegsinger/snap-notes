@@ -7,7 +7,7 @@ INTER_URL="https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip"
 LUCIDE_VERSION="1.52.0"
 LUCIDE_URL="https://unpkg.com/lucide-static@${LUCIDE_VERSION}"
 INTER_RANGES="U+0000-024F,U+0370-03FF,U+0400-04FF,U+2000-206F,U+20A0-20CF,U+2190-21FF"
-ICONS="trash-2 x bold italic strikethrough code palette highlighter a-large-small link image plus sliders-horizontal check square search copy download"
+ICONS="trash-2 x bold italic strikethrough code palette highlighter a-large-small link image plus sliders-horizontal check square search copy download pin bell layers"
 
 out="$(cd "$(dirname "$0")" && pwd)"
 work="${WORK_DIR:-$(mktemp -d)}"

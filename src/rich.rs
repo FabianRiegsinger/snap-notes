@@ -667,6 +667,25 @@ pub fn plain_text(content: &str) -> String {
     lines.join("\n")
 }
 
+/// `(done, total)` task list items in the note, counted the way the parser
+/// sees them (so fenced code does not count); `None` when there are none.
+#[allow(dead_code)] // used from Task 3
+pub fn task_progress(content: &str) -> Option<(usize, usize)> {
+    let mut done = 0;
+    let mut total = 0;
+    for block in parse(content, &[]).blocks {
+        if let BlockKind::ListItem {
+            task: Some(checked),
+            ..
+        } = block.kind
+        {
+            total += 1;
+            done += usize::from(checked);
+        }
+    }
+    (total > 0).then_some((done, total))
+}
+
 /// The first `max` non-blank lines of [`plain_text`], trimmed. Parses only
 /// the start of the note, so long notes stay cheap.
 pub fn plain_lines(content: &str, max: usize) -> Vec<String> {
@@ -890,6 +909,17 @@ pub fn insert_block(content: &str, offset: usize, block: &str) -> (String, usize
 mod tests {
     use super::*;
     use crate::note::PALETTE;
+
+    #[test]
+    fn task_progress_counts_real_tasks() {
+        assert_eq!(task_progress("- [x] a\n- [ ] b\n- [ ] c"), Some((1, 3)));
+        assert_eq!(task_progress("- plain\n\ntext"), None);
+        assert_eq!(task_progress(""), None);
+        assert_eq!(
+            task_progress("- [x] real\n\n```\n- [ ] fake\n- [x] fake\n```"),
+            Some((1, 1))
+        );
+    }
 
     #[test]
     fn insert_block_puts_block_on_its_own_line() {

@@ -126,21 +126,133 @@ impl NoteStore {
         changed
     }
 
-    pub fn delete_note(&mut self, id: Uuid) {
-        self.notes.retain(|n| n.id != id);
+    /// Index of the note, and how many members follow it in its stack.
+    fn group(&self, id: Uuid) -> Option<(usize, usize)> {
+        let at = self.notes.iter().position(|n| n.id == id)?;
+        let members = self.notes[at + 1..]
+            .iter()
+            .take_while(|n| n.stack == Some(id))
+            .count();
+        Some((at, members))
+    }
+
+    fn renumber(&mut self) {
         self.revision += 1;
         for (i, note) in self.notes.iter_mut().enumerate() {
             note.order = i;
         }
     }
 
-    pub fn reorder(&mut self, from_index: usize, to_index: usize) {
-        let note = self.notes.remove(from_index);
-        self.notes.insert(to_index, note);
-        self.revision += 1;
-        for (i, note) in self.notes.iter_mut().enumerate() {
-            note.order = i;
+    /// Deleting a stack's top promotes its first member to be the new top.
+    pub fn delete_note(&mut self, id: Uuid) {
+        if let Some((at, members)) = self.group(id) {
+            if members > 0 {
+                let new_top = self.notes[at + 1].id;
+                self.notes[at + 1].stack = None;
+                for member in &mut self.notes[at + 2..at + 1 + members] {
+                    member.stack = Some(new_top);
+                }
+            }
         }
+        self.notes.retain(|n| n.id != id);
+        self.renumber();
+    }
+
+    /// Pins or unpins a note, keeping pinned notes first: pinning moves it to
+    /// the end of the pinned group, unpinning to the start of the unpinned
+    /// group. A top note carries its members along (they take its pin state);
+    /// a stack member is ignored, as it follows its top.
+    #[allow(dead_code)] // used from Task 5
+    pub fn set_pinned(&mut self, id: Uuid, pinned: bool) {
+        let Some((at, members)) = self.group(id) else {
+            return;
+        };
+        if self.notes[at].stack.is_some() || self.notes[at].pinned == pinned {
+            return;
+        }
+        let mut group: Vec<Note> = self.notes.drain(at..=at + members).collect();
+        for note in &mut group {
+            note.pinned = pinned;
+        }
+        // Both moves land on the boundary between the two groups.
+        let boundary = self.notes.iter().take_while(|n| n.pinned).count();
+        self.notes.splice(boundary..boundary, group);
+        self.renumber();
+    }
+
+    /// Moves the note at `from_index` (with its members when it is a stack
+    /// top) so it lands at `to_index` of the remaining notes. The target is
+    /// clamped to the note's pin group and never lands inside a stack. A stack
+    /// member does not move on its own.
+    pub fn reorder(&mut self, from_index: usize, to_index: usize) {
+        let id = self.notes[from_index].id;
+        let Some((at, members)) = self.group(id) else {
+            return;
+        };
+        if self.notes[at].stack.is_some() {
+            return;
+        }
+        let pinned = self.notes[at].pinned;
+        let group: Vec<Note> = self.notes.drain(at..=at + members).collect();
+        let boundary = self.notes.iter().take_while(|n| n.pinned).count();
+        let (lo, hi) = if pinned {
+            (0, boundary)
+        } else {
+            (boundary, self.notes.len())
+        };
+        let mut to = to_index.clamp(lo, hi);
+        // Inside a stack, snap to its edge in the direction of travel.
+        while to > lo && to < hi && self.notes[to].stack.is_some() {
+            if to_index > from_index {
+                to += 1;
+            } else {
+                to -= 1;
+            }
+        }
+        self.notes.splice(to..to, group);
+        self.renumber();
+    }
+
+    /// Puts `id` under the stack whose top is `onto_top`, right after the
+    /// stack's last member. Stacking a top that has members moves the whole
+    /// group (nested stacks are not supported). The note takes the stack's pin
+    /// state. Returns false (and changes nothing) for a missing note, a note
+    /// stacked on itself, or a target that is itself a stack member.
+    #[allow(dead_code)] // used from Task 6
+    pub fn stack(&mut self, id: Uuid, onto_top: Uuid) -> bool {
+        if id == onto_top {
+            return false;
+        }
+        let (Some((at, members)), Some((onto_at, _))) = (self.group(id), self.group(onto_top))
+        else {
+            return false;
+        };
+        if self.notes[onto_at].stack.is_some() {
+            return false;
+        }
+        let pinned = self.notes[onto_at].pinned;
+        let mut group: Vec<Note> = self.notes.drain(at..=at + members).collect();
+        for note in &mut group {
+            note.pinned = pinned;
+            note.stack = Some(onto_top);
+        }
+        let (onto_at, onto_members) = self.group(onto_top).expect("target is still there");
+        let end = onto_at + 1 + onto_members;
+        self.notes.splice(end..end, group);
+        self.renumber();
+        true
+    }
+
+    /// Dissolves the stack under `top`: its members stay right after it, now
+    /// as top-level notes.
+    #[allow(dead_code)] // used from Task 6
+    pub fn unstack(&mut self, top: Uuid) {
+        for note in &mut self.notes {
+            if note.stack == Some(top) {
+                note.stack = None;
+            }
+        }
+        self.revision += 1;
     }
 
     pub fn mark_dirty(&mut self) {
@@ -219,6 +331,93 @@ mod tests {
         store.reorder(0, 2);
         assert_eq!(store.notes()[2].id, a);
         assert_eq!(store.notes()[0].id, b);
+    }
+
+    fn ids(store: &NoteStore) -> Vec<Uuid> {
+        store.notes().iter().map(|n| n.id).collect()
+    }
+
+    fn store_of(n: usize) -> (NoteStore, Vec<Uuid>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = NoteStore::load(dir.path().join("n.json"));
+        let ids = (0..n).map(|_| store.add_note(&PALETTE)).collect();
+        (store, ids, dir)
+    }
+
+    #[test]
+    fn pinning_keeps_pinned_first() {
+        let (mut store, id, _dir) = store_of(4);
+        let rev = store.revision();
+        store.set_pinned(id[2], true);
+        assert!(store.revision() > rev);
+        assert_eq!(ids(&store), vec![id[2], id[0], id[1], id[3]]);
+        store.set_pinned(id[3], true);
+        assert_eq!(ids(&store), vec![id[2], id[3], id[0], id[1]]);
+        store.set_pinned(id[2], false);
+        assert_eq!(ids(&store), vec![id[3], id[2], id[0], id[1]]);
+        assert!(store.notes()[0].pinned && !store.notes()[1].pinned);
+        let orders: Vec<_> = store.notes().iter().map(|n| n.order).collect();
+        assert_eq!(orders, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn reorder_stays_within_pin_group() {
+        let (mut store, id, _dir) = store_of(4);
+        store.set_pinned(id[0], true);
+        store.set_pinned(id[1], true);
+        // pinned: 0, 1; unpinned: 2, 3
+        store.reorder(0, 3);
+        assert_eq!(ids(&store), vec![id[1], id[0], id[2], id[3]]);
+        store.reorder(3, 0);
+        assert_eq!(ids(&store), vec![id[1], id[0], id[3], id[2]]);
+    }
+
+    #[test]
+    fn stack_and_unstack() {
+        let (mut store, id, _dir) = store_of(4);
+        let rev = store.revision();
+        assert!(store.stack(id[3], id[0]));
+        assert!(store.revision() > rev);
+        assert_eq!(ids(&store), vec![id[0], id[3], id[1], id[2]]);
+        assert!(store.stack(id[1], id[0]));
+        assert_eq!(ids(&store), vec![id[0], id[3], id[1], id[2]]);
+        assert_eq!(store.notes()[1].stack, Some(id[0]));
+        assert_eq!(store.notes()[2].stack, Some(id[0]));
+        assert!(!store.stack(id[0], id[0]));
+        assert!(!store.stack(id[2], id[1]), "target is a member");
+        // A top with members moves as a group under another top.
+        assert!(store.stack(id[0], id[2]));
+        assert_eq!(ids(&store), vec![id[2], id[0], id[3], id[1]]);
+        assert!(store.notes().iter().skip(1).all(|n| n.stack == Some(id[2])));
+        store.unstack(id[2]);
+        assert_eq!(ids(&store), vec![id[2], id[0], id[3], id[1]]);
+        assert!(store.notes().iter().all(|n| n.stack.is_none()));
+    }
+
+    #[test]
+    fn stacking_adopts_pin_and_reorder_skips_stacks() {
+        let (mut store, id, _dir) = store_of(4);
+        store.set_pinned(id[0], true);
+        assert!(store.stack(id[3], id[0]));
+        assert!(store.notes()[1].pinned);
+        store.stack(id[2], id[1]);
+        // [0 (pinned), 3, 1, 2]; moving 0's group never lands inside 1's stack
+        store.reorder(2, 3);
+        assert_eq!(ids(&store).len(), 4);
+        let at = |i: usize| store.notes().iter().position(|n| n.id == id[i]).unwrap();
+        assert_eq!(at(2), at(1) + 1);
+    }
+
+    #[test]
+    fn deleting_stack_top_promotes_member() {
+        let (mut store, id, _dir) = store_of(4);
+        store.stack(id[1], id[0]);
+        store.stack(id[2], id[0]);
+        store.delete_note(id[0]);
+        assert_eq!(ids(&store), vec![id[1], id[2], id[3]]);
+        assert_eq!(store.notes()[0].stack, None);
+        assert_eq!(store.notes()[1].stack, Some(id[1]));
+        assert_eq!(store.notes()[2].stack, None);
     }
 
     #[test]
