@@ -2,6 +2,7 @@
 //! the search slot in the strip like Settings out of the gear.
 
 use crate::app::Message;
+use crate::command_passthrough::command_passthrough;
 use crate::icons::{icon, Icon, ICON_FONT};
 use crate::note_panel::pressable;
 use crate::search::Hit;
@@ -150,10 +151,15 @@ pub fn search_panel(v: SearchView<'_>) -> Element<'_, Message> {
             list = list.push(result_row(hit, theme, a));
         }
 
-        column![header, field, scrollable(list).height(Fill)]
-            .spacing(space(3))
-            .padding(Padding::new(space(4)).right(space(1)))
-            .into()
+        // Cmd shortcuts reach the app instead of typing.
+        column![
+            header,
+            command_passthrough(field),
+            scrollable(list).height(Fill)
+        ]
+        .spacing(space(3))
+        .padding(Padding::new(space(4)).right(space(1)))
+        .into()
     };
     paper_card(inner, size, theme, t)
 }

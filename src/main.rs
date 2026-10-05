@@ -2,6 +2,7 @@ mod animation;
 mod app;
 mod bar_strip;
 mod color_picker;
+mod command_passthrough;
 mod export;
 mod export_panel;
 mod history;

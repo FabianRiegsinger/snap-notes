@@ -1,6 +1,7 @@
 use crate::animation::ease_out_cubic;
 use crate::app::Message;
 use crate::color_picker::color_picker;
+use crate::command_passthrough::command_passthrough;
 use crate::icons::{icon, Icon};
 use crate::note::{Note, NoteColor};
 use crate::pass_wheel::pass_wheel;
@@ -367,7 +368,8 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         let header = press_through(
             container(
                 row![
-                    title,
+                    // Cmd shortcuts reach the app instead of typing.
+                    command_passthrough(title),
                     color_btn,
                     header_button(
                         if copied { Icon::Check } else { Icon::Copy },
@@ -614,7 +616,8 @@ pub(crate) fn history_key(key: &str, modifiers: keyboard::Modifiers) -> Option<M
 /// The body editor's key bindings while it has focus: Cmd/Ctrl+V asks the
 /// app to paste (text or image), and the undo/redo keys step its history;
 /// other command shortcuts (Cmd+F, Cmd+N, Cmd+,) pass through to the app
-/// instead of typing their letter; everything else is iced's default.
+/// instead of typing their letter, unless Alt is held too; everything else
+/// is iced's default.
 fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     if !matches!(press.status, text_editor::Status::Focused { .. }) {
         return text_editor::Binding::from_key_press(press);
@@ -626,7 +629,9 @@ fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding
         keyboard::Key::Character(c) => match history_key(c, press.modifiers) {
             Some(step) => Some(text_editor::Binding::Custom(step)),
             None => {
-                let command = press.modifiers.command();
+                // Command without Alt: Ctrl+Alt is AltGr on Windows layouts
+                // and types characters such as `{` and `@`.
+                let command = press.modifiers.command() && !press.modifiers.alt();
                 // iced binds only c/x/v/a under command; any other letter
                 // would be inserted (macOS reports it as text).
                 match text_editor::Binding::from_key_press(press) {
@@ -675,6 +680,18 @@ mod tests {
         assert!(matches!(
             body_key_binding(press("f", false, focused)),
             Some(text_editor::Binding::Insert('f'))
+        ));
+    }
+
+    #[test]
+    fn ctrl_alt_characters_still_type() {
+        // LCtrl+LAlt is AltGr on Windows layouts, which types `{`, `}`, `@`.
+        let focused = text_editor::Status::Focused { is_hovered: false };
+        let mut brace = press("{", true, focused);
+        brace.modifiers |= keyboard::Modifiers::ALT;
+        assert!(matches!(
+            body_key_binding(brace),
+            Some(text_editor::Binding::Insert('{'))
         ));
     }
 
