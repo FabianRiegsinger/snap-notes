@@ -2,27 +2,32 @@
 //! away from it. iced's `text_input` types the key's letter even with
 //! Cmd held and then captures the press, so the app's keyboard listener
 //! never sees it. The wrapper doesn't forward such a press: it stays
-//! uncaptured and reaches the app. Copy, cut, paste, select-all and undo
-//! stay with the field.
+//! uncaptured and reaches the app. Copy, cut, paste and select-all stay
+//! with the field; undo and redo, which it lacks, go to the app.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::event::Event;
+use iced::keyboard::key::Physical;
 use iced::keyboard::{self, Key, Modifiers};
 use iced::mouse;
 use iced::{Element, Length, Rectangle, Size, Theme, Vector};
 
-/// Whether a press of `key` with `modifiers` skips the field and goes to
-/// the app: a command shortcut on a character the field doesn't handle.
-/// With Alt held it types (Ctrl+Alt is AltGr on Windows layouts).
-pub fn passes_through(key: &Key, modifiers: Modifiers) -> bool {
-    if !modifiers.command() || modifiers.alt() {
+/// Whether a press of `key` (on `physical`) with `modifiers` skips the
+/// field and goes to the app: a command shortcut other than the field's
+/// copy, cut, paste and select-all. Those are found by the key's Latin
+/// letter, as `text_input` does, so they stay with the field on any
+/// layout. Undo and redo pass through: the field keeps no history. Off
+/// macOS a press with Alt held types, since Ctrl+Alt is AltGr on Windows
+/// layouts; on macOS Cmd+Opt+letter stays a shortcut.
+pub fn passes_through(key: &Key, physical: Physical, modifiers: Modifiers) -> bool {
+    if !modifiers.command() || (modifiers.alt() && !cfg!(target_os = "macos")) {
         return false;
     }
-    match key.as_ref() {
-        Key::Character(c) => !matches!(c.to_lowercase().as_str(), "c" | "x" | "v" | "a" | "z"),
-        _ => false,
+    match key.to_latin(physical) {
+        Some(c) => !matches!(c.to_ascii_lowercase(), 'c' | 'x' | 'v' | 'a'),
+        None => matches!(key, Key::Character(_)),
     }
 }
 
@@ -110,8 +115,14 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for CommandPassthrough<
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        if let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event {
-            if passes_through(key, *modifiers) {
+        if let Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        }) = event
+        {
+            if passes_through(key, *physical_key, *modifiers) {
                 return;
             }
         }
@@ -171,21 +182,46 @@ impl<'a, Message: 'a> From<CommandPassthrough<'a, Message>> for Element<'a, Mess
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced::keyboard::key::{Code, NativeCode};
 
     fn key(c: &str) -> Key {
         Key::Character(c.into())
     }
 
+    fn unknown() -> Physical {
+        Physical::Unidentified(NativeCode::Unidentified)
+    }
+
     #[test]
     fn command_shortcuts_skip_the_field() {
         let cmd = Modifiers::COMMAND;
-        for c in ["f", "n", ","] {
-            assert!(passes_through(&key(c), cmd), "{c}");
+        for c in ["f", "n", ",", "z"] {
+            assert!(passes_through(&key(c), unknown(), cmd), "{c}");
         }
-        for c in ["c", "x", "v", "a", "z"] {
-            assert!(!passes_through(&key(c), cmd), "{c}");
+        // Undo and redo go to the app: the field has no history.
+        assert!(passes_through(&key("Z"), unknown(), cmd | Modifiers::SHIFT));
+        for c in ["c", "x", "v", "a", "C", "V"] {
+            assert!(!passes_through(&key(c), unknown(), cmd), "{c}");
         }
-        assert!(!passes_through(&key("f"), Modifiers::empty()));
-        assert!(!passes_through(&key("f"), cmd | Modifiers::ALT));
+        assert!(!passes_through(&key("f"), unknown(), Modifiers::empty()));
+        // Ctrl+Alt is AltGr off macOS and types; on macOS Cmd+Opt+letter
+        // stays a shortcut.
+        assert_eq!(
+            passes_through(&key("f"), unknown(), cmd | Modifiers::ALT),
+            cfg!(target_os = "macos")
+        );
+        assert!(!passes_through(&key("c"), unknown(), cmd | Modifiers::ALT));
+    }
+
+    #[test]
+    fn non_latin_layout_keeps_clipboard_shortcuts() {
+        let cmd = Modifiers::COMMAND;
+        // Russian layout: the key labelled C types "с", V types "м".
+        assert!(!passes_through(&key("с"), Physical::Code(Code::KeyC), cmd));
+        assert!(!passes_through(&key("м"), Physical::Code(Code::KeyV), cmd));
+        assert!(!passes_through(&key("ф"), Physical::Code(Code::KeyA), cmd));
+        assert!(!passes_through(&key("ч"), Physical::Code(Code::KeyX), cmd));
+        // Other letters still reach the app.
+        assert!(passes_through(&key("а"), Physical::Code(Code::KeyF), cmd));
     }
 }
