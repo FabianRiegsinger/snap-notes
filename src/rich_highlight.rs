@@ -6,7 +6,8 @@
 //! and a line that starts a block (a heading, list item, quote or fence)
 //! drop the inline state. An opener without a closer on its own line opens
 //! only if a closer follows before its block ends, which the highlighter
-//! looks ahead for. Code spans and links stay within one line.
+//! looks ahead for, at most 200 lines and only for such an opener. Code
+//! spans and links stay within one line.
 
 use crate::note::NoteColor;
 use crate::rich::{self, OpenTag};
@@ -14,6 +15,7 @@ use crate::theme;
 use iced::advanced::text::highlighter::{self, Format};
 use iced::font;
 use iced::{Color, Font};
+use std::cell::OnceCell;
 use std::ops::Range;
 
 /// How a range of an editor line is drawn.
@@ -59,8 +61,9 @@ impl LineState {
 }
 
 /// Styles one editor line, given the state the line before it left and the
-/// lines after it (only those in its block are read). Returns the styled
-/// ranges, where unstyled text gets none, and the state after the line.
+/// lines after it (only those in its block, up to [`LOOKAHEAD_LINES`], are
+/// read). Returns the styled ranges, where unstyled text gets none, and the
+/// state after the line.
 pub fn spans<S: AsRef<str>>(
     line: &str,
     before: &LineState,
@@ -70,7 +73,9 @@ pub fn spans<S: AsRef<str>>(
     let (opening, quoted) = opening(line);
     let mut scan = Scan {
         line,
-        ahead: &[],
+        after: &[],
+        quoted,
+        ahead: OnceCell::new(),
         palette,
         out: Vec::new(),
         heading: false,
@@ -104,7 +109,7 @@ pub fn spans<S: AsRef<str>>(
         scan.tags = before.tags.clone();
     }
     if !ends_block(opening) {
-        scan.ahead = block_rest(after, quoted);
+        scan.after = after;
     }
     let start = scan.block_prefix(indent);
     scan.inline(start);
@@ -191,11 +196,24 @@ fn ends_block(opening: Opening) -> bool {
     )
 }
 
+/// How many lines after an unclosed opener are searched for its closer.
+const LOOKAHEAD_LINES: usize = 200;
+
+#[cfg(test)]
+thread_local! {
+    /// How often [`block_rest`] ran on this thread.
+    static LOOKAHEADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The leading lines of `after` that continue the block of the line before
-/// them (`quoted` says whether that line was in a quote).
+/// them (`quoted` says whether that line was in a quote), at most
+/// [`LOOKAHEAD_LINES`] of them.
 fn block_rest<S: AsRef<str>>(after: &[S], mut quoted: bool) -> &[S] {
+    #[cfg(test)]
+    LOOKAHEADS.with(|n| n.set(n.get() + 1));
     let len = after
         .iter()
+        .take(LOOKAHEAD_LINES)
         .take_while(|line| {
             let (opening, q) = opening(line.as_ref());
             let continues = !starts_block(opening, q, quoted);
@@ -235,8 +253,14 @@ fn is_rule(trimmed: &str) -> bool {
 
 struct Scan<'a, S> {
     line: &'a str,
-    /// The rest of the line's block, where a closer may be.
-    ahead: &'a [S],
+    /// The lines after this one, or none when the line is a block of its
+    /// own.
+    after: &'a [S],
+    /// Whether the line is in a block quote.
+    quoted: bool,
+    /// The rest of the line's block, where a closer may be: found from
+    /// `after` only once an opener isn't closed on its own line.
+    ahead: OnceCell<&'a [S]>,
     palette: &'a [NoteColor],
     out: Vec<(Range<usize>, Style)>,
     heading: bool,
@@ -408,6 +432,7 @@ impl<S: AsRef<str>> Scan<'_, S> {
         closes_in(self.line, from, delim)
             || self
                 .ahead
+                .get_or_init(|| block_rest(self.after, self.quoted))
                 .iter()
                 .any(|line| closes_in(line.as_ref(), 0, delim))
     }
@@ -1005,6 +1030,29 @@ mod tests {
             ..settings("x\n\n**a\nb**")
         });
         assert_eq!(h.current_line(), 0);
+    }
+
+    #[test]
+    fn long_block_highlight_is_linear() {
+        let lines: Vec<String> = (0..5000).map(|i| format!("plain line {i}")).collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        LOOKAHEADS.with(|n| n.set(0));
+        let start = std::time::Instant::now();
+        let all = highlight(&lines);
+        assert!(all.iter().flatten().all(|s| *s == Style::Plain));
+        // Lines without an opener never look ahead.
+        assert_eq!(LOOKAHEADS.with(|n| n.get()), 0);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn lookahead_stops_after_its_cap() {
+        let mut lines = vec!["**a"];
+        lines.extend(std::iter::repeat_n("x", LOOKAHEAD_LINES - 1));
+        lines.push("b**");
+        assert_eq!(highlight(&lines)[0][2], Style::Bold);
+        lines.insert(1, "x");
+        assert_eq!(highlight(&lines)[0][2], Style::Plain);
     }
 
     #[test]

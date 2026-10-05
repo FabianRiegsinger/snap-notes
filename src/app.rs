@@ -49,6 +49,14 @@ const MODE_FADE_SECS: f32 = 0.12;
 /// How long the export panel shows its success before closing.
 const EXPORTED_FOR: Duration = Duration::from_secs(2);
 
+/// A task that delivers `message` once `duration` has passed, so a timeout
+/// needs no frames running meanwhile.
+fn delayed(duration: Duration, message: Message) -> Task<Message> {
+    // Built when the task runs: a tokio timer needs the runtime.
+    let sleep = async move { tokio::time::sleep(duration).await };
+    Task::perform(sleep, move |()| message)
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     ThemeChanged(theme::Mode),
@@ -79,6 +87,9 @@ pub enum Message {
     ExportPicked(ExportJob),
     /// The save dialog was cancelled; the panel generation that opened it.
     ExportCancelled(u64),
+    /// `EXPORTED_FOR` after the success shown at this instant in the panel
+    /// of this generation: the panel closes, if it still shows it.
+    ExportStatusExpired(u64, Instant),
     SettingChanged(SettingKey, f32),
     // Only the macOS/Windows settings panel shows these toggles.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
@@ -113,6 +124,9 @@ pub enum Message {
     ClosePanel,
     DeleteRequested,
     CopyNote,
+    /// `COPIED_FOR` after the copy of this note with this number: the copy
+    /// button's check goes, unless something was copied again since.
+    CopiedExpired(Uuid, u64),
     ConfirmDelete(bool),
     ToggleColorPicker,
     /// Open or close the toolbar's text color grid.
@@ -241,9 +255,11 @@ pub struct App {
     drag: Option<DragState>,
     scroll_offset: f32,
     confirm_delete: Option<Uuid>,
-    /// The note last copied and when; its copy button shows a check for
-    /// `COPIED_FOR` after.
-    copied_at: Option<(Uuid, Instant)>,
+    /// The note last copied and the copy's number; its copy button shows a
+    /// check for `COPIED_FOR` after.
+    copied_at: Option<(Uuid, u64)>,
+    /// Counts copies, so a check's timer only clears its own copy.
+    copies: u64,
     animating: bool,
     last_tick: Option<Instant>,
     visible: bool,
@@ -290,6 +306,10 @@ pub struct App {
     /// Counts fresh openings of the export panel; see
     /// [`ExportState::generation`].
     export_generation: u64,
+    /// The export's save dialog is open. It outlives the panel that opened
+    /// it (the dialog doesn't block the app everywhere), so a reopened
+    /// panel can't start a second one.
+    export_dialog_open: bool,
     /// Keyboard focus to give once the panel or note showing it has
     /// faded its content in (the widget doesn't exist before).
     pending_focus: Option<PendingFocus>,
@@ -422,6 +442,7 @@ impl App {
             scroll_offset: 0.0,
             confirm_delete: None,
             copied_at: None,
+            copies: 0,
             animating: false,
             last_tick: None,
             visible: true,
@@ -447,6 +468,7 @@ impl App {
             export_morph,
             export_anchor_y: 0.0,
             export_generation: 0,
+            export_dialog_open: false,
             search_anchor_y: 0.0,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -551,14 +573,16 @@ impl App {
             }
             Message::ExportRequested => return self.request_export(),
             Message::ExportPicked(job) => {
-                if let Some(state) = self.export_opened_by(job.generation) {
-                    state.picking = false;
-                }
-                self.run_export(job);
+                self.export_dialog_open = false;
+                return self.run_export(job);
             }
-            Message::ExportCancelled(generation) => {
-                if let Some(state) = self.export_opened_by(generation) {
-                    state.picking = false;
+            Message::ExportCancelled(_) => self.export_dialog_open = false,
+            Message::ExportStatusExpired(generation, at) => {
+                let still_shown = self
+                    .export_opened_by(generation)
+                    .is_some_and(|state| state.succeeded_at() == Some(at));
+                if still_shown {
+                    self.close_export();
                 }
             }
             Message::SettingChanged(key, value) => {
@@ -811,9 +835,18 @@ impl App {
                     .and_then(|id| self.store.notes().iter().find(|n| n.id == id));
                 if let Some(note) = note {
                     let text = crate::note::copy_text(note);
-                    self.copied_at = Some((note.id, Instant::now()));
-                    self.animating = true;
-                    return iced::clipboard::write(text);
+                    self.copies += 1;
+                    let copied = (note.id, self.copies);
+                    self.copied_at = Some(copied);
+                    return Task::batch([
+                        iced::clipboard::write(text),
+                        delayed(COPIED_FOR, Message::CopiedExpired(copied.0, copied.1)),
+                    ]);
+                }
+            }
+            Message::CopiedExpired(id, at) => {
+                if self.copied_at == Some((id, at)) {
+                    self.copied_at = None;
                 }
             }
             Message::ConfirmDelete(confirmed) => {
@@ -864,34 +897,11 @@ impl App {
                 if search_closed {
                     self.search_open = false;
                 }
-                let export_done = self
-                    .export
-                    .as_ref()
-                    .and_then(ExportState::succeeded_at)
-                    .is_some_and(|at| now.saturating_duration_since(at) >= EXPORTED_FOR);
-                if export_done && self.export_morph.is_opening() {
-                    self.export_morph.close();
-                }
                 let export_closed = self.export.is_some() && self.export_morph.is_closed();
                 if export_closed {
                     self.export = None;
                 }
-                // A success keeps ticking until its panel has closed.
-                let export_waiting = self
-                    .export
-                    .as_ref()
-                    .is_some_and(|state| state.succeeded_at().is_some());
-                if self
-                    .copied_at
-                    .is_some_and(|(_, t)| now.saturating_duration_since(t) >= COPIED_FOR)
-                {
-                    self.copied_at = None;
-                }
-                self.animating = mag_active
-                    || morph_active
-                    || collapse_active
-                    || self.copied_at.is_some()
-                    || export_waiting;
+                self.animating = mag_active || morph_active || collapse_active;
                 if !self.animating {
                     self.last_tick = None;
                 }
@@ -1193,7 +1203,7 @@ impl App {
                 // the note and the panels.
                 self.close_search();
                 // The save dialog takes the focus as long as it is open.
-                if !self.export.as_ref().is_some_and(|state| state.picking) {
+                if !self.export_dialog_open {
                     self.close_export();
                 }
                 let close_settings = self.update(Message::CloseSettings);
@@ -1342,7 +1352,7 @@ impl App {
                 // dialog is open a click beside the panel does nothing.
                 if self.export_morph.is_opening() {
                     let backdrop = Space::new().width(Fill).height(Fill);
-                    layers.push(if state.picking {
+                    layers.push(if self.export_dialog_open {
                         opaque(backdrop)
                     } else {
                         mouse_area(backdrop).on_press(Message::ToggleExport).into()
@@ -1352,6 +1362,7 @@ impl App {
                     theme: self.theme,
                     notes: self.store.notes(),
                     state,
+                    can_export: self.export_enabled(),
                     size: rect.size(),
                     morph_progress: self.export_morph.progress(),
                     content_alpha: frame.content_alpha,
@@ -1819,8 +1830,7 @@ impl App {
 
     /// Whether `id`'s copy button still shows its check.
     fn copied_for(&self, id: Uuid) -> bool {
-        self.copied_at
-            .is_some_and(|(copied, at)| copied == id && at.elapsed() < COPIED_FOR)
+        self.copied_at.is_some_and(|(copied, _)| copied == id)
     }
 
     fn update_passthrough(&mut self, cursor: Option<Point>) -> Task<Message> {
@@ -2063,18 +2073,18 @@ impl App {
     }
 
     /// Opens the save dialog for the selected notes, unless one is open
-    /// already or none of them exists any more. The dialog's task carries
-    /// the notes and the format, so the export happens even if the panel
-    /// folds meanwhile.
+    /// already (from this panel or an earlier one) or none of them exists
+    /// any more. The dialog's task carries the notes and the format, so the
+    /// export happens even if the panel folds meanwhile.
     fn request_export(&mut self) -> Task<Message> {
+        if !self.export_enabled() {
+            return Task::none();
+        }
         let Some(state) = &mut self.export else {
             return Task::none();
         };
-        if !state.can_export(self.store.notes()) {
-            return Task::none();
-        }
         state.status = None;
-        state.picking = true;
+        self.export_dialog_open = true;
         let notes = state.selected_in(self.store.notes());
         let format = state.format;
         let generation = state.generation;
@@ -2105,6 +2115,16 @@ impl App {
         })
     }
 
+    /// Whether the export panel's Export button can start a dialog: no
+    /// save dialog is open and a selected note still exists.
+    fn export_enabled(&self) -> bool {
+        !self.export_dialog_open
+            && self
+                .export
+                .as_ref()
+                .is_some_and(|state| state.can_export(self.store.notes()))
+    }
+
     /// The export panel, if it is the opening `generation` belongs to.
     fn export_opened_by(&mut self, generation: u64) -> Option<&mut ExportState> {
         self.export
@@ -2114,26 +2134,34 @@ impl App {
 
     /// Writes the job's notes that still exist, in its order, and shows how
     /// that went in the panel that started it, or logs it once that panel
-    /// is gone.
-    fn run_export(&mut self, job: ExportJob) {
+    /// is gone. A success shown there closes the panel `EXPORTED_FOR` later.
+    fn run_export(&mut self, job: ExportJob) -> Task<Message> {
         let notes: Vec<_> = job
             .notes
             .iter()
             .filter_map(|id| self.store.notes().iter().find(|note| note.id == *id))
             .collect();
         if notes.is_empty() {
-            return;
+            return Task::none();
         }
         let status = match export::write(&job.path, &export::render(&notes, job.format)) {
             Ok(()) => ExportStatus::Exported(notes.len()),
             Err(error) => ExportStatus::Failed(error.to_string()),
         };
-        match self.export_opened_by(job.generation) {
-            Some(state) => {
-                state.status = Some((status, Instant::now()));
-                self.animating = true;
-            }
-            None => eprintln!("export to {}: {}", job.path.display(), status.message()),
+        let Some(state) = self.export_opened_by(job.generation) else {
+            eprintln!("export to {}: {}", job.path.display(), status.message());
+            return Task::none();
+        };
+        let at = Instant::now();
+        let succeeded = matches!(status, ExportStatus::Exported(_));
+        state.status = Some((status, at));
+        if succeeded {
+            delayed(
+                EXPORTED_FOR,
+                Message::ExportStatusExpired(job.generation, at),
+            )
+        } else {
+            Task::none()
         }
     }
 
@@ -2220,13 +2248,9 @@ impl App {
         if self.search_synced.as_ref() == Some(&key) {
             return;
         }
-        let notes = self.store.notes();
-        self.search_results = search::find(notes, &self.search_query);
-        self.search_matches = search::matching(notes, &self.search_query)
-            .into_iter()
-            .zip(notes)
-            .filter_map(|(matched, note)| matched.then_some(note.id))
-            .collect();
+        let result = search::search(self.store.notes(), &self.search_query);
+        self.search_results = result.hits;
+        self.search_matches = result.matches;
         self.search_synced = Some(key);
     }
 
@@ -2982,17 +3006,26 @@ mod tests {
     }
 
     #[test]
-    fn copy_note_marks_copied() {
+    fn copy_check_expires_without_frames() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_note(&dir, "body");
         let task = app.update(Message::CopyNote);
-        assert!(task.units() > 0, "no clipboard write was started");
-        let (_, at) = app.copied_at.expect("copied_at set");
-        assert!(app.animating);
-        let _ = app.update(Message::Tick(at + Duration::from_millis(1000)));
-        assert!(app.copied_at.is_some());
-        assert!(app.animating, "must keep ticking until the icon flips back");
-        let _ = app.update(Message::Tick(at + Duration::from_millis(1600)));
+        // The clipboard write and the timer.
+        assert_eq!(task.units(), 2);
+        let (id, at) = app.copied_at.expect("copied_at set");
+        assert!(!app.animating, "the check must not keep frames running");
+        let _ = app.update(Message::CopiedExpired(id, at));
+        assert!(app.copied_at.is_none());
+
+        // A timer from an earlier copy leaves a newer one alone.
+        let _ = app.update(Message::CopyNote);
+        let (_, first): (Uuid, u64) = app.copied_at.unwrap();
+        let _ = app.update(Message::CopyNote);
+        let (_, second) = app.copied_at.unwrap();
+        assert_ne!(first, second);
+        let _ = app.update(Message::CopiedExpired(id, first));
+        assert_eq!(app.copied_at, Some((id, second)));
+        let _ = app.update(Message::CopiedExpired(id, second));
         assert!(app.copied_at.is_none());
     }
 
@@ -3811,12 +3844,11 @@ mod tests {
         let expected = crate::export::render(&[&notes[0], &notes[2]], ExportFormat::Markdown);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
         assert_eq!(export_status(&app).as_deref(), Some("Exported 2 notes"));
-        assert!(app.animating, "must keep ticking until the panel closes");
-        let at = app.export.as_ref().unwrap().status.as_ref().unwrap().1;
-        let _ = app.update(Message::Tick(at + Duration::from_millis(1900)));
-        assert!(export_showing(&app));
-        assert!(app.animating);
-        let _ = app.update(Message::Tick(at + Duration::from_secs(2)));
+        let (generation, at) = {
+            let state = app.export.as_ref().unwrap();
+            (state.generation, state.status.as_ref().unwrap().1)
+        };
+        let _ = app.update(Message::ExportStatusExpired(generation, at));
         assert!(!app.export_morph.is_opening());
         settle(&mut app);
         assert!(app.export.is_none());
@@ -3830,16 +3862,48 @@ mod tests {
     }
 
     #[test]
+    fn export_auto_close_uses_a_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        assert!(!app.animating);
+        let task = app.update(Message::ExportRequested);
+        assert!(task.units() > 0, "no dialog was started");
+        let state = app.export.as_ref().unwrap();
+        let generation = state.generation;
+        let job = ExportJob {
+            generation,
+            path: dir.path().join("out.md"),
+            notes: state.selected_in(app.store.notes()),
+            format: state.format,
+        };
+        let task = app.update(Message::ExportPicked(job));
+        assert_eq!(task.units(), 1, "no close timer was started");
+        assert_eq!(export_status(&app).as_deref(), Some("Exported 1 note"));
+        assert!(!app.animating, "the success must not keep frames running");
+        let at = app.export.as_ref().unwrap().status.as_ref().unwrap().1;
+        let _ = app.update(Message::Tick(at + Duration::from_secs(5)));
+        assert!(export_showing(&app), "frames no longer close the panel");
+
+        // Another opening's timer leaves this one alone.
+        let _ = app.update(Message::ExportStatusExpired(generation + 1, at));
+        assert!(export_showing(&app));
+        let _ = app.update(Message::ExportStatusExpired(generation, at));
+        assert!(!app.export_morph.is_opening());
+    }
+
+    #[test]
     fn export_cancelled_does_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
         let _ = app.update(Message::ToggleExport);
         settle(&mut app);
         let _ = app.update(Message::ExportRequested);
-        assert!(app.export.as_ref().unwrap().picking);
+        assert!(app.export_dialog_open);
         let generation = app.export.as_ref().unwrap().generation;
         let _ = app.update(Message::ExportCancelled(generation));
-        assert!(!app.export.as_ref().unwrap().picking);
+        assert!(!app.export_dialog_open);
         assert!(export_status(&app).is_none());
         assert!(export_showing(&app));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
@@ -3884,10 +3948,37 @@ mod tests {
         settle(&mut app);
         let first = app.update(Message::ExportRequested);
         assert!(first.units() > 0);
-        assert!(app.export.as_ref().unwrap().picking);
+        assert!(app.export_dialog_open);
         let second = app.update(Message::ExportRequested);
         assert_eq!(second.units(), 0, "a second dialog was started");
-        assert!(!app.export.as_ref().unwrap().can_export(app.store.notes()));
+        assert!(!app.export_enabled());
+    }
+
+    #[test]
+    fn reopened_panel_cannot_start_a_second_dialog() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let old = app.export.as_ref().unwrap().generation;
+        let first = app.update(Message::ExportRequested);
+        assert!(first.units() > 0, "no dialog was started");
+        // Esc closes the panel while its dialog is still open.
+        let _ = app.update(escape());
+        settle(&mut app);
+        assert!(app.export.is_none());
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        assert!(export_showing(&app));
+        let second = app.update(Message::ExportRequested);
+        assert_eq!(second.units(), 0, "a second dialog was started");
+        assert!(!app.export_enabled());
+        // The first dialog returning, even cancelled, frees the button.
+        let _ = app.update(Message::ExportCancelled(old));
+        assert!(!app.export_dialog_open);
+        assert!(app.export_enabled());
+        let third = app.update(Message::ExportRequested);
+        assert!(third.units() > 0, "no dialog was started");
     }
 
     #[test]
@@ -3931,18 +4022,16 @@ mod tests {
         settle(&mut app);
         let old = app.export.as_ref().unwrap().generation;
         let _ = app.update(Message::ExportRequested);
-        // The panel folds away and opens afresh, starting its own dialog.
+        // The panel folds away and opens afresh.
         let _ = app.update(Message::ToggleExport);
         settle(&mut app);
         let _ = app.update(Message::ToggleExport);
         settle(&mut app);
         assert_ne!(app.export.as_ref().unwrap().generation, old);
-        let _ = app.update(Message::ExportRequested);
-        assert!(app.export.as_ref().unwrap().picking);
 
         // The first dialog's result still writes, but not into this panel.
         let path = dir.path().join("stale.md");
-        let _ = app.update(Message::ExportPicked(ExportJob {
+        let task = app.update(Message::ExportPicked(ExportJob {
             generation: old,
             path: path.clone(),
             notes: ids,
@@ -3950,9 +4039,10 @@ mod tests {
         }));
         assert!(path.exists());
         assert!(export_status(&app).is_none());
-        assert!(app.export.as_ref().unwrap().picking);
-        let _ = app.update(Message::ExportCancelled(old));
-        assert!(app.export.as_ref().unwrap().picking);
+        assert_eq!(task.units(), 0, "no close timer for another panel");
+        assert!(export_showing(&app));
+        // It frees the Export button all the same.
+        assert!(app.export_enabled());
     }
 
     #[test]

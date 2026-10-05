@@ -621,8 +621,8 @@ pub(crate) fn history_key(key: &str, modifiers: keyboard::Modifiers) -> Option<M
 /// The body editor's key bindings while it has focus: Cmd/Ctrl+V asks the
 /// app to paste (text or image), and the undo/redo keys step its history;
 /// other command shortcuts (Cmd+F, Cmd+N, Cmd+,) pass through to the app
-/// instead of typing their letter, unless Alt is held too; everything else
-/// is iced's default.
+/// instead of typing their letter, unless Alt is held too off macOS;
+/// everything else is iced's default.
 fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     if !matches!(press.status, text_editor::Status::Focused { .. }) {
         return text_editor::Binding::from_key_press(press);
@@ -634,9 +634,11 @@ fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding
         keyboard::Key::Character(c) => match history_key(c, press.modifiers) {
             Some(step) => Some(text_editor::Binding::Custom(step)),
             None => {
-                // Command without Alt: Ctrl+Alt is AltGr on Windows layouts
-                // and types characters such as `{` and `@`.
-                let command = press.modifiers.command() && !press.modifiers.alt();
+                // Off macOS, Ctrl+Alt is AltGr on Windows layouts and types
+                // characters such as `{` and `@`; macOS has no AltGr, so
+                // Cmd+Opt+letter stays a shortcut there.
+                let command = press.modifiers.command()
+                    && (cfg!(target_os = "macos") || !press.modifiers.alt());
                 // iced binds only c/x/v/a under command; any other letter
                 // would be inserted (macOS reports it as text).
                 match text_editor::Binding::from_key_press(press) {
@@ -691,13 +693,25 @@ mod tests {
     #[test]
     fn ctrl_alt_characters_still_type() {
         // LCtrl+LAlt is AltGr on Windows layouts, which types `{`, `}`, `@`.
+        // macOS has no AltGr: Cmd+Opt+letter stays a shortcut there.
         let focused = text_editor::Status::Focused { is_hovered: false };
         let mut brace = press("{", true, focused);
         brace.modifiers |= keyboard::Modifiers::ALT;
-        assert!(matches!(
-            body_key_binding(brace),
-            Some(text_editor::Binding::Insert('{'))
-        ));
+        let binding = body_key_binding(brace);
+        if cfg!(target_os = "macos") {
+            assert!(binding.is_none());
+        } else {
+            assert!(matches!(binding, Some(text_editor::Binding::Insert('{'))));
+        }
+        let mut cmd_opt_f = press("ƒ", true, focused);
+        cmd_opt_f.key = keyboard::Key::Character("f".into());
+        cmd_opt_f.modifiers |= keyboard::Modifiers::ALT;
+        let binding = body_key_binding(cmd_opt_f);
+        if cfg!(target_os = "macos") {
+            assert!(binding.is_none(), "Cmd+Opt+F must not insert ƒ");
+        } else {
+            assert!(matches!(binding, Some(text_editor::Binding::Insert('ƒ'))));
+        }
     }
 
     #[test]
