@@ -605,15 +605,16 @@ pub(crate) fn title_focused() -> iced::Task<bool> {
 }
 
 /// `Undo` for Cmd/Ctrl+Z, `Redo` for Cmd/Ctrl+Shift+Z (and Ctrl+Y off
-/// macOS), given a key's character and the held modifiers.
-pub(crate) fn history_key(key: &str, modifiers: keyboard::Modifiers) -> Option<Message> {
+/// macOS), given a key's shortcut letter (see
+/// [`crate::command_passthrough::shortcut_char`]) and the held modifiers.
+pub(crate) fn history_key(c: char, modifiers: keyboard::Modifiers) -> Option<Message> {
     if !modifiers.command() {
         return None;
     }
-    match key {
-        "z" | "Z" if modifiers.shift() => Some(Message::Redo),
-        "z" | "Z" => Some(Message::Undo),
-        "y" | "Y" if cfg!(not(target_os = "macos")) => Some(Message::Redo),
+    match c {
+        'z' if modifiers.shift() => Some(Message::Redo),
+        'z' => Some(Message::Undo),
+        'y' if cfg!(not(target_os = "macos")) => Some(Message::Redo),
         _ => None,
     }
 }
@@ -627,27 +628,24 @@ fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding
     if !matches!(press.status, text_editor::Status::Focused { .. }) {
         return text_editor::Binding::from_key_press(press);
     }
-    match press.key.as_ref() {
-        keyboard::Key::Character("v") if press.modifiers.command() => {
-            Some(text_editor::Binding::Custom(Message::PasteRequested))
-        }
-        keyboard::Key::Character(c) => match history_key(c, press.modifiers) {
-            Some(step) => Some(text_editor::Binding::Custom(step)),
-            None => {
-                // Off macOS, Ctrl+Alt is AltGr on Windows layouts and types
-                // characters such as `{` and `@`; macOS has no AltGr, so
-                // Cmd+Opt+letter stays a shortcut there.
-                let command = press.modifiers.command()
-                    && (cfg!(target_os = "macos") || !press.modifiers.alt());
-                // iced binds only c/x/v/a under command; any other letter
-                // would be inserted (macOS reports it as text).
-                match text_editor::Binding::from_key_press(press) {
-                    Some(text_editor::Binding::Insert(_)) if command => None,
-                    binding => binding,
-                }
-            }
-        },
-        _ => text_editor::Binding::from_key_press(press),
+    // Found by the key's Latin letter, so they work on any layout.
+    let shortcut = crate::command_passthrough::shortcut_char(&press.key, press.physical_key);
+    if press.modifiers.command() && shortcut == Some('v') {
+        return Some(text_editor::Binding::Custom(Message::PasteRequested));
+    }
+    if let Some(step) = shortcut.and_then(|c| history_key(c, press.modifiers)) {
+        return Some(text_editor::Binding::Custom(step));
+    }
+    // Off macOS, Ctrl+Alt is AltGr on Windows layouts and types characters
+    // such as `{` and `@`; macOS has no AltGr, so Cmd+Opt+letter stays a
+    // shortcut there.
+    let command =
+        press.modifiers.command() && (cfg!(target_os = "macos") || !press.modifiers.alt());
+    // iced binds only c/x/v/a under command; any other letter would be
+    // inserted (macOS reports it as text).
+    match text_editor::Binding::from_key_press(press) {
+        Some(text_editor::Binding::Insert(_)) if command => None,
+        binding => binding,
     }
 }
 
@@ -687,6 +685,41 @@ mod tests {
         assert!(matches!(
             body_key_binding(press("f", false, focused)),
             Some(text_editor::Binding::Insert('f'))
+        ));
+    }
+
+    fn press_on(
+        ch: &str,
+        code: keyboard::key::Code,
+        modifiers: keyboard::Modifiers,
+    ) -> text_editor::KeyPress {
+        let key = keyboard::Key::Character(ch.into());
+        text_editor::KeyPress {
+            modified_key: key.clone(),
+            key,
+            physical_key: keyboard::key::Physical::Code(code),
+            modifiers,
+            text: Some(ch.into()),
+            status: text_editor::Status::Focused { is_hovered: false },
+        }
+    }
+
+    #[test]
+    fn non_latin_layout_keeps_editor_shortcuts() {
+        use keyboard::key::Code;
+        let cmd = keyboard::Modifiers::COMMAND;
+        // Russian layout: V types "м", Z types "я".
+        assert!(matches!(
+            body_key_binding(press_on("м", Code::KeyV, cmd)),
+            Some(text_editor::Binding::Custom(Message::PasteRequested))
+        ));
+        assert!(matches!(
+            body_key_binding(press_on("я", Code::KeyZ, cmd)),
+            Some(text_editor::Binding::Custom(Message::Undo))
+        ));
+        assert!(matches!(
+            body_key_binding(press_on("Я", Code::KeyZ, cmd | keyboard::Modifiers::SHIFT)),
+            Some(text_editor::Binding::Custom(Message::Redo))
         ));
     }
 
