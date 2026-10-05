@@ -61,6 +61,8 @@ pub enum Message {
     ToggleSearch,
     SearchChanged(String),
     SearchResultPicked(Uuid),
+    /// Enter in the search field: opens the first result, if there is one.
+    SearchSubmitted,
     /// The panel's close button, a click beside it, or an Esc the focused
     /// search field took (it only drops its focus on Esc).
     CloseSearch,
@@ -73,8 +75,10 @@ pub enum Message {
     ExportFormatChosen(ExportFormat),
     /// The Export button: opens the save dialog.
     ExportRequested,
-    /// The save dialog returned what to write; `None` when it was cancelled.
-    ExportPicked(Option<ExportJob>),
+    /// The save dialog returned what to write.
+    ExportPicked(ExportJob),
+    /// The save dialog was cancelled; the panel generation that opened it.
+    ExportCancelled(u64),
     SettingChanged(SettingKey, f32),
     // Only the macOS/Windows settings panel shows these toggles.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
@@ -283,6 +287,9 @@ pub struct App {
     export_morph: Morph,
     /// Gear center when the export panel opened.
     export_anchor_y: f32,
+    /// Counts fresh openings of the export panel; see
+    /// [`ExportState::generation`].
+    export_generation: u64,
     /// Keyboard focus to give once the panel or note showing it has
     /// faded its content in (the widget doesn't exist before).
     pending_focus: Option<PendingFocus>,
@@ -439,6 +446,7 @@ impl App {
             export: None,
             export_morph,
             export_anchor_y: 0.0,
+            export_generation: 0,
             search_anchor_y: 0.0,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -510,6 +518,11 @@ impl App {
             Message::ToggleSearch => return self.toggle_search(),
             Message::SearchChanged(query) => self.search_query = query,
             Message::SearchResultPicked(id) => return self.pick_result(id),
+            Message::SearchSubmitted => {
+                if let Some(id) = self.search_hits().first().map(|hit| hit.note_id) {
+                    return self.pick_result(id);
+                }
+            }
             Message::CloseSearch => self.close_search(),
             Message::ToggleExport => return self.toggle_export(),
             Message::ExportToggleNote(id) => {
@@ -538,11 +551,14 @@ impl App {
             }
             Message::ExportRequested => return self.request_export(),
             Message::ExportPicked(job) => {
-                if let Some(state) = &mut self.export {
+                if let Some(state) = self.export_opened_by(job.generation) {
                     state.picking = false;
                 }
-                if let Some(job) = job {
-                    self.run_export(job);
+                self.run_export(job);
+            }
+            Message::ExportCancelled(generation) => {
+                if let Some(state) = self.export_opened_by(generation) {
+                    state.picking = false;
                 }
             }
             Message::SettingChanged(key, value) => {
@@ -2029,7 +2045,8 @@ impl App {
             None => {
                 let gear = self.strip_layout().settings_anchor();
                 self.export_anchor_y = gear.y + gear.height / 2.0;
-                self.export = Some(ExportState::new(self.store.notes()));
+                self.export_generation += 1;
+                self.export = Some(ExportState::new(self.store.notes(), self.export_generation));
             }
         }
         self.export_morph.open();
@@ -2060,6 +2077,7 @@ impl App {
         state.picking = true;
         let notes = state.selected_in(self.store.notes());
         let format = state.format;
+        let generation = state.generation;
         let name = export::suggested_name(chrono::Local::now().date_naive(), format);
         let kind = match format {
             ExportFormat::Markdown => "Markdown",
@@ -2076,17 +2094,27 @@ impl App {
                 .save_file()
                 .await
         };
-        Task::perform(dialog, move |file| {
-            Message::ExportPicked(file.map(|f| ExportJob {
-                path: f.path().to_path_buf(),
+        Task::perform(dialog, move |file| match file {
+            Some(file) => Message::ExportPicked(ExportJob {
+                generation,
+                path: file.path().to_path_buf(),
                 notes,
                 format,
-            }))
+            }),
+            None => Message::ExportCancelled(generation),
         })
     }
 
+    /// The export panel, if it is the opening `generation` belongs to.
+    fn export_opened_by(&mut self, generation: u64) -> Option<&mut ExportState> {
+        self.export
+            .as_mut()
+            .filter(|state| state.generation == generation)
+    }
+
     /// Writes the job's notes that still exist, in its order, and shows how
-    /// that went in the panel, or logs it once the panel is gone.
+    /// that went in the panel that started it, or logs it once that panel
+    /// is gone.
     fn run_export(&mut self, job: ExportJob) {
         let notes: Vec<_> = job
             .notes
@@ -2100,7 +2128,7 @@ impl App {
             Ok(()) => ExportStatus::Exported(notes.len()),
             Err(error) => ExportStatus::Failed(error.to_string()),
         };
-        match &mut self.export {
+        match self.export_opened_by(job.generation) {
             Some(state) => {
                 state.status = Some((status, Instant::now()));
                 self.animating = true;
@@ -3496,6 +3524,23 @@ mod tests {
     }
 
     #[test]
+    fn enter_opens_first_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "needle one"), ("b", "needle two")]);
+        let _ = app.update(Message::ToggleSearch);
+        // Without hits Enter does nothing.
+        let _ = app.update(Message::SearchChanged("zzz".into()));
+        let _ = app.update(Message::SearchSubmitted);
+        assert_eq!(app.active_note, None);
+        assert!(app.search_morph.is_opening());
+        let _ = app.update(Message::SearchChanged("needle".into()));
+        let _ = app.update(Message::SearchSubmitted);
+        assert_eq!(app.active_note, Some(ids[0]));
+        assert!(app.editing);
+        assert!(!app.search_morph.is_opening());
+    }
+
+    #[test]
     fn picking_a_result_switches_notes() {
         let dir = tempfile::tempdir().unwrap();
         let (mut app, ids) = app_with_notes(&dir, &[("a", "alpha"), ("b", "beta needle")]);
@@ -3690,11 +3735,12 @@ mod tests {
         assert!(task.units() > 0, "no dialog was started");
         let state = app.export.as_ref().unwrap();
         let job = ExportJob {
+            generation: state.generation,
             path,
             notes: state.selected_in(app.store.notes()),
             format: state.format,
         };
-        let _ = app.update(Message::ExportPicked(Some(job)));
+        let _ = app.update(Message::ExportPicked(job));
     }
 
     #[test]
@@ -3791,7 +3837,8 @@ mod tests {
         settle(&mut app);
         let _ = app.update(Message::ExportRequested);
         assert!(app.export.as_ref().unwrap().picking);
-        let _ = app.update(Message::ExportPicked(None));
+        let generation = app.export.as_ref().unwrap().generation;
+        let _ = app.update(Message::ExportCancelled(generation));
         assert!(!app.export.as_ref().unwrap().picking);
         assert!(export_status(&app).is_none());
         assert!(export_showing(&app));
@@ -3854,24 +3901,58 @@ mod tests {
         settle(&mut app);
         assert!(app.export.is_none());
         let path = dir.path().join("late.md");
-        let _ = app.update(Message::ExportPicked(Some(ExportJob {
+        let _ = app.update(Message::ExportPicked(ExportJob {
+            generation: 1,
             path: path.clone(),
             notes: ids.clone(),
             format: ExportFormat::Markdown,
-        })));
+        }));
         let notes = app.store.notes();
         let expected = crate::export::render(&[&notes[0], &notes[1]], ExportFormat::Markdown);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
         // A note deleted while the dialog was open is skipped.
         app.store.delete_note(ids[0]);
         let path = dir.path().join("later.md");
-        let _ = app.update(Message::ExportPicked(Some(ExportJob {
+        let _ = app.update(Message::ExportPicked(ExportJob {
+            generation: 1,
             path: path.clone(),
             notes: ids,
             format: ExportFormat::Markdown,
-        })));
+        }));
         let expected = crate::export::render(&[&app.store.notes()[0]], ExportFormat::Markdown);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn stale_export_result_does_not_touch_a_reopened_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "1")]);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let old = app.export.as_ref().unwrap().generation;
+        let _ = app.update(Message::ExportRequested);
+        // The panel folds away and opens afresh, starting its own dialog.
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        let _ = app.update(Message::ToggleExport);
+        settle(&mut app);
+        assert_ne!(app.export.as_ref().unwrap().generation, old);
+        let _ = app.update(Message::ExportRequested);
+        assert!(app.export.as_ref().unwrap().picking);
+
+        // The first dialog's result still writes, but not into this panel.
+        let path = dir.path().join("stale.md");
+        let _ = app.update(Message::ExportPicked(ExportJob {
+            generation: old,
+            path: path.clone(),
+            notes: ids,
+            format: ExportFormat::Markdown,
+        }));
+        assert!(path.exists());
+        assert!(export_status(&app).is_none());
+        assert!(app.export.as_ref().unwrap().picking);
+        let _ = app.update(Message::ExportCancelled(old));
+        assert!(app.export.as_ref().unwrap().picking);
     }
 
     #[test]
@@ -3885,7 +3966,8 @@ mod tests {
         app.keep_open_until = None;
         let _ = app.update(Message::WindowUnfocused);
         assert!(export_showing(&app));
-        let _ = app.update(Message::ExportPicked(None));
+        let generation = app.export.as_ref().unwrap().generation;
+        let _ = app.update(Message::ExportCancelled(generation));
         let _ = app.update(Message::WindowUnfocused);
         assert!(!app.export_morph.is_opening());
     }

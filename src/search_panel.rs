@@ -111,6 +111,7 @@ pub fn search_panel(v: SearchView<'_>) -> Element<'_, Message> {
         let field = text_input("Search notes", query)
             .id(FIELD_ID)
             .on_input(Message::SearchChanged)
+            .on_submit(Message::SearchSubmitted)
             .size(TEXT_SM)
             .padding(Padding::new(space(1)).left(space(2)).right(space(2)))
             .icon(text_input::Icon {

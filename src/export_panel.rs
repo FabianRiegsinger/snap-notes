@@ -37,9 +37,11 @@ impl ExportStatus {
 }
 
 /// An export the save dialog returned a path for: the notes (in strip
-/// order) and the format chosen when the dialog opened.
+/// order) and the format chosen when the dialog opened, and the
+/// [`ExportState::generation`] of the panel that opened it.
 #[derive(Debug, Clone)]
 pub struct ExportJob {
+    pub generation: u64,
     pub path: PathBuf,
     pub notes: Vec<Uuid>,
     pub format: ExportFormat,
@@ -53,16 +55,20 @@ pub struct ExportState {
     pub status: Option<(ExportStatus, Instant)>,
     /// The save dialog is open.
     pub picking: bool,
+    /// Tells this opening of the panel from earlier ones, so a dialog an
+    /// earlier one started doesn't report into it.
+    pub generation: u64,
 }
 
 impl ExportState {
     /// Every one of `notes` selected, as Markdown.
-    pub fn new(notes: &[Note]) -> Self {
+    pub fn new(notes: &[Note], generation: u64) -> Self {
         Self {
             selected: notes.iter().map(|n| n.id).collect(),
             format: ExportFormat::Markdown,
             status: None,
             picking: false,
+            generation,
         }
     }
 
@@ -297,7 +303,7 @@ mod tests {
 
     #[test]
     fn only_success_closes_the_panel() {
-        let mut state = ExportState::new(&[]);
+        let mut state = ExportState::new(&[], 0);
         assert!(state.succeeded_at().is_none());
         let at = Instant::now();
         state.status = Some((ExportStatus::Exported(2), at));
