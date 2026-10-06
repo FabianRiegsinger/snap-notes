@@ -207,7 +207,7 @@ fn tip_label<'a>(tip: impl text::IntoFragment<'a>, theme: theme::Theme) -> Eleme
 const TITLE_PLACEHOLDER: &str = "Title \u{2014} @15:00 adds a reminder";
 
 /// Notes narrower than this show the reminder as a bell alone.
-const REMINDER_LABEL_MIN_WIDTH: f32 = 320.0;
+const REMINDER_LABEL_MIN_WIDTH: f32 = 420.0;
 
 /// What the header shows for a reminder status.
 #[derive(Debug, Clone, PartialEq)]
@@ -981,7 +981,7 @@ mod tests {
     #[test]
     fn reminder_label_text_for_each_status() {
         use reminder::Status;
-        let wide = 400.0;
+        let wide = 500.0;
         assert_eq!(reminder_label(&Status::None, wide), None);
         assert_eq!(
             reminder_label(&Status::Pending("Fri 09:00".into()), wide),
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     fn fired_label_is_dimmed_without_suffix() {
-        let l = reminder_label(&reminder::Status::Fired("Fri 09:00".into()), 400.0).unwrap();
+        let l = reminder_label(&reminder::Status::Fired("Fri 09:00".into()), 500.0).unwrap();
         assert!(l.bell);
         assert_eq!(l.text.as_deref(), Some("Fri 09:00"));
         assert_eq!(l.ink, 0.45);
@@ -1014,7 +1014,7 @@ mod tests {
     #[test]
     fn reminder_label_narrow_shows_bell_only() {
         use reminder::Status;
-        let narrow = 319.0;
+        let narrow = 419.0;
         let p = reminder_label(&Status::Pending("Fri 09:00".into()), narrow).unwrap();
         assert!(p.bell && p.text.is_none() && p.ink == 0.65);
         assert_eq!(p.tooltip.as_deref(), Some("Fri 09:00"));
@@ -1024,7 +1024,7 @@ mod tests {
         let i = reminder_label(&Status::Invalid, narrow).unwrap();
         assert!(i.bell && i.text.is_none() && i.ink == 0.45);
         assert_eq!(i.tooltip.as_deref(), Some("not a reminder"));
-        let wide = reminder_label(&Status::Pending("x".into()), 320.0).unwrap();
+        let wide = reminder_label(&Status::Pending("x".into()), 420.0).unwrap();
         assert!(wide.text.is_some());
     }
 
