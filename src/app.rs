@@ -58,6 +58,19 @@ const EXPORTED_FOR: Duration = Duration::from_secs(2);
 const REMINDER_POLL: Duration = Duration::from_secs(30);
 /// One breath of a fired reminder's bar.
 const PULSE_SECS: f32 = 1.4;
+/// How long "Clipboard is empty" shows beside `+`.
+const CLIPBOARD_HINT_FOR: Duration = Duration::from_millis(1500);
+/// How long `+` shakes after an empty clipboard.
+const SHAKE_SECS: f32 = 0.3;
+
+/// The `+` slot's sideways offset `t` seconds after an empty clipboard:
+/// three cycles of ±3 px, settling within `SHAKE_SECS`.
+fn add_shake(t: f32) -> f32 {
+    if !(0.0..SHAKE_SECS).contains(&t) {
+        return 0.0;
+    }
+    3.0 * (t * std::f32::consts::TAU * 10.0).sin() * (1.0 - t / SHAKE_SECS)
+}
 
 /// A task that delivers `message` once `duration` has passed, so a timeout
 /// needs no frames running meanwhile.
@@ -156,6 +169,8 @@ pub enum Message {
     /// The tray item or an Alt/Option-click on `+`: a new note holding the
     /// clipboard's text or image.
     ClipboardNote,
+    /// The "Clipboard is empty" hint shown at this instant has had its time.
+    ClipboardEmptyExpired(Instant),
     /// Cmd/Ctrl+V in the editor: pastes the clipboard's text or image.
     PasteRequested,
     /// Text from the system clipboard, read for the note with this id;
@@ -314,6 +329,8 @@ pub struct App {
     copied_at: Option<(Uuid, u64)>,
     /// Counts copies, so a check's timer only clears its own copy.
     copies: u64,
+    /// When a clipboard note found nothing: `+` shakes and a chip says so.
+    clipboard_empty_at: Option<Instant>,
     animating: bool,
     last_tick: Option<Instant>,
     /// Notes whose reminder fired and that haven't been opened since; their
@@ -515,6 +532,7 @@ impl App {
             confirm_delete: None,
             copied_at: None,
             copies: 0,
+            clipboard_empty_at: None,
             animating: false,
             last_tick: None,
             pulsing: HashSet::new(),
@@ -941,6 +959,11 @@ impl App {
                     self.copied_at = None;
                 }
             }
+            Message::ClipboardEmptyExpired(at) => {
+                if self.clipboard_empty_at == Some(at) {
+                    self.clipboard_empty_at = None;
+                }
+            }
             Message::ConfirmDelete(confirmed) => {
                 if confirmed {
                     if let Some(id) = self.confirm_delete.take() {
@@ -998,7 +1021,9 @@ impl App {
                 if pulse_active {
                     self.pulse_phase = (self.pulse_phase + dt) % PULSE_SECS;
                 }
-                self.animating = mag_active || morph_active || collapse_active || pulse_active;
+                let shake_active = self.shake_secs(now).is_some();
+                self.animating =
+                    mag_active || morph_active || collapse_active || pulse_active || shake_active;
                 if !self.animating {
                     self.last_tick = None;
                 }
@@ -1434,6 +1459,8 @@ impl App {
             collapse: self.collapse(),
             dimmed: self.dimmed_bars(),
             pulse: self.bar_pulse(),
+            add_shake: self.shake_secs(Instant::now()).map_or(0.0, add_shake),
+            clipboard_hint: self.clipboard_empty_at.is_some(),
         })
         .width(Fill)
         .height(Fill)
@@ -1808,9 +1835,22 @@ impl App {
                     return Task::none();
                 }
             },
-            ClipboardContent::Empty => return Task::none(),
+            ClipboardContent::Empty => {
+                let at = Instant::now();
+                self.clipboard_empty_at = Some(at);
+                self.animating = true;
+                return delayed(CLIPBOARD_HINT_FOR, Message::ClipboardEmptyExpired(at));
+            }
         };
         self.create_note(None, body)
+    }
+
+    /// Seconds into the `+` slot's shake at `now`, while it lasts.
+    fn shake_secs(&self, now: Instant) -> Option<f32> {
+        let t = now
+            .saturating_duration_since(self.clipboard_empty_at?)
+            .as_secs_f32();
+        (t < SHAKE_SECS).then_some(t)
     }
 
     /// Copies an image file into the open note's folder and references it;
@@ -4190,6 +4230,47 @@ mod tests {
         assert!(app.store.notes().is_empty());
         assert_eq!(app.active_note, None);
         assert!(!app.store.is_dirty());
+    }
+
+    #[test]
+    fn empty_clipboard_sets_hint_and_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.clipboard_note(ClipboardContent::Empty);
+        let at = app.clipboard_empty_at.expect("the hint shows");
+        assert!(app.animating, "the shake runs on frames");
+        // Frames stop once the shake settles; the chip stays.
+        let _ = app.update(Message::Tick(at + Duration::from_millis(100)));
+        assert!(app.animating);
+        let _ = app.update(Message::Tick(at + Duration::from_millis(400)));
+        assert!(!app.animating);
+        assert_eq!(app.clipboard_empty_at, Some(at));
+        // An older hint's expiry leaves a newer one alone.
+        let _ = app.update(Message::ClipboardEmptyExpired(at - Duration::from_secs(1)));
+        assert_eq!(app.clipboard_empty_at, Some(at));
+        let _ = app.update(Message::ClipboardEmptyExpired(at));
+        assert_eq!(app.clipboard_empty_at, None);
+    }
+
+    #[test]
+    fn add_shake_settles() {
+        assert_eq!(add_shake(0.0), 0.0);
+        let peak = (0..300)
+            .map(|ms| add_shake(ms as f32 / 1000.0).abs())
+            .fold(0.0, f32::max);
+        assert!(peak > 2.0 && peak <= 3.0, "peak {peak}");
+        // Three cycles: the offset changes sign six times.
+        let signs: Vec<bool> = (1..300)
+            .map(|ms| add_shake(ms as f32 / 1000.0))
+            .filter(|x| x.abs() > 1e-3)
+            .map(|x| x > 0.0)
+            .collect();
+        assert_eq!(signs.windows(2).filter(|w| w[0] != w[1]).count(), 5);
+        // Later swings are smaller.
+        assert!(add_shake(0.275).abs() < add_shake(0.025).abs());
+        for t in [0.3, 0.5, 2.0, -0.1] {
+            assert_eq!(add_shake(t), 0.0, "t {t}");
+        }
     }
 
     #[test]

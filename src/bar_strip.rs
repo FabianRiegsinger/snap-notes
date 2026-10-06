@@ -8,12 +8,15 @@ use crate::theme;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
+use iced::advanced::text::{self, Paragraph as _, Renderer as _};
 use iced::advanced::widget::{tree, Tree};
 use iced::advanced::{self, Clipboard, Shell};
+use iced::alignment;
 use iced::event::Event;
 use iced::keyboard;
 use iced::mouse;
-use iced::{Color, Element, Length, Point, Rectangle, Size, Theme};
+use iced::{Color, Element, Length, Pixels, Point, Rectangle, Size, Theme, Vector};
+use std::time::{Duration, Instant};
 
 pub const STRIP_WIDTH: f32 = 64.0;
 /// Horizontal space between the screen edge and the bars.
@@ -169,6 +172,17 @@ impl StripLayout {
         }
     }
 
+    /// The slot with a tooltip under `pos`, if any.
+    pub fn slot_at(&self, pos: Point) -> Option<Slot> {
+        if self.add_hit_area.contains(pos) {
+            Some(Slot::Add)
+        } else if self.search_hit_area.contains(pos) {
+            Some(Slot::Search)
+        } else {
+            None
+        }
+    }
+
     /// What a press at `pos` on a slot does with `modifiers` held: Alt
     /// (Option) on the add slot makes a note from the clipboard.
     pub fn press_message(&self, pos: Point, modifiers: keyboard::Modifiers) -> Option<Message> {
@@ -179,10 +193,83 @@ impl StripLayout {
     }
 }
 
-/// The widget's own state: the modifiers held, for Alt-clicks.
+/// A slot below the bars that explains itself after a hover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    Add,
+    Search,
+}
+
+/// How long the cursor rests on a slot before its tooltip shows.
+const TOOLTIP_DELAY: Duration = Duration::from_millis(600);
+const ADD_TOOLTIP: &str = if cfg!(target_os = "macos") {
+    "New note · Option-click: from clipboard"
+} else {
+    "New note · Alt-click: from clipboard"
+};
+const SEARCH_TOOLTIP: &str = if cfg!(target_os = "macos") {
+    "Search (Cmd+F)"
+} else {
+    "Search (Ctrl+F)"
+};
+const CLIPBOARD_EMPTY: &str = "Clipboard is empty";
+
+/// The tooltip of the slot hovered since `hover`'s instant, once it has
+/// rested there for `TOOLTIP_DELAY`; none while the peek shows.
+pub fn slot_tooltip(
+    hover: Option<(Slot, Instant)>,
+    now: Instant,
+    peek_visible: bool,
+) -> Option<&'static str> {
+    let (slot, since) = hover.filter(|_| !peek_visible)?;
+    (now.saturating_duration_since(since) >= TOOLTIP_DELAY).then_some(match slot {
+        Slot::Add => ADD_TOOLTIP,
+        Slot::Search => SEARCH_TOOLTIP,
+    })
+}
+
+/// What a hint chip sits beside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HintAt {
+    Bar(usize),
+    Add,
+    Search,
+}
+
+/// A hint chip: its label and what it explains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Hint {
+    text: &'static str,
+    at: HintAt,
+}
+
+/// Whether a pressed bar has moved far enough to count as dragged.
+fn drag_moved(drag: &DragState) -> bool {
+    (drag.current_y - drag.origin_y).abs() > 5.0
+}
+
+/// The hint while a bar is dragged: "Stack" beside the bar a drop would
+/// stack onto.
+fn drag_hint(bars: &[Rectangle], drag: Option<&DragState>) -> Option<Hint> {
+    let drag = drag.filter(|d| drag_moved(d))?;
+    stack_target(bars, drag.bar_index, drag.current_y).map(|onto| Hint {
+        text: "Stack",
+        at: HintAt::Bar(onto),
+    })
+}
+
+/// The widget's own state: the modifiers held, for Alt-clicks, and the
+/// timing of the slot tooltips and the hint chip.
 #[derive(Default)]
 struct StripState {
     modifiers: keyboard::Modifiers,
+    /// The slot under the cursor and since when.
+    slot_hover: Option<(Slot, Instant)>,
+    /// The slot pressed last: its tooltip waits until the cursor leaves it
+    /// and comes back.
+    pressed_slot: Option<Slot>,
+    /// The chip on screen and since when, for its fade.
+    chip: Option<(Hint, Instant)>,
 }
 
 impl StripState {
@@ -200,6 +287,137 @@ impl StripState {
             _ => {}
         }
     }
+
+    /// The cursor is over `slot` (or none) at `now`: entering a slot starts
+    /// its tooltip's delay, moving within it keeps it running.
+    fn hover_slot(&mut self, slot: Option<Slot>, now: Instant) {
+        if slot != self.pressed_slot {
+            self.pressed_slot = None;
+        }
+        if slot.is_none() || self.pressed_slot.is_some() {
+            self.slot_hover = None;
+        } else if self.slot_hover.map(|(s, _)| s) != slot {
+            self.slot_hover = slot.map(|s| (s, now));
+        }
+    }
+
+    /// Any press hides the tooltip; the pressed `slot` (if the cursor is on
+    /// one) needs a fresh hover to show it again.
+    fn press(&mut self, slot: Option<Slot>) {
+        self.slot_hover = None;
+        self.pressed_slot = slot;
+    }
+
+    /// When the hovered slot's tooltip is due, if it is still to come.
+    fn tooltip_due(&self, now: Instant) -> Option<Instant> {
+        self.slot_hover
+            .map(|(_, since)| since + TOOLTIP_DELAY)
+            .filter(|due| *due > now)
+    }
+
+    /// Notes the chip shown at `now`; a new one starts fading in.
+    fn show_chip(&mut self, hint: Option<Hint>, now: Instant) {
+        if self.chip.map(|(h, _)| h) != hint {
+            self.chip = hint.map(|h| (h, now));
+        }
+    }
+}
+
+/// How long a hint chip takes to fade in.
+const CHIP_FADE: Duration = Duration::from_millis(120);
+const CHIP_TEXT: f32 = theme::TEXT_XS;
+const CHIP_PADDING: Size = Size::new(8.0, 4.0);
+/// Space between a chip and what it sits beside.
+const CHIP_GAP: f32 = theme::space(2);
+
+/// A chip's opacity, fading in since `since`.
+fn chip_alpha(since: Instant, now: Instant) -> f32 {
+    (now.saturating_duration_since(since).as_secs_f32() / CHIP_FADE.as_secs_f32()).min(1.0)
+}
+
+type ChipParagraph = <iced::Renderer as text::Renderer>::Paragraph;
+
+/// A chip's label: `text`, then `accent` (if any) in `accent_color`.
+fn chip_paragraph(text: &str, accent: Option<&str>, accent_color: Color) -> ChipParagraph {
+    let spans: Vec<text::Span<'_, (), iced::Font>> = std::iter::once(text::Span::new(text))
+        .chain(accent.map(|a| text::Span::new(a).color(accent_color)))
+        .collect();
+    ChipParagraph::with_spans(text::Text {
+        content: &spans[..],
+        bounds: Size::new(f32::INFINITY, f32::INFINITY),
+        size: Pixels(CHIP_TEXT),
+        line_height: text::LineHeight::default(),
+        font: theme::BODY_FONT,
+        align_x: text::Alignment::Default,
+        align_y: alignment::Vertical::Top,
+        shaping: text::Shaping::Advanced,
+        wrapping: text::Wrapping::None,
+    })
+}
+
+/// A chip around a label of size `label`: left of `anchor`, where the
+/// peek grows, and vertically centred on `y`.
+fn chip_frame(anchor: Rectangle, y: f32, label: Size) -> Rectangle {
+    let size = Size::new(
+        label.width + 2.0 * CHIP_PADDING.width,
+        label.height + 2.0 * CHIP_PADDING.height,
+    );
+    Rectangle::new(
+        Point::new(anchor.x - CHIP_GAP - size.width, y - size.height / 2.0),
+        size,
+    )
+}
+
+/// Where the chip labelled `text` (and `accent`) beside `anchor` at `y`
+/// is drawn, for hit-testing without a renderer.
+// The undo toast's hit area will use it; until then only the tests do.
+#[allow(dead_code)]
+pub fn chip_rect(anchor: Rectangle, y: f32, text: &str, accent: Option<&str>) -> Rectangle {
+    let label = chip_paragraph(text, accent, Color::TRANSPARENT).min_bounds();
+    chip_frame(anchor, y, label)
+}
+
+/// Draws a hint chip beside `anchor` (a bar or slot), vertically centred
+/// on `y`: a small card like the peek's paper with `text` at 0.75 ink and
+/// `accent` after it at full ink, all at `alpha`. Returns its rect.
+pub fn draw_chip(
+    renderer: &mut iced::Renderer,
+    theme: &theme::Theme,
+    anchor: Rectangle,
+    y: f32,
+    text: &str,
+    accent: Option<&str>,
+    alpha: f32,
+) -> Rectangle {
+    let paragraph = chip_paragraph(text, accent, theme.ink(alpha));
+    let rect = chip_frame(anchor, y, paragraph.min_bounds());
+    if alpha <= 0.0 {
+        return rect;
+    }
+    let [contact, ambient] = theme.shadows(alpha);
+    for shadow in [ambient, contact] {
+        renderer::Renderer::fill_quad(
+            renderer,
+            renderer::Quad {
+                bounds: rect,
+                border: iced::Border {
+                    radius: theme::RADIUS_CONTROL.into(),
+                    width: 1.0,
+                    color: theme.ink(0.15 * alpha),
+                },
+                shadow,
+                snap: true,
+            },
+            theme.card().scale_alpha(alpha),
+        );
+    }
+    renderer.fill_paragraph(
+        &paragraph,
+        Point::new(rect.x + CHIP_PADDING.width, rect.y + CHIP_PADDING.height),
+        theme.ink(0.75 * alpha),
+        rect,
+    );
+    rect
 }
 
 /// The strip shows a settings slot only where no tray menu offers Settings.
@@ -374,6 +592,10 @@ pub struct BarStrip<'a> {
     /// How strongly each bar's fired reminder pulses (0..=1), by index.
     /// Empty when nothing pulses.
     pub pulse: Vec<f32>,
+    /// How far the `+` slot is shaken sideways, after an empty clipboard.
+    pub add_shake: f32,
+    /// Shows "Clipboard is empty" beside the `+` slot.
+    pub clipboard_hint: bool,
 }
 
 impl<'a> BarStrip<'a> {
@@ -458,6 +680,35 @@ impl<'a> BarStrip<'a> {
         })
     }
 
+    /// The hint chip to show at `now`, if any: never with the peek. While
+    /// dragging only the stack cue; otherwise the empty clipboard, then the
+    /// hovered slot's tooltip.
+    fn hint(
+        &self,
+        strip: &StripLayout,
+        slot_hover: Option<(Slot, Instant)>,
+        now: Instant,
+    ) -> Option<Hint> {
+        if self.peek.is_some_and(|(_, progress)| progress > 0.0) {
+            return None;
+        }
+        if self.drag.is_some() {
+            return drag_hint(&strip.bars, self.drag.as_ref());
+        }
+        if self.clipboard_hint {
+            return Some(Hint {
+                text: CLIPBOARD_EMPTY,
+                at: HintAt::Add,
+            });
+        }
+        let text = slot_tooltip(slot_hover, now, false)?;
+        let at = match slot_hover?.0 {
+            Slot::Add => HintAt::Add,
+            Slot::Search => HintAt::Search,
+        };
+        Some(Hint { text, at })
+    }
+
     /// How far a slot at magnification `scale` has revealed its glyph (0..=1).
     fn reveal(scale: f32) -> f32 {
         ((scale - 1.0) / (ADD_PLUS_SCALE - 1.0)).clamp(0.0, 1.0)
@@ -501,7 +752,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
 
     fn draw(
         &self,
-        _tree: &Tree,
+        tree: &Tree,
         renderer: &mut iced::Renderer,
         _theme: &Theme,
         _style: &renderer::Style,
@@ -513,10 +764,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         let strip = self.layout_in(bounds);
         let bars = &strip.bars;
         let dragging_index = self.drag.as_ref().map(|d| d.bar_index);
-        let drag_active = self
-            .drag
-            .as_ref()
-            .is_some_and(|d| (d.current_y - d.origin_y).abs() > 5.0);
+        let drag_active = self.drag.as_ref().is_some_and(drag_moved);
 
         for (i, bar_rect) in bars.iter().enumerate() {
             if let Some((peek_index, progress)) = self.peek {
@@ -686,7 +934,8 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         let idle = self.drag.is_none();
         let count = self.entries.len();
         let add_reveal = Self::reveal(self.magnification.scale(count));
-        let add = strip.add_button;
+        // After an empty clipboard the slot shakes; its hit area holds still.
+        let add = strip.add_button + Vector::new(self.add_shake, 0.0);
         draw_slot(
             renderer,
             add,
@@ -856,6 +1105,24 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 }
             }
         }
+
+        // The hint chip, once `update` has noted it, fading in from then.
+        let state = tree.state.downcast_ref::<StripState>();
+        let now = Instant::now();
+        let current = self.hint(&strip, state.slot_hover, now);
+        if let Some((hint, since)) = state.chip.filter(|(h, _)| Some(*h) == current) {
+            if let Some(anchor) = hint_anchor(&strip, hint.at) {
+                draw_chip(
+                    renderer,
+                    &self.theme,
+                    anchor,
+                    anchor.center_y(),
+                    hint.text,
+                    None,
+                    chip_alpha(since, now),
+                );
+            }
+        }
     }
 
     fn update(
@@ -870,7 +1137,31 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         _viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
-        tree.state.downcast_mut::<StripState>().observe(event);
+        let state = tree.state.downcast_mut::<StripState>();
+        state.observe(event);
+        let now = Instant::now();
+        match event {
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                state.hover_slot(self.layout_in(bounds).slot_at(*position), now);
+            }
+            Event::Mouse(mouse::Event::CursorLeft) => state.hover_slot(None, now),
+            Event::Mouse(mouse::Event::ButtonPressed(_))
+            | Event::Keyboard(keyboard::Event::KeyPressed { .. }) => {
+                let strip = self.layout_in(bounds);
+                state.press(cursor.position().and_then(|pos| strip.slot_at(pos)));
+            }
+            Event::Window(iced::window::Event::RedrawRequested(at)) => {
+                let hint = self.hint(&self.layout_in(bounds), state.slot_hover, *at);
+                state.show_chip(hint, *at);
+                if state.chip.is_some_and(|(_, since)| *at < since + CHIP_FADE) {
+                    shell.request_redraw();
+                }
+            }
+            _ => {}
+        }
+        if let Some(due) = state.tooltip_due(now) {
+            shell.request_redraw_at(due);
+        }
 
         match event {
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
@@ -932,11 +1223,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         _viewport: &Rectangle,
         _renderer: &iced::Renderer,
     ) -> mouse::Interaction {
-        if self
-            .drag
-            .as_ref()
-            .is_some_and(|d| (d.current_y - d.origin_y).abs() > 5.0)
-        {
+        if self.drag.as_ref().is_some_and(drag_moved) {
             return mouse::Interaction::Grabbing;
         }
         if let Some(pos) = cursor.position() {
@@ -955,6 +1242,15 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
 impl<'a> From<BarStrip<'a>> for Element<'a, Message> {
     fn from(strip: BarStrip<'a>) -> Self {
         Self::new(strip)
+    }
+}
+
+/// What the chip for `at` sits beside.
+fn hint_anchor(strip: &StripLayout, at: HintAt) -> Option<Rectangle> {
+    match at {
+        HintAt::Bar(i) => strip.bars.get(i).copied(),
+        HintAt::Add => Some(strip.add_button),
+        HintAt::Search => Some(strip.search_button),
     }
 }
 
@@ -1267,6 +1563,93 @@ mod tests {
     }
 
     #[test]
+    fn stack_target_shows_stack_chip() {
+        let bar = Rectangle::new(Point::new(40.0, 100.0), Size::new(8.0, 40.0));
+        let bars = [bar, Rectangle { y: 150.0, ..bar }];
+        let drag = |current_y| DragState {
+            bar_index: 1,
+            origin_y: 170.0,
+            current_y,
+        };
+        assert_eq!(
+            drag_hint(&bars, Some(&drag(120.0))),
+            Some(Hint {
+                text: "Stack",
+                at: HintAt::Bar(0)
+            })
+        );
+        assert_eq!(drag_hint(&bars, Some(&drag(145.0))), None, "between bars");
+        assert_eq!(drag_hint(&bars, None), None);
+        // A press that hasn't moved yet is no drag.
+        let still = DragState {
+            bar_index: 0,
+            origin_y: 120.0,
+            current_y: 122.0,
+        };
+        assert_eq!(drag_hint(&bars, Some(&still)), None);
+    }
+
+    #[test]
+    fn slot_tooltip_after_delay_and_hidden_with_peek() {
+        let at = Instant::now();
+        let hover = Some((Slot::Add, at));
+        let later = |ms| at + Duration::from_millis(ms);
+        assert_eq!(slot_tooltip(hover, later(599), false), None);
+        let add = slot_tooltip(hover, later(600), false).unwrap();
+        assert!(add.starts_with("New note · ") && add.ends_with("-click: from clipboard"));
+        let search = slot_tooltip(Some((Slot::Search, at)), later(900), false).unwrap();
+        assert!(search == "Search (Cmd+F)" || search == "Search (Ctrl+F)");
+        assert_eq!(
+            slot_tooltip(hover, later(900), true),
+            None,
+            "not with the peek"
+        );
+        assert_eq!(slot_tooltip(None, later(900), false), None);
+    }
+
+    #[test]
+    fn slot_tooltip_needs_a_fresh_hover_after_a_press() {
+        let at = Instant::now();
+        let mut state = StripState::default();
+        state.hover_slot(Some(Slot::Add), at);
+        assert_eq!(state.slot_hover, Some((Slot::Add, at)));
+        // Moving within the slot keeps the timer running.
+        state.hover_slot(Some(Slot::Add), at + Duration::from_millis(300));
+        assert_eq!(state.slot_hover, Some((Slot::Add, at)));
+        state.press(Some(Slot::Add));
+        assert_eq!(state.slot_hover, None);
+        state.hover_slot(Some(Slot::Add), at + Duration::from_millis(900));
+        assert_eq!(state.slot_hover, None, "still the pressed slot");
+        let back = at + Duration::from_millis(1000);
+        state.hover_slot(None, back);
+        state.hover_slot(Some(Slot::Add), back);
+        assert_eq!(state.slot_hover, Some((Slot::Add, back)));
+        state.hover_slot(Some(Slot::Search), back);
+        assert_eq!(state.slot_hover, Some((Slot::Search, back)));
+    }
+
+    #[test]
+    fn chip_fades_in() {
+        let at = Instant::now();
+        assert_eq!(chip_alpha(at, at), 0.0);
+        assert!((chip_alpha(at, at + Duration::from_millis(60)) - 0.5).abs() < 0.01);
+        assert_eq!(chip_alpha(at, at + Duration::from_millis(120)), 1.0);
+    }
+
+    #[test]
+    fn chip_sits_beside_its_anchor() {
+        let anchor = Rectangle::new(Point::new(1040.0, 300.0), Size::new(8.0, 40.0));
+        let short = chip_rect(anchor, 320.0, "Stack", None);
+        assert!(short.x + short.width <= anchor.x);
+        assert!((short.center().y - 320.0).abs() < 0.01);
+        let long = chip_rect(anchor, 320.0, "Clipboard is empty", None);
+        assert!(long.width > short.width);
+        assert!((long.x + long.width - (short.x + short.width)).abs() < 0.01);
+        let accented = chip_rect(anchor, 320.0, "Stack", Some(" more"));
+        assert!(accented.width > short.width);
+    }
+
+    #[test]
     fn stack_peek_rows_open_their_notes() {
         let notes = [
             crate::note::Note::new(crate::note::PALETTE[0]),
@@ -1296,6 +1679,8 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            add_shake: 0.0,
+            clipboard_hint: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -1353,6 +1738,8 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            add_shake: 0.0,
+            clipboard_hint: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -1404,6 +1791,8 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            add_shake: 0.0,
+            clipboard_hint: false,
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -1441,6 +1830,8 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            add_shake: 0.0,
+            clipboard_hint: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -1479,6 +1870,8 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            add_shake: 0.0,
+            clipboard_hint: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
