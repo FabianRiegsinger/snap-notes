@@ -81,6 +81,14 @@ fn strip_band(strip: &StripLayout, gap: f32) -> (f32, f32) {
     (top, strip.hit_bottom())
 }
 
+/// Where a cursor that didn't move is, relative to a right-docked window
+/// that changed from `old_width` to `new_width`; `None` once it is outside.
+fn shifted_pointer(pointer: Option<Point>, old_width: f32, new_width: f32) -> Option<Point> {
+    pointer
+        .map(|p| Point::new(p.x + new_width - old_width, p.y))
+        .filter(|p| (0.0..=new_width).contains(&p.x))
+}
+
 /// The `+` slot's sideways offset `t` seconds after an empty clipboard:
 /// three cycles of ±3 px, settling within `SHAKE_SECS`.
 fn add_shake(t: f32) -> f32 {
@@ -236,8 +244,6 @@ pub enum Message {
     WindowResized(Size),
     Key(keyboard::Event),
     CursorMoved(Point),
-    /// The cursor entered the window; no position comes with it.
-    CursorEnteredWindow,
     CursorLeftWindow,
     MouseButton(bool),
     WindowUnfocused,
@@ -1494,13 +1500,6 @@ impl App {
                 }
                 return self.update_passthrough(Some(position));
             }
-            Message::CursorEnteredWindow => {
-                // Anywhere in the sliver is the edge zone, so the entry
-                // alone starts the dwell; a move soon gives the real spot.
-                if self.pointer.is_none() && self.is_sliver() {
-                    self.pointer = Some(Point::ORIGIN);
-                }
-            }
             Message::CursorLeftWindow => {
                 self.last_cursor = None;
                 self.pointer = None;
@@ -1722,7 +1721,6 @@ impl App {
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 Some(Message::CursorMoved(position))
             }
-            iced::Event::Mouse(mouse::Event::CursorEntered) => Some(Message::CursorEnteredWindow),
             iced::Event::Mouse(mouse::Event::CursorLeft) => Some(Message::CursorLeftWindow),
             iced::Event::Mouse(mouse::Event::ButtonPressed(_)) => Some(Message::MouseButton(true)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(_)) => {
@@ -2410,10 +2408,9 @@ impl App {
         }
         // The right edge stays put, so a cursor that doesn't move keeps its
         // screen spot; e.g. on the strip after the sliver widens to reveal.
+        // A shrink can leave it outside, without a `CursorLeft`.
         if !SUPPORTS_PASSTHROUGH {
-            if let Some(pointer) = &mut self.pointer {
-                pointer.x += size.width - self.window_size.width;
-            }
+            self.pointer = shifted_pointer(self.pointer, self.window_size.width, size.width);
         }
         let y = ((monitor.height - size.height) / 2.0).round();
         self.window_size = size;
@@ -2447,19 +2444,25 @@ impl App {
             || over_panel(self.export_frame())
     }
 
+    /// Whether `y` is within the strip's band.
+    fn in_band(&self, y: f32) -> bool {
+        let (top, bottom) = strip_band(&self.strip_layout(), self.settings.settings().bars.gap);
+        (top..=bottom).contains(&y)
+    }
+
     /// Whether `position` is over the strip's column within its band.
     fn over_strip(&self, position: Point) -> bool {
-        let (top, bottom) = strip_band(&self.strip_layout(), self.settings.settings().bars.gap);
-        position.x >= self.window_size.width - STRIP_WIDTH && (top..=bottom).contains(&position.y)
+        position.x >= self.window_size.width - STRIP_WIDTH && self.in_band(position.y)
     }
 
     /// Whether `position` is in the edge zone: the window's rightmost
     /// `EDGE_ZONE` px within the strip's band.
-    /// In the edge sliver every point counts: the window only spans the
-    /// docked height anyway.
+    ///
+    /// In the edge sliver that is anywhere inside the window, within the band.
     fn in_edge(&self, position: Point) -> bool {
         if self.is_sliver() {
-            return true;
+            return (0.0..=self.window_size.width).contains(&position.x)
+                && self.in_band(position.y);
         }
         position.x >= self.window_size.width - EDGE_ZONE && self.over_strip(position)
     }
@@ -6422,9 +6425,9 @@ mod tests {
         assert_eq!(app.window_width(false), EDGE_SLIVER);
         assert_eq!(app.window_width(true), open, "passthrough stays wide");
 
-        // Anywhere inside the sliver counts as the edge zone.
+        // Anywhere inside the sliver within the band counts as the edge zone.
         dock_without_passthrough(&mut app);
-        let _ = app.update(Message::CursorMoved(Point::new(0.5, 3.0)));
+        let _ = app.update(Message::CursorMoved(Point::new(0.5, edge_point(&app).y)));
         assert!(app.auto_hide.next_deadline().is_some(), "no dwell started");
         let _ = app.update(Message::CursorLeftWindow);
         assert_eq!(
@@ -6432,28 +6435,31 @@ mod tests {
             None,
             "leaving kept the dwell"
         );
-        // Entering is enough, even before any move.
-        let _ = app.update(Message::CursorEnteredWindow);
-        assert!(
-            app.auto_hide.next_deadline().is_some(),
-            "entry didn't count"
-        );
+        // Entering alone, without a move inside, doesn't count: no event
+        // maps to a message, so the pointer stays unknown.
+        run_for(&mut app, Instant::now(), 300);
+        assert_eq!(app.pointer, None, "a position was faked");
+        assert!(app.auto_hide.is_hidden(), "revealed without a move");
     }
 
     #[test]
-    fn sliver_grows_before_reveal_slide() {
+    fn sliver_width_restored_once_revealing() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = auto_hide_app(&dir);
         let t = hide_strip(&mut app);
         dock_without_passthrough(&mut app);
         let entered = t.max(Instant::now());
-        let _ = app.update(Message::CursorEnteredWindow);
+        let _ = app.update(Message::CursorMoved(edge_point(&app)));
         let _ = app.update(Message::Tick(
             entered + REVEAL_DWELL + Duration::from_millis(5),
         ));
         assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
         assert!(app.strip_x_offset() > 0.0, "the slide already ran");
-        assert_eq!(app.window_width(false), STRIP_WIDTH, "still a sliver");
+        assert_eq!(
+            app.window_width(false),
+            STRIP_WIDTH,
+            "a revealing strip must get its docked width back before sliding"
+        );
     }
 
     #[test]
@@ -6499,5 +6505,40 @@ mod tests {
         assert_eq!(app.cursor_y, None, "stale hover kept");
         assert!(app.hover_bar.is_none());
         run_for(&mut app, t, 400);
+    }
+
+    #[test]
+    fn sliver_edge_requires_band() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        hide_strip(&mut app);
+        dock_without_passthrough(&mut app);
+        let mid = edge_point(&app).y;
+        assert!(app.in_edge(Point::new(1.0, mid)));
+        assert!(!app.in_edge(Point::new(-5.0, mid)), "left of the sliver");
+        assert!(!app.in_edge(Point::new(3.0, mid)), "right of the sliver");
+        let below = Point::new(1.0, app.window_size.height - 2.0);
+        assert!(!app.in_edge(below), "below the band");
+        let _ = app.update(Message::CursorMoved(below));
+        assert_eq!(app.auto_hide.next_deadline(), None);
+    }
+
+    #[test]
+    fn shrink_clears_pointer_left_outside() {
+        let p = |x| Some(Point::new(x, 300.0));
+        // Shrinking from the strip to the sliver: a pointer that was over
+        // the strip's left part is now outside the window.
+        assert_eq!(shifted_pointer(p(10.0), STRIP_WIDTH, EDGE_SLIVER), None);
+        // One at the right border stays, at its new spot.
+        assert_eq!(
+            shifted_pointer(p(STRIP_WIDTH - 1.0), STRIP_WIDTH, EDGE_SLIVER),
+            p(EDGE_SLIVER - 1.0)
+        );
+        // Widening keeps the screen spot.
+        assert_eq!(
+            shifted_pointer(p(1.0), EDGE_SLIVER, STRIP_WIDTH),
+            p(STRIP_WIDTH - 1.0)
+        );
+        assert_eq!(shifted_pointer(None, EDGE_SLIVER, STRIP_WIDTH), None);
     }
 }
