@@ -86,12 +86,15 @@ impl Default for MotionSettings {
 pub struct WindowSettings {
     /// Share of the screen height the bar strip may use (centered).
     pub height_fraction: f32,
+    /// The strip slides off the screen edge while not in use.
+    pub auto_hide: bool,
 }
 
 impl Default for WindowSettings {
     fn default() -> Self {
         Self {
             height_fraction: 0.9,
+            auto_hide: false,
         }
     }
 }
@@ -159,6 +162,8 @@ pub enum SettingToggle {
     MenuBarIcon,
     DockIcon,
     GlobalHotkey,
+    /// In the Window group, on every platform.
+    AutoHide,
 }
 
 impl SettingToggle {
@@ -174,7 +179,7 @@ impl SettingToggle {
         match self {
             SettingToggle::MenuBarIcon => Some(SettingToggle::DockIcon),
             SettingToggle::DockIcon => Some(SettingToggle::MenuBarIcon),
-            SettingToggle::GlobalHotkey => None,
+            SettingToggle::GlobalHotkey | SettingToggle::AutoHide => None,
         }
     }
 }
@@ -398,6 +403,10 @@ impl Settings {
         if !settings.app.show_menu_bar_icon && !settings.app.show_dock_icon {
             settings.app.show_menu_bar_icon = true;
         }
+        let auto_hide = value.get("window").and_then(|w| w.get("auto_hide"));
+        if let Some(v) = auto_hide.and_then(|v| v.as_bool()) {
+            settings.window.auto_hide = v;
+        }
         settings
     }
 
@@ -406,6 +415,7 @@ impl Settings {
             SettingToggle::MenuBarIcon => self.app.show_menu_bar_icon,
             SettingToggle::DockIcon => self.app.show_dock_icon,
             SettingToggle::GlobalHotkey => self.app.global_hotkey,
+            SettingToggle::AutoHide => self.window.auto_hide,
         }
     }
 
@@ -424,6 +434,7 @@ impl Settings {
             SettingToggle::MenuBarIcon => &mut self.app.show_menu_bar_icon,
             SettingToggle::DockIcon => &mut self.app.show_dock_icon,
             SettingToggle::GlobalHotkey => &mut self.app.global_hotkey,
+            SettingToggle::AutoHide => &mut self.window.auto_hide,
         };
         *value = !*value;
         true

@@ -5,14 +5,11 @@ use crate::app::Message;
 use crate::color_picker::swatch;
 use crate::icons::{icon, Icon};
 use crate::note_panel::pressable;
-#[cfg(any(windows, target_os = "macos", test))]
 use crate::settings::SettingToggle;
 use crate::settings::{SettingKey, Settings, SettingsGroup, PRESETS};
 use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM, TEXT_XS};
 
-#[cfg(any(windows, target_os = "macos"))]
-use iced::widget::toggler;
-use iced::widget::{button, column, container, row, scrollable, slider, text, Space};
+use iced::widget::{button, column, container, row, scrollable, slider, text, toggler, Space};
 use iced::{border, Color, Element, Fill, Length, Padding, Shadow, Size, Theme};
 
 pub const PANEL_WIDTH: f32 = 360.0;
@@ -116,6 +113,28 @@ fn slider_row<'a>(
     .into()
 }
 
+/// The Window group's toggle, on every platform.
+pub const AUTO_HIDE_LABEL: &str = "Auto-hide";
+
+/// A labelled switch in the panel's text style, showing `on`.
+fn switch<'a>(
+    on: bool,
+    label: &'a str,
+    theme: theme::Theme,
+    a: f32,
+) -> toggler::Toggler<'a, Message> {
+    toggler(on)
+        .label(label)
+        .text_size(TEXT_XS)
+        .style(move |iced_theme: &Theme, status| {
+            let style = toggler::default(iced_theme, status);
+            toggler::Style {
+                text_color: Some(theme.ink(0.75 * a)),
+                ..style
+            }
+        })
+}
+
 /// Whether the user may flip `toggle` right now.
 #[cfg(any(windows, target_os = "macos", test))]
 pub fn toggle_enabled(settings: &Settings, toggle: SettingToggle, tray_ok: bool) -> bool {
@@ -137,6 +156,7 @@ fn toggle_label(toggle: SettingToggle) -> &'static str {
         SettingToggle::MenuBarIcon => "Show menu bar icon",
         SettingToggle::DockIcon => "Show Dock icon",
         SettingToggle::GlobalHotkey => HOTKEY_LABEL,
+        SettingToggle::AutoHide => AUTO_HIDE_LABEL,
     }
 }
 
@@ -146,6 +166,7 @@ fn toggle_label(toggle: SettingToggle) -> &'static str {
         SettingToggle::MenuBarIcon => "Show tray icon",
         SettingToggle::DockIcon => "Show taskbar button",
         SettingToggle::GlobalHotkey => HOTKEY_LABEL,
+        SettingToggle::AutoHide => AUTO_HIDE_LABEL,
     }
 }
 
@@ -161,16 +182,7 @@ fn app_section<'a>(
     let mut col = column![group_header(SettingsGroup::App, theme, a)].spacing(space(2));
     for t in SettingToggle::ALL {
         let forced = t == SettingToggle::DockIcon && dock_forced;
-        let mut switch = toggler(settings.is_on(t) || forced)
-            .label(toggle_label(t))
-            .text_size(TEXT_XS)
-            .style(move |iced_theme: &Theme, status| {
-                let style = toggler::default(iced_theme, status);
-                toggler::Style {
-                    text_color: Some(theme.ink(0.75 * a)),
-                    ..style
-                }
-            });
+        let mut switch = switch(settings.is_on(t) || forced, toggle_label(t), theme, a);
         if toggle_enabled(settings, t, tray_ok) && !forced {
             switch = switch.on_toggle(move |_| Message::SettingToggled(t));
         }
@@ -289,6 +301,13 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
                     for key in SettingKey::ALL.into_iter().filter(|k| k.group() == group) {
                         section = section.push(slider_row(settings, key, theme, a));
                     }
+                    if group == SettingsGroup::Window {
+                        let t = SettingToggle::AutoHide;
+                        section = section.push(
+                            switch(settings.is_on(t), AUTO_HIDE_LABEL, theme, a)
+                                .on_toggle(move |_| Message::SettingToggled(t)),
+                        );
+                    }
                     section.into()
                 }
             };
@@ -402,6 +421,13 @@ mod tests {
             let ratio = contrast(theme.danger(1.0), theme.card());
             assert!(ratio >= 4.5, "{mode:?} danger: {ratio}");
         }
+    }
+
+    #[test]
+    fn auto_hide_toggle_is_labelled_and_always_enabled() {
+        assert_eq!(AUTO_HIDE_LABEL, "Auto-hide");
+        let s = Settings::default();
+        assert!(toggle_enabled(&s, SettingToggle::AutoHide, false));
     }
 
     #[test]

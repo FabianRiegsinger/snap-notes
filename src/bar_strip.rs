@@ -21,6 +21,11 @@ use std::time::{Duration, Instant};
 pub const STRIP_WIDTH: f32 = 64.0;
 /// Horizontal space between the screen edge and the bars.
 pub const EDGE_MARGIN: f32 = 10.0;
+/// Extra room a hidden strip moves past the strip width, so no shadow, halo
+/// or notch is left on screen.
+pub const HIDE_MARGIN: f32 = 32.0;
+/// How far right a fully hidden strip is drawn.
+pub const HIDE_SHIFT: f32 = STRIP_WIDTH + HIDE_MARGIN;
 const ADD_BUTTON_GAP: f32 = 20.0;
 /// The add button is shaped like a bar and magnifies with them, but its
 /// height grows less so it stays a compact "slot" rather than a tall note.
@@ -716,9 +721,18 @@ pub struct BarStrip<'a> {
     /// A panel (search, settings or export) is open: the slots show no
     /// tooltips.
     pub panel_open: bool,
+    /// How far right everything is drawn while auto-hide slides the strip
+    /// away (0 = in place, `HIDE_SHIFT` = off screen). Above 0 the strip
+    /// takes no clicks or hovers.
+    pub x_offset: f32,
 }
 
 impl<'a> BarStrip<'a> {
+    /// Whether the strip is (partly) slid away and so ignores the mouse.
+    fn slid(&self) -> bool {
+        self.x_offset > 0.0
+    }
+
     /// The note bar `i` shows: its entry's top.
     fn note(&self, i: usize) -> Option<&'a Note> {
         self.notes.get(self.entries.get(i)?.top)
@@ -758,13 +772,39 @@ impl<'a> BarStrip<'a> {
     /// strip, end the hover outside. None over the open peek, so the bars
     /// (and the peek centered on its bar) hold still while it's in use.
     fn hover_message(&self, bounds: Rectangle, pos: Point) -> Option<Message> {
-        if self.peek_hit(bounds, pos).is_some() {
+        if self.slid() || self.peek_hit(bounds, pos).is_some() {
             None
         } else if bounds.contains(pos) {
             Some(Message::StripHover(Some(pos.y)))
         } else {
             Some(Message::StripHover(None))
         }
+    }
+
+    /// What a left press at `pos` does: `None` when the strip doesn't take
+    /// it, `Some(None)` when it takes it without a message. Nothing while
+    /// slid away.
+    fn left_press(
+        &self,
+        bounds: Rectangle,
+        pos: Point,
+        modifiers: keyboard::Modifiers,
+    ) -> Option<Option<Message>> {
+        if self.slid() {
+            return None;
+        }
+        if let Some(message) = self.toast_press(bounds, pos) {
+            return Some(Some(message));
+        }
+        // Clicking the open peek opens its note, or deletes it.
+        if let Some(action) = self.peek_press(bounds, pos) {
+            return Some(action);
+        }
+        let strip = self.layout_in(bounds);
+        if let Some(i) = strip.bars.iter().position(|bar| bar.contains(pos)) {
+            return Some(Some(Message::DragStart(i, pos.y)));
+        }
+        strip.press_message(pos, modifiers).map(Some)
     }
 
     /// What a press at `pos` on the open peek does: its trash button and a
@@ -868,45 +908,15 @@ impl<'a> BarStrip<'a> {
             .collect();
         strip_model::insertion_slot(&centers, drag.current_y, &pinned, drag.bar_index)
     }
-}
 
-impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
-    fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<StripState>()
-    }
-
-    fn state(&self) -> tree::State {
-        tree::State::new(StripState::default())
-    }
-
-    fn size(&self) -> Size<Length> {
-        Size::new(Length::Fixed(STRIP_WIDTH), Length::Fill)
-    }
-
-    fn layout(
-        &mut self,
-        _tree: &mut Tree,
-        _renderer: &iced::Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        let limits = limits
-            .width(Length::Fixed(STRIP_WIDTH))
-            .height(Length::Fill);
-        let size = limits.resolve(STRIP_WIDTH, f32::INFINITY, Size::new(STRIP_WIDTH, 0.0));
-        layout::Node::new(size)
-    }
-
-    fn draw(
+    /// Draws the strip in place, with `cursor` for its hover looks.
+    fn draw_strip(
         &self,
         tree: &Tree,
         renderer: &mut iced::Renderer,
-        _theme: &Theme,
-        _style: &renderer::Style,
-        layout: Layout<'_>,
+        bounds: Rectangle,
         cursor: mouse::Cursor,
-        _viewport: &Rectangle,
     ) {
-        let bounds = layout.bounds();
         let strip = self.layout_in(bounds);
         let bars = &strip.bars;
         let dragging_index = self.drag.as_ref().map(|d| d.bar_index);
@@ -1267,6 +1277,58 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             }
         }
     }
+}
+
+impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<StripState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(StripState::default())
+    }
+
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fixed(STRIP_WIDTH), Length::Fill)
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let limits = limits
+            .width(Length::Fixed(STRIP_WIDTH))
+            .height(Length::Fill);
+        let size = limits.resolve(STRIP_WIDTH, f32::INFINITY, Size::new(STRIP_WIDTH, 0.0));
+        layout::Node::new(size)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        _theme: &Theme,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+        if !self.slid() {
+            self.draw_strip(tree, renderer, layout.bounds(), cursor);
+            return;
+        }
+        // Slid away: everything moves right together, and nothing shows a
+        // hover.
+        renderer::Renderer::with_translation(
+            renderer,
+            Vector::new(self.x_offset, 0.0),
+            |renderer| {
+                self.draw_strip(tree, renderer, layout.bounds(), mouse::Cursor::Unavailable);
+            },
+        );
+    }
 
     fn update(
         &mut self,
@@ -1290,7 +1352,8 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         };
         match event {
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                state.hover_slot(self.layout_in(bounds).slot_at(*position), now);
+                let slot = self.layout_in(bounds).slot_at(*position);
+                state.hover_slot(slot.filter(|_| !self.slid()), now);
             }
             Event::Mouse(mouse::Event::CursorLeft) => state.hover_slot(None, now),
             Event::Mouse(mouse::Event::ButtonPressed(_))
@@ -1320,33 +1383,15 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 shell.publish(Message::StripHover(None));
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                if let Some(pos) = cursor.position() {
-                    if let Some(message) = self.toast_press(bounds, pos) {
+                let modifiers = tree.state.downcast_ref::<StripState>().modifiers;
+                let action = cursor
+                    .position()
+                    .and_then(|pos| self.left_press(bounds, pos, modifiers));
+                if let Some(action) = action {
+                    if let Some(message) = action {
                         shell.publish(message);
-                        shell.capture_event();
-                        return;
                     }
-                    let strip = self.layout_in(bounds);
-                    // Clicking the open peek opens its note, or deletes it.
-                    if let Some(action) = self.peek_press(bounds, pos) {
-                        if let Some(message) = action {
-                            shell.publish(message);
-                        }
-                        shell.capture_event();
-                        return;
-                    }
-                    for (i, bar_rect) in strip.bars.iter().enumerate() {
-                        if bar_rect.contains(pos) {
-                            shell.publish(Message::DragStart(i, pos.y));
-                            shell.capture_event();
-                            return;
-                        }
-                    }
-                    let modifiers = tree.state.downcast_ref::<StripState>().modifiers;
-                    if let Some(message) = strip.press_message(pos, modifiers) {
-                        shell.publish(message);
-                        shell.capture_event();
-                    }
+                    shell.capture_event();
                 }
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
@@ -1355,7 +1400,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 }
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta })
-                if bounds.contains(cursor.position().unwrap_or_default()) =>
+                if !self.slid() && bounds.contains(cursor.position().unwrap_or_default()) =>
             {
                 let dy = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => *y * 30.0,
@@ -1377,6 +1422,9 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
     ) -> mouse::Interaction {
         if self.drag.as_ref().is_some_and(drag_moved) {
             return mouse::Interaction::Grabbing;
+        }
+        if self.slid() {
+            return mouse::Interaction::None;
         }
         if let Some(pos) = cursor.position() {
             let strip = self.layout_in(layout.bounds());
@@ -1822,6 +1870,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            x_offset: 0.0,
         }
     }
 
@@ -1970,6 +2019,7 @@ mod tests {
             clipboard_hint: false,
             toast: true,
             panel_open: false,
+            x_offset: 0.0,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let toast = toast_rect(&strip.layout_in(bounds), bounds);
@@ -2032,6 +2082,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            x_offset: 0.0,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -2092,6 +2143,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            x_offset: 0.0,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -2146,6 +2198,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            x_offset: 0.0,
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -2186,6 +2239,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            x_offset: 0.0,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -2227,6 +2281,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            x_offset: 0.0,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -2405,5 +2460,48 @@ mod tests {
         // The handle sits at the ring's lower right.
         assert!(glyph.handle.center().x > glyph.ring.center().x);
         assert!(glyph.handle.center().y > glyph.ring.center().y);
+    }
+
+    #[test]
+    fn strip_ignores_clicks_while_offset() {
+        let notes = [crate::note::Note::new(crate::note::PALETTE[0])];
+        let entries = crate::strip_model::entries(&notes);
+        let magnification = MagnificationState::new();
+        let drag = None;
+        let bars = BarSettings::default();
+        let mut strip = plain_strip(&notes, &entries, &magnification, &drag, &bars);
+        strip.toast = true;
+        let layout = strip.layout_in(STRIP_BOUNDS);
+        let bar = layout.bars[0].center();
+        let add = layout.add_hit_area.center();
+        let toast = toast_rect(&layout, STRIP_BOUNDS).center();
+        let none = keyboard::Modifiers::default();
+        assert!(matches!(
+            strip.left_press(STRIP_BOUNDS, bar, none),
+            Some(Some(Message::DragStart(0, _)))
+        ));
+        assert!(strip.left_press(STRIP_BOUNDS, add, none).is_some());
+        assert!(strip.left_press(STRIP_BOUNDS, toast, none).is_some());
+
+        // Sliding away (or back), nothing takes a click or a hover.
+        for x_offset in [0.5, HIDE_SHIFT] {
+            strip.x_offset = x_offset;
+            for pos in [bar, add, toast] {
+                assert!(strip.left_press(STRIP_BOUNDS, pos, none).is_none());
+                assert!(strip.hover_message(STRIP_BOUNDS, pos).is_none());
+            }
+        }
+
+        // Fully hidden, every bar and slot, with the open bar's shadow,
+        // lies past the right edge.
+        let right = STRIP_BOUNDS.x + STRIP_BOUNDS.width;
+        let rects = layout
+            .bars
+            .iter()
+            .map(|bar| bar_rect_for(1.0, *bar))
+            .chain([layout.add_button, layout.search_button]);
+        for rect in rects {
+            assert!(rect.x + HIDE_SHIFT >= right + 24.0, "{rect:?}");
+        }
     }
 }

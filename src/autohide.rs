@@ -1,6 +1,4 @@
 //! Pure auto-hide state machine (no iced or OS dependency).
-// Task 2 wires this into app.rs and removes this allow.
-#![allow(dead_code)]
 
 use std::time::{Duration, Instant};
 
@@ -131,6 +129,8 @@ impl AutoHide {
         self.phase
     }
 
+    // Only tests ask yet; the Linux sliver (Task 3) will.
+    #[cfg(test)]
     pub fn is_hidden(&self) -> bool {
         self.phase == Phase::Hidden
     }

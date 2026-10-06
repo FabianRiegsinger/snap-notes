@@ -1,7 +1,8 @@
 use crate::animation::{ease_out_cubic, morph_frame, MagnificationState, Morph, MorphFrame};
+use crate::autohide::{self, AutoHide};
 use crate::bar_strip::{
-    band, compute_layout, peek_target, stack_target, BarStrip, StripLayout, SETTINGS_SLOT,
-    STRIP_WIDTH,
+    band, compute_layout, peek_target, stack_target, BarStrip, StripLayout, HIDE_SHIFT,
+    SETTINGS_SLOT, STRIP_WIDTH,
 };
 use crate::export::{self, ExportFormat};
 use crate::export_panel::{export_panel, ExportJob, ExportState, ExportStatus, ExportView};
@@ -65,6 +66,17 @@ const UNDO_FOR: Duration = Duration::from_secs(5);
 /// How long `+` shakes after an empty clipboard.
 const SHAKE_SECS: f32 = 0.3;
 
+/// Width of the edge zone at the window's right border that reveals a
+/// hidden strip.
+const EDGE_ZONE: f32 = 2.0;
+
+/// The strip's band, top and bottom: from the first bar (or the add slot
+/// without bars) less a bar gap, down to the last slot's hit area.
+fn strip_band(strip: &StripLayout, gap: f32) -> (f32, f32) {
+    let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y) - gap;
+    (top, strip.hit_bottom())
+}
+
 /// The `+` slot's sideways offset `t` seconds after an empty clipboard:
 /// three cycles of ±3 px, settling within `SHAKE_SECS`.
 fn add_shake(t: f32) -> f32 {
@@ -116,8 +128,6 @@ pub enum Message {
     /// of this generation: the panel closes, if it still shows it.
     ExportStatusExpired(u64, Instant),
     SettingChanged(SettingKey, f32),
-    // Only the macOS/Windows settings panel shows these toggles.
-    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     SettingToggled(SettingToggle),
     ResetGroup(SettingsGroup),
     /// Palette slot whose preset grid is open (`None` closes it).
@@ -171,6 +181,8 @@ pub enum Message {
     /// A file is dragged over the window: no cursor moves arrive meanwhile,
     /// so the last cursor position is forgotten until one does.
     FileHovered,
+    /// The dragged files left the window without a drop.
+    FileHoverEnded,
     /// The tray item or an Alt/Option-click on `+`: a new note holding the
     /// clipboard's text or image.
     ClipboardNote,
@@ -226,6 +238,8 @@ pub enum Message {
     PollCursor,
     PeekTick(Instant),
     CursorPolled(Option<Point>),
+    /// Auto-hide's dwell or grace deadline at this instant has come.
+    AutoHideWake(Instant),
 }
 
 /// What a paste found on the clipboard.
@@ -411,6 +425,17 @@ pub struct App {
     /// Switching the Dock / taskbar icon briefly takes focus away from the
     /// window; until then losing focus doesn't close the note or settings.
     keep_open_until: Option<Instant>,
+    /// Slides the strip off the screen edge while it is not in use.
+    auto_hide: AutoHide,
+    /// Reveal the strip on auto-hide's next step, without the dwell.
+    force_reveal: bool,
+    /// The deadline a wake-up is already scheduled for.
+    auto_hide_wake: Option<Instant>,
+    /// Where the cursor was last seen, by an event or (while passthrough
+    /// is on) a poll; auto-hide goes by it.
+    pointer: Option<Point>,
+    /// Files are being dragged over the window.
+    file_hover: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -589,6 +614,12 @@ impl App {
             tray_ok: false,
             tray_failed: false,
             keep_open_until: None,
+            // Always starts Shown; the grace applies from the first step.
+            auto_hide: AutoHide::default(),
+            force_reveal: false,
+            auto_hide_wake: None,
+            pointer: None,
+            file_hover: false,
         }
     }
 
@@ -597,10 +628,16 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // A tick steps auto-hide itself, by its own frame time.
+        let tick = matches!(message, Message::Tick(_));
         let task = self.handle(message);
         self.sync_entries();
         self.sync_search();
-        task
+        if tick {
+            return task;
+        }
+        let auto_hide = self.drive_auto_hide(Instant::now(), 0.0);
+        Task::batch([task, auto_hide])
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -629,6 +666,7 @@ impl App {
                 }
             }
             Message::ToggleSettings => {
+                self.force_reveal = true;
                 if self.settings_open && self.settings_morph.is_opening() {
                     return self.update(Message::CloseSettings);
                 }
@@ -748,7 +786,10 @@ impl App {
                     }
                 }
             }
-            Message::AddNote => return self.create_note(None, String::new()),
+            Message::AddNote => {
+                self.force_reveal = true;
+                return self.create_note(None, String::new());
+            }
             Message::NoteHovered(hovered) => {
                 self.note_hovered = hovered;
             }
@@ -1050,13 +1091,22 @@ impl App {
                     self.pulse_phase = (self.pulse_phase + dt) % PULSE_SECS;
                 }
                 let shake_active = self.shake_secs(now).is_some();
-                self.animating =
-                    mag_active || morph_active || collapse_active || pulse_active || shake_active;
+                let auto_hide = self.drive_auto_hide(now, dt);
+                let slide_active = matches!(
+                    self.auto_hide.phase(),
+                    autohide::Phase::Hiding | autohide::Phase::Revealing
+                );
+                self.animating = mag_active
+                    || morph_active
+                    || collapse_active
+                    || pulse_active
+                    || shake_active
+                    || slide_active;
                 if !self.animating {
                     self.last_tick = None;
                 }
 
-                let focus = Task::batch([collapsed, self.take_pending_focus()]);
+                let focus = Task::batch([collapsed, self.take_pending_focus(), auto_hide]);
                 if self.active_note.is_some() && self.morph.is_closed() {
                     return Task::batch([focus, self.finish_close()]);
                 }
@@ -1086,8 +1136,12 @@ impl App {
                 self.color_picker_open = false;
             }
             Message::FormatApplied(format) => return self.apply_format(format),
-            Message::ImageDropped(path) if self.note_open() => return self.import_image(&path),
+            Message::ImageDropped(path) if self.note_open() => {
+                self.file_hover = false;
+                return self.import_image(&path);
+            }
             Message::ImageDropped(path) => {
+                self.file_hover = false;
                 let entry = self.last_cursor.and_then(|at| {
                     self.strip_layout()
                         .bars
@@ -1097,7 +1151,11 @@ impl App {
                 return self.update(Message::StripFileDropped(entry, path));
             }
             Message::StripFileDropped(entry, path) => return self.drop_on_strip(entry, &path),
-            Message::FileHovered => self.last_cursor = None,
+            Message::FileHovered => {
+                self.file_hover = true;
+                self.last_cursor = None;
+            }
+            Message::FileHoverEnded => self.file_hover = false,
             Message::ClipboardNote => return self.clipboard_note(read_clipboard()),
             Message::ImagePicked(id, Some(path))
                 if self.active_note == Some(id) && self.morph.is_opening() =>
@@ -1262,6 +1320,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::HotkeyPressed => {
+                self.force_reveal = true;
                 let mut tasks = Vec::new();
                 if !self.visible {
                     tasks.push(self.update(Message::ToggleVisibility));
@@ -1315,6 +1374,7 @@ impl App {
                 if needs_notes && !self.visible {
                     tasks.push(self.update(Message::ToggleVisibility));
                 }
+                self.force_reveal |= needs_notes;
                 tasks.push(self.update(message));
                 return Task::batch(tasks);
             }
@@ -1411,6 +1471,7 @@ impl App {
             Message::Key(_) => {}
             Message::CursorMoved(position) => {
                 self.last_cursor = Some(position);
+                self.pointer = Some(position);
                 if let Some(offset) = self.note_drag {
                     self.note_drag_pos = Some(position - offset);
                 }
@@ -1429,6 +1490,7 @@ impl App {
             }
             Message::CursorLeftWindow => {
                 self.last_cursor = None;
+                self.pointer = None;
                 return self.update_passthrough(None);
             }
             Message::MouseButton(down) => {
@@ -1459,8 +1521,16 @@ impl App {
                 }
             }
             Message::CursorPolled(position) => {
+                self.pointer = position;
                 if self.passthrough && position.is_some_and(|p| self.is_interactive(p)) {
                     return self.update_passthrough(position);
+                }
+            }
+            // `update` steps auto-hide after every message; this one only
+            // lets the next wake-up be scheduled.
+            Message::AutoHideWake(deadline) => {
+                if self.auto_hide_wake == Some(deadline) {
+                    self.auto_hide_wake = None;
                 }
             }
         }
@@ -1497,6 +1567,7 @@ impl App {
             clipboard_hint: self.clipboard_empty_at.is_some(),
             toast: self.toast_visible(),
             panel_open: self.panel_open(),
+            x_offset: self.strip_x_offset(),
         })
         .width(Fill)
         .height(Fill)
@@ -1645,6 +1716,7 @@ impl App {
             }
             iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowUnfocused),
             iced::Event::Window(window::Event::FileHovered(_)) => Some(Message::FileHovered),
+            iced::Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FileHoverEnded),
             iced::Event::Window(window::Event::FileDropped(path)) => {
                 Some(Message::ImageDropped(path))
             }
@@ -2137,6 +2209,8 @@ impl App {
                     self.pulse_phase = 0.0;
                 }
                 self.pulsing.insert(id);
+                // A fired reminder is never missed: the strip slides in.
+                self.force_reveal = true;
             }
         }
         let _ = self.store.save();
@@ -2310,30 +2384,98 @@ impl App {
     /// Whether the window should catch the mouse at `position`: over the bar
     /// stack, the open note, the settings or the undo toast. Everywhere else
     /// clicks go to the apps behind.
+    /// While auto-hide has the strip (partly) slid away, only the edge
+    /// zone and an open note or panel count.
     fn is_interactive(&self, position: Point) -> bool {
         if !self.visible {
             return false;
         }
-        let strip = self.strip_layout();
-        let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y)
-            - self.settings.settings().bars.gap;
-        let bottom = strip.hit_bottom();
-        let over_strip = position.x >= self.window_size.width - STRIP_WIDTH
-            && (top..=bottom).contains(&position.y);
         let over_panel = |frame: Option<MorphFrame>| {
             frame.is_some_and(|frame| frame.rect.expand(8.0).contains(position))
         };
-        let over_peek = self.peek_rect().is_some_and(|rect| rect.contains(position));
-        let over_toast = self
-            .toast_rect()
-            .is_some_and(|rect| rect.contains(position));
-        over_strip
-            || over_peek
-            || over_toast
+        let strip_used = if self.strip_x_offset() > 0.0 {
+            self.in_edge(position)
+        } else {
+            self.in_use_area(position)
+        };
+        strip_used
             || over_panel(self.note_frame())
             || over_panel(self.settings_frame())
             || over_panel(self.search_frame())
             || over_panel(self.export_frame())
+    }
+
+    /// Whether `position` is over the strip's column within its band.
+    fn over_strip(&self, position: Point) -> bool {
+        let (top, bottom) = strip_band(&self.strip_layout(), self.settings.settings().bars.gap);
+        position.x >= self.window_size.width - STRIP_WIDTH && (top..=bottom).contains(&position.y)
+    }
+
+    /// Whether `position` is in the edge zone: the window's rightmost
+    /// `EDGE_ZONE` px within the strip's band.
+    fn in_edge(&self, position: Point) -> bool {
+        position.x >= self.window_size.width - EDGE_ZONE && self.over_strip(position)
+    }
+
+    /// Whether `position` is where the strip is in use: its column within
+    /// the band, the open peek or the undo toast.
+    fn in_use_area(&self, position: Point) -> bool {
+        self.over_strip(position)
+            || self.peek_rect().is_some_and(|rect| rect.contains(position))
+            || self
+                .toast_rect()
+                .is_some_and(|rect| rect.contains(position))
+    }
+
+    /// What auto-hide goes by now. An open note doesn't block hiding.
+    fn auto_hide_inputs(&self) -> autohide::Inputs {
+        let at = |test: fn(&Self, Point) -> bool| self.pointer.is_some_and(|p| test(self, p));
+        autohide::Inputs {
+            enabled: self.settings.settings().window.auto_hide && self.visible,
+            in_edge: at(Self::in_edge),
+            in_use_area: at(Self::in_use_area),
+            blocked: self.panel_open()
+                || self.drag.is_some()
+                || self.file_hover
+                || self.last_deleted.is_some()
+                || self.clipboard_empty_at.is_some()
+                || !self.pulsing.is_empty()
+                || self.export_dialog_open,
+            force_reveal: self.force_reveal,
+        }
+    }
+
+    /// Steps auto-hide at `now` by `dt` seconds. Returns a wake-up for a
+    /// newly pending dwell or grace deadline, and the passthrough update
+    /// once the strip starts or stops being in place. Keeps frames running
+    /// while it slides.
+    fn drive_auto_hide(&mut self, now: Instant, dt: f32) -> Task<Message> {
+        let was_in_place = self.strip_x_offset() == 0.0;
+        let inputs = self.auto_hide_inputs();
+        self.force_reveal = false;
+        let speed = self.settings.settings().motion.speed;
+        if self.auto_hide.step(inputs, now, dt, speed) {
+            self.animating = true;
+        }
+        let mut tasks = Vec::new();
+        if let Some(deadline) = self.auto_hide.next_deadline() {
+            if self.auto_hide_wake != Some(deadline) {
+                self.auto_hide_wake = Some(deadline);
+                tasks.push(delayed(
+                    deadline.saturating_duration_since(now),
+                    Message::AutoHideWake(deadline),
+                ));
+            }
+        }
+        if was_in_place != (self.strip_x_offset() == 0.0) {
+            tasks.push(self.update_passthrough(self.pointer));
+        }
+        Task::batch(tasks)
+    }
+
+    /// How far right the strip is drawn while auto-hide slides it away.
+    fn strip_x_offset(&self) -> f32 {
+        self.auto_hide.offset() * HIDE_SHIFT
     }
 
     /// Search, settings or export is open.
@@ -2547,12 +2689,14 @@ impl App {
             Point::new(right - PANEL_WIDTH, center_y - height / 2.0),
             Size::new(PANEL_WIDTH, height),
         );
+        let source = source + Vector::new(self.strip_x_offset(), 0.0);
         morph_frame(source, target, morph.progress())
     }
 
     /// Opens the search panel, or closes it while it is showing. It closes
     /// the note and the settings, and starts with an empty query.
     fn toggle_search(&mut self) -> Task<Message> {
+        self.force_reveal = true;
         if self.search_open && self.search_morph.is_opening() {
             self.close_search();
             return Task::none();
@@ -2820,7 +2964,9 @@ impl App {
     fn note_frame(&self) -> Option<MorphFrame> {
         let id = self.active_note?;
         let entry = self.id_entry(id)?;
-        let source = *self.strip_layout().bars.get(entry)?;
+        // A note folding while the strip is away heads for its hidden bar.
+        let source =
+            *self.strip_layout().bars.get(entry)? + Vector::new(self.strip_x_offset(), 0.0);
         Some(morph_frame(
             source,
             self.note_target_rect(),
@@ -3092,6 +3238,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::autohide::REVEAL_DWELL;
+    use crate::bar_strip::HIDE_MARGIN;
     use crate::settings::SettingToggle;
 
     fn app_in(dir: &tempfile::TempDir) -> App {
@@ -5929,5 +6077,270 @@ mod tests {
             "the old note keeps its size"
         );
         assert_eq!(app.store.notes()[1].size, None);
+    }
+
+    /// `app` with auto-hide switched on (as the toggle does, without a step).
+    fn with_auto_hide(mut app: App) -> App {
+        app.settings.settings_mut().toggle(SettingToggle::AutoHide);
+        app
+    }
+
+    /// An idle app with one note and auto-hide on, still Shown.
+    fn auto_hide_app(dir: &tempfile::TempDir) -> App {
+        let mut app = app_in(dir);
+        app.store.add_note(&crate::note::PALETTE);
+        app.window_size = Size::new(1400.0, 900.0);
+        with_auto_hide(app)
+    }
+
+    /// Frame ticks every 16 ms from `from` for `ms` milliseconds; returns
+    /// the last tick's instant.
+    fn run_for(app: &mut App, from: Instant, ms: u64) -> Instant {
+        let mut now = from;
+        let end = from + Duration::from_millis(ms);
+        while now < end {
+            now += Duration::from_millis(16);
+            let _ = app.update(Message::Tick(now));
+        }
+        now
+    }
+
+    /// Lets the idle strip's grace run out and its slide finish.
+    fn hide_strip(app: &mut App) -> Instant {
+        let t = run_for(app, Instant::now(), 1200);
+        assert!(app.auto_hide.is_hidden(), "the idle strip didn't hide");
+        t
+    }
+
+    /// A point in the edge zone, halfway down the strip's band.
+    fn edge_point(app: &App) -> Point {
+        let (top, bottom) = strip_band(&app.strip_layout(), app.settings.settings().bars.gap);
+        Point::new(app.window_size.width - 1.0, (top + bottom) / 2.0)
+    }
+
+    #[test]
+    fn auto_hide_setting_persists_and_starts_shown() {
+        assert!(!Settings::default().window.auto_hide);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut store = SettingsStore::load(path.clone());
+        assert!(!store.settings().is_on(SettingToggle::AutoHide));
+        assert!(store.settings_mut().toggle(SettingToggle::AutoHide));
+        assert!(store.settings().window.auto_hide);
+        store.save().unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["window"]["auto_hide"], serde_json::Value::Bool(true));
+
+        let reloaded = SettingsStore::load(path);
+        assert!(reloaded.settings().window.auto_hide);
+        let app = App::new(NoteStore::load(dir.path().join("notes.json")), reloaded);
+        assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Shown);
+        assert_eq!(app.strip_x_offset(), 0.0);
+
+        let mut s = Settings::from_json(r#"{"window": {"auto_hide": true}}"#);
+        assert!(s.window.auto_hide);
+        s.reset(SettingsGroup::Window);
+        assert!(!s.window.auto_hide);
+    }
+
+    #[test]
+    fn idle_strip_hides_and_only_edge_is_interactive() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        let t0 = Instant::now();
+        // Shown at first, for the grace.
+        run_for(&mut app, t0, 700);
+        assert_eq!(app.auto_hide.offset(), 0.0);
+        hide_strip(&mut app);
+        assert_eq!(app.strip_x_offset(), STRIP_WIDTH + HIDE_MARGIN);
+
+        let edge = edge_point(&app);
+        assert!(app.is_interactive(edge));
+        let bar = app.strip_layout().bars[0].center();
+        assert!(!app.is_interactive(bar), "the hidden bar took the click");
+        let column = Point::new(app.window_size.width - 30.0, edge.y);
+        assert!(!app.is_interactive(column));
+        let left_of_edge = Point::new(app.window_size.width - 3.0, edge.y);
+        assert!(!app.is_interactive(left_of_edge));
+        let below_band = Point::new(edge.x, app.window_size.height - 2.0);
+        assert!(!app.is_interactive(below_band));
+    }
+
+    #[test]
+    fn edge_dwell_reveals_strip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        hide_strip(&mut app);
+        let edge = edge_point(&app);
+        let before = Instant::now();
+        let _ = app.update(Message::CursorMoved(edge));
+        let after = Instant::now();
+        assert_eq!(
+            app.auto_hide
+                .next_deadline()
+                .map(|d| d >= before + REVEAL_DWELL),
+            Some(true),
+            "no wake-up for the dwell"
+        );
+        let _ = app.update(Message::Tick(before + Duration::from_millis(149)));
+        assert!(app.auto_hide.is_hidden(), "revealed before the dwell");
+        let t = run_for(&mut app, after + REVEAL_DWELL, 300);
+        assert_eq!(app.auto_hide.offset(), 0.0, "the dwell didn't reveal");
+        // Resting on the strip keeps it shown.
+        run_for(&mut app, t, 2000);
+        assert_eq!(app.auto_hide.offset(), 0.0);
+        assert!(app.is_interactive(app.strip_layout().bars[0].center()));
+
+        // Leaving the edge zone early resets the dwell.
+        let _ = app.update(Message::CursorMoved(Point::new(100.0, 100.0)));
+        hide_strip(&mut app);
+        let _ = app.update(Message::CursorMoved(edge));
+        let _ = app.update(Message::CursorMoved(Point::new(100.0, edge.y)));
+        assert_eq!(app.auto_hide.next_deadline(), None);
+        run_for(&mut app, Instant::now(), 500);
+        assert!(app.auto_hide.is_hidden());
+    }
+
+    #[test]
+    fn open_note_does_not_block_hiding_and_stays_interactive() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        let _ = app.update(Message::BarClicked(0));
+        let note = app.note_target_rect();
+        let _ = app.update(Message::CursorMoved(note.center()));
+        let t = hide_strip(&mut app);
+        assert!(app.note_open());
+        // The note stays where it is, fully usable.
+        assert_eq!(app.note_frame().map(|f| f.rect), Some(note));
+        assert!(app.is_interactive(note.center()));
+        run_for(&mut app, t, 500);
+        assert!(app.auto_hide.is_hidden());
+
+        // Folding closed, it heads for its bar's hidden place.
+        let _ = app.update(Message::ClosePanel);
+        tick_until(&mut app, |app| app.morph.progress() < 0.5);
+        let frame = app.note_frame().expect("still folding").rect;
+        let bar = app.strip_layout().bars[0];
+        let shown = morph_frame(bar, app.note_target_rect(), app.morph.progress()).rect;
+        assert!(frame.x > shown.x, "folds toward the shown bar");
+    }
+
+    #[test]
+    fn panel_open_blocks_hiding() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        let _ = app.update(Message::ToggleSettings);
+        let t = run_for(&mut app, Instant::now(), 3000);
+        assert_eq!(app.auto_hide.offset(), 0.0, "hid under the settings");
+        let _ = app.update(Message::CloseSettings);
+        let t = run_for(&mut app, t, 400);
+        assert!(!app.settings_open);
+        run_for(&mut app, t, 1200);
+        assert!(
+            app.auto_hide.is_hidden(),
+            "didn't hide once settings closed"
+        );
+
+        // A search opened while hidden reveals the strip and keeps it.
+        let _ = app.update(cmd_f());
+        let t = run_for(&mut app, Instant::now(), 300);
+        assert_eq!(app.auto_hide.offset(), 0.0);
+        run_for(&mut app, t, 2000);
+        assert_eq!(app.auto_hide.offset(), 0.0, "hid under the search");
+    }
+
+    #[test]
+    fn reminder_fire_reveals_and_pulse_keeps_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, ids) = app_with_notes(&dir, &[("Plain", ""), (DUE_TITLE, "")]);
+        let mut app = with_auto_hide(app);
+        hide_strip(&mut app);
+        let _ = app.update(Message::ReminderTick);
+        assert!(app.pulsing.contains(&ids[1]));
+        assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
+        assert!(app.animating);
+        let t = run_for(&mut app, Instant::now(), 300);
+        assert_eq!(app.auto_hide.offset(), 0.0);
+        let t = run_for(&mut app, t, 3000);
+        assert_eq!(app.auto_hide.offset(), 0.0, "hid while pulsing");
+        // Once nothing pulses, the grace applies again.
+        let _ = app.update(Message::BarClicked(1));
+        let _ = app.update(Message::ClosePanel);
+        assert!(app.pulsing.is_empty());
+        run_for(&mut app, t.max(Instant::now()), 1500);
+        assert!(app.auto_hide.is_hidden());
+    }
+
+    #[test]
+    fn hotkey_reveals_strip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        hide_strip(&mut app);
+        let _ = app.update(Message::HotkeyPressed);
+        assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
+        let t = run_for(&mut app, Instant::now(), 300);
+        assert_eq!(app.auto_hide.offset(), 0.0);
+        assert!(app.note_open(), "the hotkey's note didn't open");
+        // The open note doesn't keep the strip (A14).
+        run_for(&mut app, t, 1200);
+        assert!(app.auto_hide.is_hidden());
+        assert!(app.note_open());
+
+        // So do Cmd/Ctrl+N and the tray items.
+        for message in [
+            cmd_key_on("n", keyboard::key::Code::KeyN),
+            Message::TrayMenu("new".into()),
+            Message::TrayMenu("settings".into()),
+            Message::AddNote,
+        ] {
+            let _ = app.update(Message::CloseSettings);
+            let _ = app.update(Message::ClosePanel);
+            let t = run_for(&mut app, Instant::now(), 400);
+            run_for(&mut app, t, 1200);
+            assert!(app.auto_hide.is_hidden());
+            let _ = app.update(message.clone());
+            assert_eq!(
+                app.auto_hide.phase(),
+                crate::autohide::Phase::Revealing,
+                "{message:?} didn't reveal"
+            );
+        }
+    }
+
+    #[test]
+    fn tray_hide_overrides_auto_hide() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        hide_strip(&mut app);
+        let edge = edge_point(&app);
+        let _ = app.update(Message::TrayMenu("toggle".into()));
+        assert!(!app.visible);
+        // Fully hidden: no edge zone, no reveal.
+        assert!(!app.is_interactive(edge));
+        let _ = app.update(Message::CursorMoved(edge));
+        run_for(&mut app, Instant::now(), 1000);
+        assert!(!app.visible);
+        assert!(!app.is_interactive(edge));
+        // Show brings the strip back, then auto-hide applies again.
+        let _ = app.update(Message::TrayMenu("toggle".into()));
+        let _ = app.update(Message::CursorMoved(Point::new(100.0, 100.0)));
+        assert!(app.visible);
+        assert_eq!(app.auto_hide.offset(), 0.0);
+        hide_strip(&mut app);
+    }
+
+    #[test]
+    fn turning_auto_hide_off_reveals() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        hide_strip(&mut app);
+        let _ = app.update(Message::SettingToggled(SettingToggle::AutoHide));
+        assert!(!app.settings.settings().window.auto_hide);
+        assert_eq!(app.auto_hide.offset(), 0.0);
+        assert_eq!(app.strip_x_offset(), 0.0);
+        assert!(app.is_interactive(app.strip_layout().bars[0].center()));
+        run_for(&mut app, Instant::now(), 2000);
+        assert_eq!(app.auto_hide.offset(), 0.0);
     }
 }
