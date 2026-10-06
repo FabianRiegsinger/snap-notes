@@ -256,14 +256,16 @@ fn read_clipboard() -> ClipboardContent {
 /// Largest text file whose text a drop adds.
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 
-/// The text of a `.txt` or `.md` file of at most `MAX_TEXT_BYTES` that is
-/// valid UTF-8, without trailing line breaks.
+/// The text of a regular `.txt` or `.md` file of at most `MAX_TEXT_BYTES`
+/// that is valid UTF-8, without trailing line breaks. A FIFO or device is
+/// never read, since reading it could block.
 fn read_text_file(path: &std::path::Path) -> Option<String> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     if !matches!(ext.as_str(), "txt" | "md") {
         return None;
     }
-    if std::fs::metadata(path).ok()?.len() > MAX_TEXT_BYTES {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_TEXT_BYTES {
         return None;
     }
     let text = String::from_utf8(std::fs::read(path).ok()?).ok()?;
@@ -589,7 +591,7 @@ impl App {
                 }
             }
             Message::BarClicked(entry) => {
-                if let Some(index) = self.entry_note(entry) {
+                if let Some(index) = self.clicked_note(entry) {
                     return self.open_note(index);
                 }
             }
@@ -1128,14 +1130,17 @@ impl App {
                             target,
                         });
                     } else if moved {
-                        let bars = self.bar_centers();
-                        let mut target = bars.len();
-                        for (i, center) in bars.iter().enumerate() {
-                            if drag.current_y < *center {
-                                target = i;
-                                break;
-                            }
-                        }
+                        let pinned: Vec<bool> = self
+                            .entries()
+                            .iter()
+                            .map(|e| self.store.notes()[e.top].pinned)
+                            .collect();
+                        let target = strip_model::insertion_slot(
+                            &self.bar_centers(),
+                            drag.current_y,
+                            &pinned,
+                            drag.bar_index,
+                        );
                         if target != drag.bar_index && target != drag.bar_index + 1 {
                             let to = if target > drag.bar_index {
                                 target - 1
@@ -1147,7 +1152,7 @@ impl App {
                                 self.store.mark_dirty();
                             }
                         }
-                    } else if let Some(index) = self.entry_note(drag.bar_index) {
+                    } else if let Some(index) = self.clicked_note(drag.bar_index) {
                         return self.open_note(index);
                     }
                 }
@@ -1607,10 +1612,17 @@ impl App {
     }
 
     fn open_note(&mut self, index: usize) -> Task<Message> {
-        let Some(note) = self.store.notes().get(index) else {
+        let Some(id) = self.store.notes().get(index).map(|note| note.id) else {
             return Task::none();
         };
-        let id = note.id;
+        // A note whose delete was confirmed folds away and can't reopen.
+        if self.pending_delete == Some(id) {
+            return Task::none();
+        }
+        // Opening another note mid-fold still deletes the folding one.
+        if let Some(deleted) = self.pending_delete.take() {
+            self.start_collapse(deleted);
+        }
         // A deleted note can't be opened while its bar collapses.
         if self.dying(id) {
             return Task::none();
@@ -1621,6 +1633,18 @@ impl App {
         }
 
         let switching = self.active_note.is_some_and(|active| active != id);
+        if switching {
+            // A drag or resize of the old note ends with it.
+            if self.note_drag.is_some() {
+                self.finish_note_drag();
+            }
+            self.finish_note_resize();
+        }
+        // Starting the collapse may have removed a note, moving this one.
+        let Some(index) = self.store.notes().iter().position(|n| n.id == id) else {
+            return Task::none();
+        };
+        let note = &self.store.notes()[index];
         self.pulsing.remove(&id);
         self.editor_content = Some(text_editor::Content::with_text(&note.content));
         self.history.clear();
@@ -1635,7 +1659,6 @@ impl App {
         self.close_export();
         self.active_note = Some(id);
         self.reparse();
-        self.pending_delete = None;
         self.color_picker_open = false;
         self.text_color_picker_open = false;
         self.confirm_delete = None;
@@ -1713,12 +1736,12 @@ impl App {
         self.active_note.is_some() && self.morph.is_opening()
     }
 
-    /// A file dropped with no note open: appended to the top note of the
-    /// bar at `entry`, or else a new note titled with the file's stem.
+    /// A file dropped with no note open: appended to the note the bar at
+    /// `entry` stands for, or else a new note titled with the file's stem.
     fn drop_on_strip(&mut self, entry: Option<usize>, path: &std::path::Path) -> Task<Message> {
         let text = self.dropped_text(path);
         let top = entry
-            .and_then(|entry| self.entries().get(entry).map(|e| e.top))
+            .and_then(|entry| self.entry_note(entry))
             .map(|top| self.store.notes()[top].id)
             .filter(|&id| !self.dying(id));
         match top {
@@ -1746,8 +1769,11 @@ impl App {
     }
 
     /// Adds `text` below the note's body, after a blank line unless the
-    /// body is empty.
+    /// body is empty. Blank text adds nothing.
     fn append_to_note(&mut self, id: Uuid, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
         let Some(note) = self.store.note_mut(id) else {
             return;
         };
@@ -2815,6 +2841,22 @@ impl App {
             Some(&next) if self.dying(self.store.notes()[entry.top].id) => Some(next),
             _ => Some(entry.top),
         }
+    }
+
+    /// The note a click on the bar at `entry` opens: the first of its notes
+    /// (top, then members) whose reminder pulses, else the note it stands
+    /// for. Clicking the open note's bar still closes it.
+    fn clicked_note(&self, entry: usize) -> Option<usize> {
+        let index = self.entry_note(entry)?;
+        let notes = self.store.notes();
+        if self.active_note == Some(notes[index].id) && self.morph.is_opening() {
+            return Some(index);
+        }
+        let pulsing = self.entries().get(entry)?.notes().find(|&i| {
+            let id = notes[i].id;
+            self.pulsing.contains(&id) && !self.dying(id)
+        });
+        Some(pulsing.unwrap_or(index))
     }
 
     /// Whether the note is being deleted while its bar collapses.
@@ -5146,7 +5188,14 @@ mod tests {
             store.save().unwrap();
         }
         let mut app = app_in(&dir);
-        assert!(app.store.is_dirty(), "the frozen anchor gets saved");
+        // The frozen anchor is saved by the next save tick past the debounce.
+        assert!(app.store.is_dirty());
+        std::thread::sleep(crate::store::DEBOUNCE + Duration::from_millis(50));
+        let _ = app.update(Message::SaveTick);
+        assert!(!app.store.is_dirty(), "the frozen anchor gets saved");
+        let saved = NoteStore::load(dir.path().join("notes.json"));
+        assert!(!saved.is_dirty());
+        assert!(saved.notes()[0].reminder_set_at.is_some());
         app.window_size = Size::new(1400.0, 900.0);
         let _ = app.update(Message::ReminderTick);
         let fired = app.store.notes()[0].reminder_fired;
@@ -5210,5 +5259,156 @@ mod tests {
         app.store.note_mut(id).unwrap().reminder_set_at = None;
         let _ = app.update(Message::TitleEdited("Call Bob @wed".into()));
         assert!(anchor(&app).is_some());
+    }
+
+    #[test]
+    fn directory_named_like_text_file_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.txt");
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(read_text_file(&path), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_named_like_text_file_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.txt");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // Reading a FIFO with no writer blocks, so read on another thread.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let read = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_text_file(&read));
+        });
+        let text = rx.recv_timeout(Duration::from_secs(2));
+        assert_eq!(text, Ok(None), "a FIFO is not read as text");
+    }
+
+    #[test]
+    fn dropping_empty_text_file_on_bar_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "first")]);
+        let empty = file_in(&dir, "empty.txt", b"\n");
+        let _ = app.update(Message::StripFileDropped(Some(0), empty.clone()));
+        assert_eq!(app.store.notes()[0].content, "first");
+        assert!(!app.store.is_dirty());
+        // Off the bars it still makes a (blank) note.
+        let _ = app.update(Message::StripFileDropped(None, empty));
+        assert_eq!(app.store.notes().len(), 2);
+        assert_eq!(new_note(&app).title, "empty");
+    }
+
+    #[test]
+    fn clicking_stack_bar_opens_the_pulsing_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("Top", ""), ("Middle", ""), (DUE_TITLE, "")]);
+        assert!(app.store.stack(ids[1], ids[0]));
+        assert!(app.store.stack(ids[2], ids[0]));
+        let _ = app.update(Message::ReminderTick);
+        assert!(app.pulsing.contains(&ids[2]));
+        let _ = app.update(Message::BarClicked(0));
+        assert_eq!(app.active_note, Some(ids[2]));
+        assert!(app.pulsing.is_empty());
+        settle(&mut app);
+        // Once nothing pulses, the bar opens its top again.
+        let _ = app.update(Message::BarClicked(0));
+        assert_eq!(app.active_note, Some(ids[0]));
+        settle(&mut app);
+        // Clicking the open note's bar still closes it.
+        let _ = app.update(Message::BarClicked(0));
+        assert!(!app.morph.is_opening());
+    }
+
+    #[test]
+    fn real_click_on_stack_bar_opens_the_pulsing_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("Top", ""), (DUE_TITLE, "")]);
+        assert!(app.store.stack(ids[1], ids[0]));
+        let _ = app.update(Message::ReminderTick);
+        let bar = app.strip_layout().bars[0];
+        let _ = app.update(Message::DragStart(0, bar.center().y));
+        let _ = app.update(Message::DragEnd);
+        assert_eq!(app.active_note, Some(ids[1]));
+    }
+
+    #[test]
+    fn drop_on_stack_bar_while_top_collapses_goes_to_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("Top", "top"), ("Next", "next")]);
+        assert!(app.store.stack(ids[1], ids[0]));
+        app.sync_entries();
+        app.start_collapse(ids[0]);
+        let path = file_in(&dir, "x.txt", b"more");
+        let _ = app.update(Message::StripFileDropped(Some(0), path));
+        assert_eq!(app.store.notes().len(), 2);
+        assert_eq!(app.store.notes()[1].content, "next\n\nmore");
+        assert_eq!(app.store.notes()[0].content, "top");
+    }
+
+    #[test]
+    fn confirmed_delete_survives_hotkey_mid_fold() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "first");
+        let id = app.store.notes()[0].id;
+        let _ = app.update(Message::DeleteRequested);
+        let _ = app.update(Message::ConfirmDelete(true));
+        tick_a_little(&mut app);
+        assert_eq!(app.active_note, Some(id));
+        let _ = app.update(Message::HotkeyPressed);
+        settle(&mut app);
+        assert!(app.store.notes().iter().all(|n| n.id != id));
+        assert_eq!(app.store.notes().len(), 1);
+        assert!(app.active_note.is_some_and(|active| active != id));
+    }
+
+    #[test]
+    fn switching_notes_mid_drag_keeps_the_drag_off_the_new_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "1"), ("b", "2")]);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        let start = app.note_target_rect().center();
+        let _ = app.update(Message::CursorMoved(start));
+        let _ = app.update(Message::NoteDragStart);
+        let _ = app.update(Message::CursorMoved(start - iced::Vector::new(40.0, 30.0)));
+        let _ = app.update(Message::BarClicked(1));
+        assert_eq!(app.active_note, Some(ids[1]));
+        assert!(app.note_drag.is_none() && app.note_drag_pos.is_none());
+        let _ = app.update(Message::MouseButton(false));
+        assert!(
+            app.store.notes()[0].position.is_some(),
+            "the old note keeps its drag"
+        );
+        assert_eq!(app.store.notes()[1].position, None);
+    }
+
+    #[test]
+    fn switching_notes_mid_resize_keeps_the_resize_off_the_new_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("a", "1"), ("b", "2")]);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        let corner = app.note_target_rect().position();
+        let _ = app.update(Message::CursorMoved(corner));
+        let _ = app.update(Message::ResizeStart(Edges {
+            left: true,
+            top: true,
+            ..Edges::default()
+        }));
+        let _ = app.update(Message::CursorMoved(corner - iced::Vector::new(30.0, 30.0)));
+        let _ = app.update(Message::BarClicked(1));
+        assert_eq!(app.active_note, Some(ids[1]));
+        assert!(app.note_resize.is_none());
+        let _ = app.update(Message::MouseButton(false));
+        assert!(
+            app.store.notes()[0].size.is_some(),
+            "the old note keeps its size"
+        );
+        assert_eq!(app.store.notes()[1].size, None);
     }
 }

@@ -46,7 +46,7 @@ Put a tag in a note's title:
 | `@YYYY-MM-DD`, optionally with `HH:MM` | That date, default 09:00 |
 
 - **Local time:** times are local. Only the first tag counts, and it stays in the title.
-- **When it's due:** a system notification appears and the bar pulses until you open the note. Reminders missed while the app was closed fire at startup.
+- **When it's due:** a system notification appears and the bar pulses until you open the note. Clicking a stack's bar opens the note whose reminder fired. Reminders missed while the app was closed fire at startup.
 - **Change it:** editing the tag sets a new reminder.
 - **Bell:** a bell icon in the note's header and in the peek shows that a reminder is set. Its tooltip shows the due time.
 

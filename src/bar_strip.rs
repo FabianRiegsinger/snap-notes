@@ -3,7 +3,7 @@ use crate::app::{DragState, Message};
 use crate::note::Note;
 use crate::peek::{draw_peek, entry_peek_text, note_peek_width, peek_layout, PeekText};
 use crate::settings::BarSettings;
-use crate::strip_model::Entry;
+use crate::strip_model::{self, Entry};
 use crate::theme;
 
 use iced::advanced::layout::{self, Layout};
@@ -183,6 +183,23 @@ impl StripLayout {
 #[derive(Default)]
 struct StripState {
     modifiers: keyboard::Modifiers,
+}
+
+impl StripState {
+    /// Tracks the held modifiers. Leaving the strip or the window losing
+    /// focus resets them: their release may never reach the strip.
+    fn observe(&mut self, event: &Event) {
+        match event {
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                self.modifiers = *modifiers;
+            }
+            Event::Mouse(mouse::Event::CursorLeft)
+            | Event::Window(iced::window::Event::Unfocused) => {
+                self.modifiers = keyboard::Modifiers::default();
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The strip shows a settings slot only where no tray menu offers Settings.
@@ -446,14 +463,13 @@ impl<'a> BarStrip<'a> {
         ((scale - 1.0) / (ADD_PLUS_SCALE - 1.0)).clamp(0.0, 1.0)
     }
 
-    fn insertion_index(&self, cursor_y: f32, bars: &[Rectangle]) -> usize {
-        for (i, bar) in bars.iter().enumerate() {
-            let center = bar.y + bar.height / 2.0;
-            if cursor_y < center {
-                return i;
-            }
-        }
-        bars.len()
+    /// The gap the dragged bar drops into, kept within its pin group.
+    fn insertion_index(&self, drag: &DragState, bars: &[Rectangle]) -> usize {
+        let centers: Vec<f32> = bars.iter().map(|bar| bar.y + bar.height / 2.0).collect();
+        let pinned: Vec<bool> = (0..bars.len())
+            .map(|i| self.note(i).is_some_and(|note| note.pinned))
+            .collect();
+        strip_model::insertion_slot(&centers, drag.current_y, &pinned, drag.bar_index)
     }
 }
 
@@ -816,7 +832,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             Color::TRANSPARENT,
                         );
                     } else {
-                        let target = self.insertion_index(drag.current_y, bars);
+                        let target = self.insertion_index(drag, bars);
                         let indicator_y = if target < bars.len() {
                             bars[target].y - self.bars.gap / 2.0
                         } else {
@@ -854,11 +870,9 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         _viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
+        tree.state.downcast_mut::<StripState>().observe(event);
 
         match event {
-            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
-                tree.state.downcast_mut::<StripState>().modifiers = *modifiers;
-            }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 if let Some(message) = self.hover_message(bounds, *position) {
                     shell.publish(message);
@@ -1592,6 +1606,29 @@ mod tests {
             l.press_message(l.search_button.center(), alt),
             Some(Message::ToggleSearch)
         ));
+    }
+
+    #[test]
+    fn alt_resets_when_the_cursor_leaves_or_focus_goes() {
+        let l = layout(2, |_| 1.0, 900.0, 0.0);
+        let add = l.add_button.center();
+        let alt = Event::Keyboard(keyboard::Event::ModifiersChanged(keyboard::Modifiers::ALT));
+        for reset in [
+            Event::Mouse(mouse::Event::CursorLeft),
+            Event::Window(iced::window::Event::Unfocused),
+        ] {
+            let mut state = StripState::default();
+            state.observe(&alt);
+            assert!(matches!(
+                l.press_message(add, state.modifiers),
+                Some(Message::ClipboardNote)
+            ));
+            state.observe(&reset);
+            assert!(matches!(
+                l.press_message(add, state.modifiers),
+                Some(Message::AddNote)
+            ));
+        }
     }
 
     #[test]

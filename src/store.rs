@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const DEBOUNCE: Duration = Duration::from_millis(500);
+pub(crate) const DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Serialize, Deserialize)]
 struct StoreFile {
@@ -34,17 +34,18 @@ impl NoteStore {
             },
             Err(e) => (Vec::new(), e.kind() != io::ErrorKind::NotFound),
         };
-        let mut notes = normalize_stacks(notes);
-        // Older tagged notes get a fixed reminder anchor, saved soon after.
-        let mut anchored = false;
+        let (mut notes, regrouped) = normalize_stacks(notes);
+        // Older tagged notes get a fixed reminder anchor. Repairs made here
+        // are saved soon after.
+        let mut changed = regrouped;
         for note in &mut notes {
-            anchored |= crate::reminder::freeze_anchor(note);
+            changed |= crate::reminder::freeze_anchor(note);
         }
         Self {
             notes,
             path,
-            dirty: anchored,
-            last_mark: None,
+            dirty: changed,
+            last_mark: changed.then(Instant::now),
             load_failed,
             revision: 0,
         }
@@ -288,7 +289,15 @@ impl NoteStore {
 /// missing note, or on a note that is itself stacked, becomes top-level, and
 /// each stack's members move right after its top (in their order) and take
 /// its pin state. Pinned stacks and notes then come first, in their order.
-fn normalize_stacks(notes: Vec<Note>) -> Vec<Note> {
+/// Also returns whether anything changed.
+fn normalize_stacks(notes: Vec<Note>) -> (Vec<Note>, bool) {
+    let shape = |notes: &[Note]| -> Vec<_> {
+        notes
+            .iter()
+            .map(|n| (n.id, n.stack, n.pinned, n.order))
+            .collect()
+    };
+    let before = shape(&notes);
     let tops: HashSet<Uuid> = notes
         .iter()
         .filter(|n| n.stack.is_none())
@@ -331,7 +340,8 @@ fn normalize_stacks(notes: Vec<Note>) -> Vec<Note> {
             note.order = order;
         }
     }
-    ordered
+    let changed = shape(&ordered) != before;
+    (ordered, changed)
 }
 
 #[cfg(test)]
@@ -393,6 +403,22 @@ mod tests {
         assert_eq!(stacks, vec![None, Some(id[0]), None, None]);
         let orders: Vec<_> = loaded.notes().iter().map(|n| n.order).collect();
         assert_eq!(orders, vec![0, 1, 2, 3]);
+        // The repair is saved soon after.
+        assert!(loaded.is_dirty() && loaded.last_mark.is_some());
+    }
+
+    #[test]
+    fn valid_stacks_load_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.json");
+        let mut store = NoteStore::load(path.clone());
+        let id: Vec<Uuid> = (0..3).map(|_| store.add_note(&PALETTE)).collect();
+        assert!(store.stack(id[2], id[0]));
+        store.set_pinned(id[0], true);
+        store.save().unwrap();
+        let loaded = NoteStore::load(path);
+        assert_eq!(ids(&loaded), ids(&store));
+        assert!(!loaded.is_dirty() && loaded.last_mark.is_none());
     }
 
     #[test]
@@ -413,6 +439,7 @@ mod tests {
         assert_eq!(pinned, vec![true, true, false, false]);
         let orders: Vec<_> = loaded.notes().iter().map(|n| n.order).collect();
         assert_eq!(orders, vec![0, 1, 2, 3]);
+        assert!(loaded.is_dirty() && loaded.last_mark.is_some());
     }
 
     #[test]

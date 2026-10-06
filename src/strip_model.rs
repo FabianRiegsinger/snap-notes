@@ -66,6 +66,23 @@ pub fn entries(notes: &[Note]) -> Vec<Entry> {
     entries
 }
 
+/// The gap (0..=bars) a bar dragged from `dragged` drops into at
+/// `cursor_y`: before the first bar whose center is below the cursor. Like
+/// `NoteStore::reorder`, it stays within the dragged bar's pin group, given
+/// each bar's pin state (pinned bars come first).
+pub fn insertion_slot(centers: &[f32], cursor_y: f32, pinned: &[bool], dragged: usize) -> usize {
+    let slot = centers
+        .iter()
+        .position(|&center| cursor_y < center)
+        .unwrap_or(centers.len());
+    let boundary = pinned.iter().take_while(|&&p| p).count();
+    if pinned.get(dragged).copied().unwrap_or(false) {
+        slot.min(boundary)
+    } else {
+        slot.max(boundary)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +145,24 @@ mod tests {
         ns[1].content = "- [x] c".into();
         let entries = [entry(0, &[1]), entry(2, &[])];
         assert_eq!(progress(&ns, &entries), [Some((2, 3)), None]);
+    }
+
+    #[test]
+    fn insertion_slot_stays_in_the_pin_group() {
+        let centers = [10.0, 20.0, 30.0, 40.0];
+        let pinned = [true, true, false, false];
+        // Unclamped: the first bar whose center is below the cursor.
+        assert_eq!(insertion_slot(&centers, 25.0, &pinned, 3), 2);
+        assert_eq!(insertion_slot(&centers, 35.0, &pinned, 0), 2);
+        assert_eq!(insertion_slot(&centers, 15.0, &pinned, 0), 1);
+        assert_eq!(insertion_slot(&centers, 50.0, &pinned, 2), 4);
+        // An unpinned bar can't go above the pinned ones, nor a pinned one
+        // below them.
+        assert_eq!(insertion_slot(&centers, 0.0, &pinned, 3), 2);
+        assert_eq!(insertion_slot(&centers, 50.0, &pinned, 1), 2);
+        // Without pins nothing is clamped.
+        let none = [false; 4];
+        assert_eq!(insertion_slot(&centers, 0.0, &none, 3), 0);
+        assert_eq!(insertion_slot(&centers, 50.0, &none, 0), 4);
     }
 }
