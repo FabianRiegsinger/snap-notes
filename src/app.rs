@@ -962,6 +962,7 @@ impl App {
             Message::ClipboardEmptyExpired(at) => {
                 if self.clipboard_empty_at == Some(at) {
                     self.clipboard_empty_at = None;
+                    return self.dock_window();
                 }
             }
             Message::ConfirmDelete(confirmed) => {
@@ -1839,7 +1840,11 @@ impl App {
                 let at = Instant::now();
                 self.clipboard_empty_at = Some(at);
                 self.animating = true;
-                return delayed(CLIPBOARD_HINT_FOR, Message::ClipboardEmptyExpired(at));
+                // Without passthrough the window widens to show the chip.
+                return Task::batch([
+                    self.dock_window(),
+                    delayed(CLIPBOARD_HINT_FOR, Message::ClipboardEmptyExpired(at)),
+                ]);
             }
         };
         self.create_note(None, body)
@@ -2196,6 +2201,18 @@ impl App {
         }
     }
 
+    /// Whether the window needs room left of the strip: always with
+    /// `passthrough`, otherwise for an open note or panel, or a chip that
+    /// stays up on its own (hover chips don't widen it).
+    fn needs_wide_window(&self, passthrough: bool) -> bool {
+        passthrough
+            || self.active_note.is_some()
+            || self.settings_open
+            || self.search_open
+            || self.export.is_some()
+            || self.clipboard_empty_at.is_some()
+    }
+
     /// Docks the window to the right screen edge, vertically centered. The
     /// strip is centered inside, so it sits at the middle of the right screen
     /// border. Does nothing if the window is already there.
@@ -2212,10 +2229,7 @@ impl App {
             Size::new(
                 Self::docked_width(
                     self.settings.settings(),
-                    self.active_note.is_some()
-                        || self.settings_open
-                        || self.search_open
-                        || self.export.is_some(),
+                    self.needs_wide_window(SUPPORTS_PASSTHROUGH),
                 ),
                 (monitor.height * self.settings.settings().window.height_fraction).round(),
             )
@@ -4250,6 +4264,19 @@ mod tests {
         assert_eq!(app.clipboard_empty_at, Some(at));
         let _ = app.update(Message::ClipboardEmptyExpired(at));
         assert_eq!(app.clipboard_empty_at, None);
+    }
+
+    #[test]
+    fn clipboard_hint_widens_docked_window_without_passthrough() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        assert!(!app.needs_wide_window(false), "idle: just the strip");
+        assert!(app.needs_wide_window(true), "passthrough is always wide");
+        let _ = app.clipboard_note(ClipboardContent::Empty);
+        let at = app.clipboard_empty_at.unwrap();
+        assert!(app.needs_wide_window(false), "room for the chip");
+        let _ = app.update(Message::ClipboardEmptyExpired(at));
+        assert!(!app.needs_wide_window(false), "shrinks back");
     }
 
     #[test]
