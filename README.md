@@ -17,6 +17,11 @@
 - **Quick add:** click the `+` slot below the bars (the whole strip width counts), or press Cmd/Ctrl+N.
 - **Search:** click the 🔍 slot under `+`, press Cmd/Ctrl+F or choose **Search…** in the tray menu. See [Search](#search).
 - **Reorder:** drag a bar up or down to move the note.
+- **Stacks:** drag a bar onto the middle of another bar to stack it. Dropping between bars still reorders. A stack's bar has card-edge lines. Its peek lists its notes (at most 8, then "+N more"), and clicking a title opens that note. **Unstack** in the peek splits the stack, and deleting the top note promotes the next one.
+- **Pinned notes:** the pin button in a note's header keeps it at the top of the strip, marked by a darker notch on its bar. Dragging stays within the pinned group, and pinning a stack pins all of it.
+- **Checklist progress:** a bar fills from the bottom by the share of done tasks, and is drawn faded once all are done. The peek shows done/total, summed over a stack.
+- **File drops:** drop a file on `+` or on empty space to create a note, or on a bar to append to that note (the top note of a stack). A `.txt` or `.md` file up to 1 MB adds its text, and a new note gets the file name as its title. An image file is added as an image, and any other file as its path. Dropping onto an open note inserts an image, as before.
+- **From the clipboard:** **New Note from Clipboard** in the tray menu, or Alt/Option-click on `+`, makes a note whose body is the clipboard's text or image.
 - **Scroll:** with more notes than fit on screen, scroll the strip with the mouse wheel.
 
 ### Notes
@@ -29,6 +34,21 @@
 - **Copy:** the copy button in the header copies the note's title and body. Its icon shows a ✓ for a moment afterwards.
 - **Images:** drop a png, jpg, gif or webp file (up to 20 MB) onto an open note, paste an image-only clipboard with Cmd/Ctrl+V, or use the image button in the toolbar.
 - **Clickable links:** `http`, `https` and `mailto` links in the formatted view open in your browser.
+
+### Reminders
+Put a tag in a note's title:
+
+| Tag | Due |
+|---|---|
+| `@HH:MM` | Today, or tomorrow if that time has passed |
+| `@tomorrow` or `@tomorrow HH:MM` | Tomorrow, default 09:00 |
+| `@mon` … `@sun`, optionally with `HH:MM` | The next such day, default 09:00. Before 09:00 on that day, `@weekday` means today. |
+| `@YYYY-MM-DD`, optionally with `HH:MM` | That date, default 09:00 |
+
+- **Local time:** times are local. Only the first tag counts, and it stays in the title.
+- **When it's due:** a system notification appears and the bar pulses until you open the note. Reminders missed while the app was closed fire at startup.
+- **Change it:** editing the tag sets a new reminder.
+- **Bell:** a bell icon in the note's header and in the peek shows that a reminder is set. Its tooltip shows the due time.
 
 ### Look and feel
 - **Inter and Lucide:** the interface uses the Inter typeface and a Lucide icon set, so text and icons look the same on every platform.
@@ -81,7 +101,7 @@ Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies l
 
 | Group | What you can adjust |
 |---|---|
-| App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. |
+| App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey (Cmd/Ctrl+Shift+Space). |
 | Bars | Width, height and gap |
 | Hover | Magnification, how far it spreads, and the peek delay (0–3 s) |
 | Notes | Default size, paper tint (lighter/darker than the bar), and how faint the header controls are until you hover |
@@ -91,12 +111,13 @@ Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies l
 | Data | **Export…** your notes to one file (see [Export](#export)) |
 
 ### Menu bar / tray
-On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Search…**, **Export…**, **Settings…** and **Quit**. Hiding the notes clears the screen completely until you show them again.
+On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **New Note from Clipboard**, **Search…**, **Export…**, **Settings…** and **Quit**. Hiding the notes clears the screen completely until you show them again.
 
 ## Keyboard shortcuts
 
 | Shortcut | Action |
 |---|---|
+| Cmd+Shift+Space (macOS), Ctrl+Shift+Space (elsewhere) | Global hotkey: show the notes and create a new note in edit mode, from any app. On Linux it is always on and needs X11 (Wayland is not supported). |
 | Cmd/Ctrl+N | New note |
 | Cmd/Ctrl+F | Open or close search |
 | Cmd/Ctrl+, | Open or close settings |
