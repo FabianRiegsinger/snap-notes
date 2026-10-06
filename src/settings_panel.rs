@@ -396,6 +396,15 @@ mod tests {
     }
 
     #[test]
+    fn danger_text_is_readable_in_both_modes() {
+        for mode in [Mode::Light, Mode::Dark] {
+            let theme = theme::Theme::new(mode);
+            let ratio = contrast(theme.danger(1.0), theme.card());
+            assert!(ratio >= 4.5, "{mode:?} danger: {ratio}");
+        }
+    }
+
+    #[test]
     fn dock_toggle_locked_without_tray() {
         let s = Settings::default();
         assert!(!toggle_enabled(&s, SettingToggle::DockIcon, false));

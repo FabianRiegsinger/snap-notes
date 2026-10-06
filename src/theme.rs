@@ -112,7 +112,12 @@ impl Theme {
     }
 
     pub fn danger(&self, alpha: f32) -> Color {
-        Color::from_rgba(0.75, 0.18, 0.18, alpha)
+        // Darker on light paper, lighter on dark paper: 4.5:1 against the card.
+        if self.is_dark() {
+            Color::from_rgba(0.95, 0.47, 0.44, alpha)
+        } else {
+            Color::from_rgba(0.66, 0.12, 0.12, alpha)
+        }
     }
 
     pub fn focus_ring(&self) -> Color {
