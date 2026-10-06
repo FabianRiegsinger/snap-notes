@@ -14,6 +14,16 @@ struct StoreFile {
     notes: Vec<Note>,
 }
 
+/// A deleted note and where it was, so the delete can be undone.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // read by the undo toast (Task 3)
+pub struct Deleted {
+    pub note: Note,
+    pub index: usize,
+    /// The member that became its stack's top, if it was a top.
+    pub promoted: Option<Uuid>,
+}
+
 pub struct NoteStore {
     notes: Vec<Note>,
     path: PathBuf,
@@ -152,17 +162,52 @@ impl NoteStore {
     }
 
     /// Deleting a stack's top promotes its first member to be the new top.
-    pub fn delete_note(&mut self, id: Uuid) {
-        if let Some((at, members)) = self.group(id) {
-            if members > 0 {
-                let new_top = self.notes[at + 1].id;
-                self.notes[at + 1].stack = None;
-                for member in &mut self.notes[at + 2..at + 1 + members] {
-                    member.stack = Some(new_top);
+    /// Returns what `restore` needs to undo it, or `None` for an unknown id.
+    pub fn delete_note(&mut self, id: Uuid) -> Option<Deleted> {
+        let (at, members) = self.group(id)?;
+        let mut promoted = None;
+        if members > 0 {
+            let new_top = self.notes[at + 1].id;
+            self.notes[at + 1].stack = None;
+            for member in &mut self.notes[at + 2..at + 1 + members] {
+                member.stack = Some(new_top);
+            }
+            promoted = Some(new_top);
+        }
+        let note = self.notes.remove(at);
+        self.renumber();
+        Some(Deleted {
+            note,
+            index: at,
+            promoted,
+        })
+    }
+
+    /// Puts a deleted note back at its index (clamped) and, if it was a stack
+    /// top, the promoted note and its members back under it. The store's
+    /// invariants are restored if other changes got in the way. The caller
+    /// saves.
+    #[allow(dead_code)] // used by the undo toast (Task 3)
+    pub fn restore(&mut self, deleted: Deleted) {
+        let Deleted {
+            note,
+            index,
+            promoted,
+        } = deleted;
+        let id = note.id;
+        if let Some(top) = promoted {
+            // Only while the promoted note is still a top of its own.
+            if self.notes.iter().any(|n| n.id == top && n.stack.is_none()) {
+                for n in &mut self.notes {
+                    if n.id == top || n.stack == Some(top) {
+                        n.stack = Some(id);
+                    }
                 }
             }
         }
-        self.notes.retain(|n| n.id != id);
+        self.notes.insert(index.min(self.notes.len()), note);
+        let (notes, _) = normalize_stacks(std::mem::take(&mut self.notes));
+        self.notes = notes;
         self.renumber();
     }
 
@@ -539,6 +584,83 @@ mod tests {
         assert_eq!(store.notes()[0].stack, None);
         assert_eq!(store.notes()[1].stack, Some(id[1]));
         assert_eq!(store.notes()[2].stack, None);
+    }
+
+    #[test]
+    fn delete_restore_round_trips_plain_note() {
+        let (mut store, id, _dir) = store_of(3);
+        let before = store.notes().to_vec();
+        let deleted = store.delete_note(id[1]).unwrap();
+        assert_eq!((deleted.index, deleted.promoted), (1, None));
+        assert_eq!(ids(&store), vec![id[0], id[2]]);
+        store.restore(deleted);
+        let after: Vec<_> = store
+            .notes()
+            .iter()
+            .map(|n| (n.id, n.stack, n.order))
+            .collect();
+        let want: Vec<_> = before.iter().map(|n| (n.id, n.stack, n.order)).collect();
+        assert_eq!(after, want);
+        assert!(store.delete_note(Uuid::new_v4()).is_none());
+    }
+
+    #[test]
+    fn delete_restore_round_trips_stack_top() {
+        let (mut store, id, _dir) = store_of(4);
+        store.stack(id[1], id[0]);
+        store.stack(id[2], id[0]);
+        let deleted = store.delete_note(id[0]).unwrap();
+        assert_eq!(deleted.promoted, Some(id[1]));
+        store.restore(deleted);
+        assert_eq!(ids(&store), id);
+        let stacks: Vec<_> = store.notes().iter().map(|n| n.stack).collect();
+        assert_eq!(stacks, vec![None, Some(id[0]), Some(id[0]), None]);
+    }
+
+    #[test]
+    fn delete_restore_round_trips_member() {
+        let (mut store, id, _dir) = store_of(3);
+        store.stack(id[1], id[0]);
+        store.stack(id[2], id[0]);
+        let deleted = store.delete_note(id[1]).unwrap();
+        assert_eq!(deleted.promoted, None);
+        store.restore(deleted);
+        assert_eq!(ids(&store), id);
+        assert_eq!(store.notes()[1].stack, Some(id[0]));
+        assert_eq!(store.notes()[2].stack, Some(id[0]));
+    }
+
+    #[test]
+    fn delete_restore_round_trips_pinned() {
+        let (mut store, id, _dir) = store_of(3);
+        store.set_pinned(id[2], true);
+        let deleted = store.delete_note(id[2]).unwrap();
+        assert_eq!(deleted.index, 0);
+        store.restore(deleted);
+        assert_eq!(ids(&store), vec![id[2], id[0], id[1]]);
+        assert!(store.notes()[0].pinned);
+    }
+
+    #[test]
+    fn restore_after_add_keeps_invariants() {
+        let (mut store, id, _dir) = store_of(3);
+        store.set_pinned(id[0], true);
+        let deleted = store.delete_note(id[0]).unwrap();
+        // Another note gets pinned meanwhile, and the list shrinks past index.
+        store.set_pinned(id[1], true);
+        let extra = store.add_note(&PALETTE);
+        store.restore(deleted);
+        let notes = store.notes();
+        assert!(notes.windows(2).all(|w| w[0].pinned || !w[1].pinned));
+        assert_eq!(notes.len(), 4);
+        assert!(notes.iter().enumerate().all(|(i, n)| n.order == i));
+        assert!(ids(&store).contains(&extra));
+        // A stale index past the end is clamped.
+        let deleted = store.delete_note(id[2]).unwrap();
+        let mut stale = deleted.clone();
+        stale.index = 99;
+        store.restore(stale);
+        assert_eq!(store.notes().len(), 4);
     }
 
     #[test]

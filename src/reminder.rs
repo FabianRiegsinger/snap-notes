@@ -201,6 +201,56 @@ pub fn display(title: &str) -> String {
     }
 }
 
+/// Whether the title has something that looks like a reminder tag: an `@`
+/// at the start or after whitespace, followed by a letter or digit. It may
+/// still fail to parse.
+#[allow(dead_code)] // used by the header label (Task 4)
+pub fn candidate(title: &str) -> bool {
+    title.char_indices().any(|(i, c)| {
+        c == '@'
+            && title[..i]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace)
+            && title[i + 1..]
+                .chars()
+                .next()
+                .is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// What a note's title says about a reminder, for the header.
+#[allow(dead_code)] // used by the header label (Task 4)
+#[derive(Debug, Clone, PartialEq)]
+pub enum Status {
+    /// No tag.
+    None,
+    /// A reminder that hasn't fired yet, with its label.
+    Pending(String),
+    /// A reminder that has fired for its current time, with its label.
+    Fired(String),
+    /// A tag candidate that isn't a reminder.
+    Invalid,
+}
+
+/// The note's reminder status. A tag without an anchor counts from `now`.
+#[allow(dead_code)] // used by the header label (Task 4)
+pub fn status(note: &Note, now: DateTime<Local>) -> Status {
+    let time = at(note).or_else(|| parse(&note.title, now));
+    match time {
+        Some(time) => {
+            let text = label(time);
+            if note.reminder_fired == Some(time.with_timezone(&Utc)) {
+                Status::Fired(text)
+            } else {
+                Status::Pending(text)
+            }
+        }
+        None if candidate(&note.title) => Status::Invalid,
+        None => Status::None,
+    }
+}
+
 /// A reminder time as shown in the header and peek: `Tue 15:00`.
 pub fn label(at: DateTime<Local>) -> String {
     at.format("%a %H:%M").to_string()
@@ -312,6 +362,33 @@ mod tests {
         assert_eq!(display("@fri"), "");
         assert_eq!(display("Mail bob@x.com"), "Mail bob@x.com");
         assert_eq!(display("Plan @noon"), "Plan @noon");
+    }
+
+    #[test]
+    fn candidate_detects_tags_not_emails() {
+        assert!(candidate("@15:00"));
+        assert!(candidate("Call @noon"));
+        assert!(candidate("x @2026-10-07"));
+        assert!(!candidate(""));
+        assert!(!candidate("@"));
+        assert!(!candidate("@ later"));
+        assert!(!candidate("mail bob@x.com"));
+        assert!(!candidate("@,"));
+    }
+
+    #[test]
+    fn status_pending_fired_invalid_none() {
+        let mut n = note("Call @15:00", local(2026, 10, 5, 10, 0));
+        assert_eq!(status(&n, now()), Status::Pending("Mon 15:00".into()));
+        n.reminder_fired = Some(local(2026, 10, 5, 15, 0).with_timezone(&Utc));
+        assert_eq!(status(&n, now()), Status::Fired("Mon 15:00".into()));
+        let n = note("Plan @noon", now());
+        assert_eq!(status(&n, now()), Status::Invalid);
+        let n = note("Plain", now());
+        assert_eq!(status(&n, now()), Status::None);
+        let mut n = Note::new(PALETTE[0]);
+        n.title = "@15:00".into();
+        assert_eq!(status(&n, now()), Status::Pending("Mon 15:00".into()));
     }
 
     #[test]
