@@ -477,13 +477,57 @@ pub fn draw_chip(
             theme.card().scale_alpha(alpha),
         );
     }
-    renderer.fill_paragraph(
-        &paragraph,
-        Point::new(rect.x + CHIP_PADDING.width, rect.y + CHIP_PADDING.height),
+    // The renderer only holds a weak reference to a paragraph, and this one
+    // is dropped when `draw` returns: fill_text keeps its own copy.
+    let origin = Point::new(rect.x + CHIP_PADDING.width, rect.y + CHIP_PADDING.height);
+    let main_width = if accent.is_some() {
+        chip_paragraph(text, None, Color::TRANSPARENT)
+            .min_bounds()
+            .width
+    } else {
+        paragraph.min_bounds().width
+    };
+    let label_height = paragraph.min_bounds().height;
+    draw_chip_text(
+        renderer,
+        text,
+        origin,
+        label_height,
         theme.ink(0.75 * alpha),
         rect,
     );
+    if let Some(accent) = accent {
+        let at = Point::new(origin.x + main_width, origin.y);
+        draw_chip_text(renderer, accent, at, label_height, theme.ink(alpha), rect);
+    }
     rect
+}
+
+/// One run of chip text with its top-left at `at`, clipped to `clip`.
+fn draw_chip_text(
+    renderer: &mut iced::Renderer,
+    content: &str,
+    at: Point,
+    height: f32,
+    color: Color,
+    clip: Rectangle,
+) {
+    renderer.fill_text(
+        text::Text {
+            content: content.to_string(),
+            bounds: Size::new((clip.x + clip.width - at.x).max(0.0), height),
+            size: Pixels(CHIP_TEXT),
+            line_height: text::LineHeight::default(),
+            font: theme::BODY_FONT,
+            align_x: text::Alignment::Default,
+            align_y: alignment::Vertical::Top,
+            shaping: text::Shaping::Advanced,
+            wrapping: text::Wrapping::None,
+        },
+        at,
+        color,
+        clip,
+    );
 }
 
 /// Where the undo toast shows on `strip` in `bounds`: the whole chip is
