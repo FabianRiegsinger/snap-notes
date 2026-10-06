@@ -231,10 +231,9 @@ pub enum Status {
     Invalid,
 }
 
-/// The note's reminder status. A tag without an anchor counts from `now`.
-pub fn status(note: &Note, now: DateTime<Local>) -> Status {
-    let time = at(note).or_else(|| parse(&note.title, now));
-    match time {
+/// The note's reminder status. A tag without an anchor is no reminder.
+pub fn status(note: &Note) -> Status {
+    match at(note) {
         Some(time) => {
             let text = label(time);
             if note.reminder_fired == Some(time.with_timezone(&Utc)) {
@@ -371,21 +370,28 @@ mod tests {
         assert!(!candidate("@ later"));
         assert!(!candidate("mail bob@x.com"));
         assert!(!candidate("@,"));
+        assert!(!candidate("é@x"));
+        assert!(candidate("@é"));
+        assert!(!candidate("a @"));
     }
 
     #[test]
     fn status_pending_fired_invalid_none() {
         let mut n = note("Call @15:00", local(2026, 10, 5, 10, 0));
-        assert_eq!(status(&n, now()), Status::Pending("Mon 15:00".into()));
+        assert_eq!(status(&n), Status::Pending("Mon 15:00".into()));
         n.reminder_fired = Some(local(2026, 10, 5, 15, 0).with_timezone(&Utc));
-        assert_eq!(status(&n, now()), Status::Fired("Mon 15:00".into()));
+        assert_eq!(status(&n), Status::Fired("Mon 15:00".into()));
         let n = note("Plan @noon", now());
-        assert_eq!(status(&n, now()), Status::Invalid);
+        assert_eq!(status(&n), Status::Invalid);
         let n = note("Plain", now());
-        assert_eq!(status(&n, now()), Status::None);
+        assert_eq!(status(&n), Status::None);
+        // Without an anchor a tag is no reminder: invalid, not counted
+        // from now.
         let mut n = Note::new(PALETTE[0]);
         n.title = "@15:00".into();
-        assert_eq!(status(&n, now()), Status::Pending("Mon 15:00".into()));
+        assert_eq!(status(&n), Status::Invalid);
+        n.title = "Plain".into();
+        assert_eq!(status(&n), Status::None);
     }
 
     #[test]

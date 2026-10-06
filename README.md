@@ -16,7 +16,7 @@
 - **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, and click it to open the note. Its trash button deletes the note at once, see [Notes](#notes) for undo.
 - **Quick add:** click the `+` slot below the bars (the whole strip width counts), or press Cmd/Ctrl+N. Hovering `+` for 0.6 s shows "New note · Option-click: from clipboard" (Alt-click on Windows/Linux). If the clipboard is empty, a clipboard note shakes `+` and shows "Clipboard is empty".
 - **Search:** click the 🔍 slot under `+`, press Cmd/Ctrl+F or choose **Search…** in the tray menu. Hovering 🔍 shows "Search (Cmd+F)" (Ctrl+F elsewhere). See [Search](#search).
-- **Hints on Linux:** hover hints aren't shown there, the same as the peek.
+- **Hints on Linux:** hover hints aren't shown there unless a note or panel is open (the window is wide then).
 - **Reorder:** drag a bar up or down to move the note.
 - **Stacks:** drag a bar onto the middle of another bar to stack it. While you hover there, the bar shows "Stack". Dropping between bars still reorders. A stack's bar has card-edge lines. Its peek lists its notes (at most 8, then "+N more"), and clicking a title opens that note. **Unstack** in the peek splits the stack, and deleting the top note promotes the next one.
 - **Pinned notes:** the pin button in a note's header keeps it at the top of the strip, marked by a darker notch on its bar. The button has a filled background while pinned, and its tooltip reads "Pin to top" or "Unpin". Dragging stays within the pinned group, and pinning a stack pins all of it.

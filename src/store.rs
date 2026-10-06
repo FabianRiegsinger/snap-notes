@@ -584,21 +584,69 @@ mod tests {
         assert_eq!(store.notes()[2].stack, None);
     }
 
+    /// Everything about a note, to compare whole notes.
+    fn full(note: &Note) -> impl PartialEq + std::fmt::Debug {
+        (
+            (note.id, note.stack, note.pinned, note.order),
+            (
+                note.title.clone(),
+                note.content.clone(),
+                note.color.to_hex(),
+            ),
+            (note.position, note.size),
+            (note.reminder_fired, note.reminder_set_at),
+            (note.created_at, note.updated_at),
+        )
+    }
+
+    fn snapshot(store: &NoteStore) -> Vec<impl PartialEq + std::fmt::Debug> {
+        store.notes().iter().map(full).collect()
+    }
+
+    /// Gives every note distinct contents, so a mix-up shows.
+    fn fill(store: &mut NoteStore) {
+        let ids = ids(store);
+        for (i, id) in ids.into_iter().enumerate() {
+            let note = store.note_mut(id).unwrap();
+            note.title = format!("Note {i} @15:00");
+            note.content = format!("body {i}");
+            note.size = Some([200.0 + i as f32, 150.0]);
+            note.position = Some([i as f32, 0.0]);
+            note.reminder_set_at = Some(chrono::Utc::now());
+            note.reminder_fired = (i % 2 == 0).then(chrono::Utc::now);
+        }
+    }
+
+    /// Pinned notes come first and every member follows its top.
+    fn assert_invariants(store: &NoteStore) {
+        let notes = store.notes();
+        assert!(notes.windows(2).all(|w| w[0].pinned || !w[1].pinned));
+        assert!(notes.iter().enumerate().all(|(i, n)| n.order == i));
+        for (i, note) in notes.iter().enumerate() {
+            if let Some(top) = note.stack {
+                let prev = &notes[i - 1];
+                assert!(prev.id == top || prev.stack == Some(top), "{i}");
+                assert!(notes.iter().any(|n| n.id == top && n.stack.is_none()));
+            }
+        }
+    }
+
+    /// Deletes `id` and restores it, expecting every note as it was.
+    fn assert_round_trip(store: &mut NoteStore, id: Uuid) -> Deleted {
+        let before = snapshot(store);
+        let deleted = store.delete_note(id).unwrap();
+        assert_invariants(store);
+        store.restore(deleted.clone());
+        assert_eq!(snapshot(store), before);
+        deleted
+    }
+
     #[test]
     fn delete_restore_round_trips_plain_note() {
         let (mut store, id, _dir) = store_of(3);
-        let before = store.notes().to_vec();
-        let deleted = store.delete_note(id[1]).unwrap();
+        fill(&mut store);
+        let deleted = assert_round_trip(&mut store, id[1]);
         assert_eq!((deleted.index, deleted.promoted), (1, None));
-        assert_eq!(ids(&store), vec![id[0], id[2]]);
-        store.restore(deleted);
-        let after: Vec<_> = store
-            .notes()
-            .iter()
-            .map(|n| (n.id, n.stack, n.order))
-            .collect();
-        let want: Vec<_> = before.iter().map(|n| (n.id, n.stack, n.order)).collect();
-        assert_eq!(after, want);
         assert!(store.delete_note(Uuid::new_v4()).is_none());
     }
 
@@ -607,10 +655,9 @@ mod tests {
         let (mut store, id, _dir) = store_of(4);
         store.stack(id[1], id[0]);
         store.stack(id[2], id[0]);
-        let deleted = store.delete_note(id[0]).unwrap();
+        fill(&mut store);
+        let deleted = assert_round_trip(&mut store, id[0]);
         assert_eq!(deleted.promoted, Some(id[1]));
-        store.restore(deleted);
-        assert_eq!(ids(&store), id);
         let stacks: Vec<_> = store.notes().iter().map(|n| n.stack).collect();
         assert_eq!(stacks, vec![None, Some(id[0]), Some(id[0]), None]);
     }
@@ -620,23 +667,66 @@ mod tests {
         let (mut store, id, _dir) = store_of(3);
         store.stack(id[1], id[0]);
         store.stack(id[2], id[0]);
-        let deleted = store.delete_note(id[1]).unwrap();
+        fill(&mut store);
+        let deleted = assert_round_trip(&mut store, id[1]);
         assert_eq!(deleted.promoted, None);
-        store.restore(deleted);
-        assert_eq!(ids(&store), id);
-        assert_eq!(store.notes()[1].stack, Some(id[0]));
-        assert_eq!(store.notes()[2].stack, Some(id[0]));
     }
 
     #[test]
     fn delete_restore_round_trips_pinned() {
         let (mut store, id, _dir) = store_of(3);
         store.set_pinned(id[2], true);
-        let deleted = store.delete_note(id[2]).unwrap();
+        fill(&mut store);
+        let deleted = assert_round_trip(&mut store, id[2]);
         assert_eq!(deleted.index, 0);
-        store.restore(deleted);
         assert_eq!(ids(&store), vec![id[2], id[0], id[1]]);
-        assert!(store.notes()[0].pinned);
+    }
+
+    #[test]
+    fn delete_restore_round_trips_pinned_stack_top() {
+        let (mut store, id, _dir) = store_of(4);
+        store.stack(id[1], id[0]);
+        store.stack(id[2], id[0]);
+        store.set_pinned(id[0], true);
+        store.set_pinned(id[3], true);
+        fill(&mut store);
+        let deleted = assert_round_trip(&mut store, id[0]);
+        assert_eq!(deleted.promoted, Some(id[1]));
+        assert!(store.notes()[..3].iter().all(|n| n.pinned));
+    }
+
+    #[test]
+    fn restore_after_promoted_note_deleted() {
+        let (mut store, id, _dir) = store_of(4);
+        store.stack(id[1], id[0]);
+        store.stack(id[2], id[0]);
+        fill(&mut store);
+        let deleted = store.delete_note(id[0]).unwrap();
+        // The promoted note goes too; its member is promoted in turn.
+        store.delete_note(id[1]).unwrap();
+        store.restore(deleted);
+        assert_invariants(&store);
+        assert_eq!(ids(&store), vec![id[0], id[2], id[3]]);
+        let restored = store.notes().iter().find(|n| n.id == id[0]).unwrap();
+        assert_eq!(restored.content, "body 0");
+    }
+
+    #[test]
+    fn restore_after_promoted_note_restacked() {
+        let (mut store, id, _dir) = store_of(4);
+        store.stack(id[1], id[0]);
+        store.stack(id[2], id[0]);
+        fill(&mut store);
+        let deleted = store.delete_note(id[0]).unwrap();
+        // The promoted note and its member move under another stack.
+        assert!(store.stack(id[1], id[3]));
+        store.restore(deleted);
+        assert_invariants(&store);
+        assert_eq!(store.notes().len(), 4);
+        let at = |i: usize| store.notes().iter().find(|n| n.id == id[i]).unwrap();
+        assert_eq!(at(0).stack, None);
+        assert_eq!(at(1).stack, Some(id[3]));
+        assert_eq!(at(2).stack, Some(id[3]));
     }
 
     #[test]

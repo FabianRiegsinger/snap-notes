@@ -219,13 +219,9 @@ const TOAST_TEXT: &str = "Note deleted · ";
 const TOAST_ACCENT: &str = "Undo";
 
 /// The tooltip of the slot hovered since `hover`'s instant, once it has
-/// rested there for `TOOLTIP_DELAY`; none while the peek shows.
-pub fn slot_tooltip(
-    hover: Option<(Slot, Instant)>,
-    now: Instant,
-    peek_visible: bool,
-) -> Option<&'static str> {
-    let (slot, since) = hover.filter(|_| !peek_visible)?;
+/// rested there for `TOOLTIP_DELAY`.
+pub fn slot_tooltip(hover: Option<(Slot, Instant)>, now: Instant) -> Option<&'static str> {
+    let (slot, since) = hover?;
     (now.saturating_duration_since(since) >= TOOLTIP_DELAY).then_some(match slot {
         Slot::Add => ADD_TOOLTIP,
         Slot::Search => SEARCH_TOOLTIP,
@@ -260,6 +256,45 @@ fn drag_moved(drag: &DragState) -> bool {
     (drag.current_y - drag.origin_y).abs() > 5.0
 }
 
+/// Which kind of hint chip the strip shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintKind {
+    None,
+    /// "Stack" beside the bar a drop would stack onto, if any.
+    Stack,
+    Clipboard,
+    Toast,
+    /// The hovered slot's tooltip, once it is due.
+    Tooltip,
+}
+
+/// Which hint chip shows, by precedence: none with the peek; while a bar
+/// is dragged (once it has moved) only the stack cue; otherwise the empty
+/// clipboard, then the undo toast, then the hovered slot's tooltip, which
+/// an open panel hides. The app asks too, so the toast takes clicks
+/// exactly while it shows.
+pub fn hint_kind(
+    peek: Option<(usize, f32)>,
+    drag: Option<&DragState>,
+    clipboard_hint: bool,
+    toast: bool,
+    panel_open: bool,
+) -> HintKind {
+    if peek.is_some_and(|(_, progress)| progress > 0.0) {
+        HintKind::None
+    } else if drag.is_some_and(drag_moved) {
+        HintKind::Stack
+    } else if clipboard_hint {
+        HintKind::Clipboard
+    } else if toast {
+        HintKind::Toast
+    } else if panel_open {
+        HintKind::None
+    } else {
+        HintKind::Tooltip
+    }
+}
+
 /// The hint while a bar is dragged: "Stack" beside the bar a drop would
 /// stack onto.
 fn drag_hint(bars: &[Rectangle], drag: Option<&DragState>) -> Option<Hint> {
@@ -283,6 +318,9 @@ struct StripState {
     pressed_slot: Option<Slot>,
     /// The chip on screen and since when, for its fade.
     chip: Option<(Hint, Instant)>,
+    /// When the latest frame was requested: `draw` shows the chip as of
+    /// then, the same instant `update` noted it at.
+    frame: Option<Instant>,
 }
 
 impl StripState {
@@ -328,6 +366,11 @@ impl StripState {
             .filter(|due| *due > now)
     }
 
+    /// Whether the chip is still fading in at `now`.
+    fn chip_fading(&self, now: Instant) -> bool {
+        self.chip.is_some_and(|(_, since)| now < since + CHIP_FADE)
+    }
+
     /// Notes the chip shown at `now`; a new one starts fading in.
     fn show_chip(&mut self, hint: Option<Hint>, now: Instant) {
         if self.chip.map(|(h, _)| h) != hint {
@@ -369,39 +412,51 @@ fn chip_paragraph(text: &str, accent: Option<&str>, accent_color: Color) -> Chip
 }
 
 /// A chip around a label of size `label`: left of `anchor`, where the
-/// peek grows, and vertically centred on `y`.
-fn chip_frame(anchor: Rectangle, y: f32, label: Size) -> Rectangle {
+/// peek grows, and vertically centred on `y`, kept inside `bounds` like
+/// the peek.
+fn chip_frame(bounds: Rectangle, anchor: Rectangle, y: f32, label: Size) -> Rectangle {
     let size = Size::new(
         label.width + 2.0 * CHIP_PADDING.width,
         label.height + 2.0 * CHIP_PADDING.height,
     );
+    let max_y = (bounds.y + bounds.height - size.height).max(bounds.y);
     Rectangle::new(
-        Point::new(anchor.x - CHIP_GAP - size.width, y - size.height / 2.0),
+        Point::new(
+            anchor.x - CHIP_GAP - size.width,
+            (y - size.height / 2.0).clamp(bounds.y, max_y),
+        ),
         size,
     )
 }
 
 /// Where the chip labelled `text` (and `accent`) beside `anchor` at `y`
-/// is drawn, for hit-testing without a renderer.
-pub fn chip_rect(anchor: Rectangle, y: f32, text: &str, accent: Option<&str>) -> Rectangle {
+/// is drawn in `bounds`, for hit-testing without a renderer.
+pub fn chip_rect(
+    bounds: Rectangle,
+    anchor: Rectangle,
+    y: f32,
+    text: &str,
+    accent: Option<&str>,
+) -> Rectangle {
     let label = chip_paragraph(text, accent, Color::TRANSPARENT).min_bounds();
-    chip_frame(anchor, y, label)
+    chip_frame(bounds, anchor, y, label)
 }
 
-/// Draws a hint chip beside `anchor` (a bar or slot), vertically centred
-/// on `y`: a small card like the peek's paper with `text` at 0.75 ink and
-/// `accent` after it at full ink, all at `alpha`. Returns its rect.
+/// Draws a hint chip beside `anchor` (a bar or slot) in `bounds`,
+/// vertically centred on it: a small card like the peek's paper with
+/// `text` at 0.75 ink and `accent` after it at full ink, all at `alpha`.
+/// Returns its rect.
 pub fn draw_chip(
     renderer: &mut iced::Renderer,
     theme: &theme::Theme,
+    bounds: Rectangle,
     anchor: Rectangle,
-    y: f32,
     text: &str,
     accent: Option<&str>,
     alpha: f32,
 ) -> Rectangle {
     let paragraph = chip_paragraph(text, accent, theme.ink(alpha));
-    let rect = chip_frame(anchor, y, paragraph.min_bounds());
+    let rect = chip_frame(bounds, anchor, anchor.center_y(), paragraph.min_bounds());
     if alpha <= 0.0 {
         return rect;
     }
@@ -431,10 +486,11 @@ pub fn draw_chip(
     rect
 }
 
-/// Where the undo toast shows on `strip`: the whole chip is its hit area.
-pub fn toast_rect(strip: &StripLayout) -> Rectangle {
+/// Where the undo toast shows on `strip` in `bounds`: the whole chip is
+/// its hit area.
+pub fn toast_rect(strip: &StripLayout, bounds: Rectangle) -> Rectangle {
     let anchor = strip.add_button;
-    chip_rect(anchor, anchor.center_y(), TOAST.text, TOAST.accent)
+    chip_rect(bounds, anchor, anchor.center_y(), TOAST.text, TOAST.accent)
 }
 
 /// The strip shows a settings slot only where no tray menu offers Settings.
@@ -613,6 +669,9 @@ pub struct BarStrip<'a> {
     pub clipboard_hint: bool,
     /// Shows the undo toast after a delete beside the `+` slot.
     pub toast: bool,
+    /// A panel (search, settings or export) is open: the slots show no
+    /// tooltips.
+    pub panel_open: bool,
 }
 
 impl<'a> BarStrip<'a> {
@@ -688,48 +747,68 @@ impl<'a> BarStrip<'a> {
         })
     }
 
-    /// The hint chip to show at `now`, if any: never with the peek. While
-    /// dragging only the stack cue; otherwise the empty clipboard, then the
-    /// undo toast, then the hovered slot's tooltip.
+    /// The hint chip to show at `now`, if any (see `hint_kind`).
     fn hint(
         &self,
         strip: &StripLayout,
         slot_hover: Option<(Slot, Instant)>,
         now: Instant,
     ) -> Option<Hint> {
-        if self.peek.is_some_and(|(_, progress)| progress > 0.0) {
-            return None;
-        }
-        if self.drag.is_some() {
-            return drag_hint(&strip.bars, self.drag.as_ref());
-        }
-        if self.clipboard_hint {
-            return Some(Hint {
+        match self.hint_kind() {
+            HintKind::None => None,
+            HintKind::Stack => drag_hint(&strip.bars, self.drag.as_ref()),
+            HintKind::Clipboard => Some(Hint {
                 text: CLIPBOARD_EMPTY,
                 accent: None,
                 at: HintAt::Add,
-            });
+            }),
+            HintKind::Toast => Some(TOAST),
+            HintKind::Tooltip => {
+                let text = slot_tooltip(slot_hover, now)?;
+                let at = match slot_hover?.0 {
+                    Slot::Add => HintAt::Add,
+                    Slot::Search => HintAt::Search,
+                };
+                Some(Hint {
+                    text,
+                    accent: None,
+                    at,
+                })
+            }
         }
-        if self.toast {
-            return Some(TOAST);
-        }
-        let text = slot_tooltip(slot_hover, now, false)?;
-        let at = match slot_hover?.0 {
-            Slot::Add => HintAt::Add,
-            Slot::Search => HintAt::Search,
-        };
-        Some(Hint {
-            text,
-            accent: None,
-            at,
-        })
+    }
+
+    fn hint_kind(&self) -> HintKind {
+        hint_kind(
+            self.peek,
+            self.drag.as_ref(),
+            self.clipboard_hint,
+            self.toast,
+            self.panel_open,
+        )
     }
 
     /// What a press at `pos` on the undo toast does, while it shows.
     fn toast_press(&self, bounds: Rectangle, pos: Point) -> Option<Message> {
         let strip = self.layout_in(bounds);
-        (self.hint(&strip, None, Instant::now()) == Some(TOAST) && toast_rect(&strip).contains(pos))
+        (self.hint_kind() == HintKind::Toast && toast_rect(&strip, bounds).contains(pos))
             .then_some(Message::UndoDelete)
+    }
+
+    /// Notes in `state` the frame drawn at `at` and the chip showing then.
+    fn note_frame(&self, state: &mut StripState, strip: &StripLayout, at: Instant) {
+        let hint = self.hint(strip, state.slot_hover, at);
+        state.frame = Some(at);
+        state.show_chip(hint, at);
+    }
+
+    /// The chip to draw on the latest frame and its opacity, while it is
+    /// still the one to show.
+    fn frame_chip(&self, state: &StripState, strip: &StripLayout) -> Option<(Hint, f32)> {
+        let now = state.frame?;
+        let current = self.hint(strip, state.slot_hover, now);
+        let (hint, since) = state.chip.filter(|(h, _)| Some(*h) == current)?;
+        Some((hint, chip_alpha(since, now)))
     }
 
     /// How far a slot at magnification `scale` has revealed its glyph (0..=1).
@@ -1130,18 +1209,16 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
 
         // The hint chip, once `update` has noted it, fading in from then.
         let state = tree.state.downcast_ref::<StripState>();
-        let now = Instant::now();
-        let current = self.hint(&strip, state.slot_hover, now);
-        if let Some((hint, since)) = state.chip.filter(|(h, _)| Some(*h) == current) {
+        if let Some((hint, alpha)) = self.frame_chip(state, &strip) {
             if let Some(anchor) = hint_anchor(&strip, hint.at) {
                 draw_chip(
                     renderer,
                     &self.theme,
+                    bounds,
                     anchor,
-                    anchor.center_y(),
                     hint.text,
                     hint.accent,
-                    chip_alpha(since, now),
+                    alpha,
                 );
             }
         }
@@ -1161,7 +1238,12 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         let bounds = layout.bounds();
         let state = tree.state.downcast_mut::<StripState>();
         state.observe(event);
-        let now = Instant::now();
+        // A frame's own instant, so hover, tooltip timing and the chip go
+        // by one clock.
+        let now = match event {
+            Event::Window(iced::window::Event::RedrawRequested(at)) => *at,
+            _ => Instant::now(),
+        };
         match event {
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 state.hover_slot(self.layout_in(bounds).slot_at(*position), now);
@@ -1172,10 +1254,9 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 let strip = self.layout_in(bounds);
                 state.press(cursor.position().and_then(|pos| strip.slot_at(pos)));
             }
-            Event::Window(iced::window::Event::RedrawRequested(at)) => {
-                let hint = self.hint(&self.layout_in(bounds), state.slot_hover, *at);
-                state.show_chip(hint, *at);
-                if state.chip.is_some_and(|(_, since)| *at < since + CHIP_FADE) {
+            Event::Window(iced::window::Event::RedrawRequested(_)) => {
+                self.note_frame(state, &self.layout_in(bounds), now);
+                if state.chip_fading(now) {
                     shell.request_redraw();
                 }
             }
@@ -1613,21 +1694,16 @@ mod tests {
     }
 
     #[test]
-    fn slot_tooltip_after_delay_and_hidden_with_peek() {
+    fn slot_tooltip_after_delay() {
         let at = Instant::now();
         let hover = Some((Slot::Add, at));
         let later = |ms| at + Duration::from_millis(ms);
-        assert_eq!(slot_tooltip(hover, later(599), false), None);
-        let add = slot_tooltip(hover, later(600), false).unwrap();
+        assert_eq!(slot_tooltip(hover, later(599)), None);
+        let add = slot_tooltip(hover, later(600)).unwrap();
         assert!(add.starts_with("New note · ") && add.ends_with("-click: from clipboard"));
-        let search = slot_tooltip(Some((Slot::Search, at)), later(900), false).unwrap();
+        let search = slot_tooltip(Some((Slot::Search, at)), later(900)).unwrap();
         assert!(search == "Search (Cmd+F)" || search == "Search (Ctrl+F)");
-        assert_eq!(
-            slot_tooltip(hover, later(900), true),
-            None,
-            "not with the peek"
-        );
-        assert_eq!(slot_tooltip(None, later(900), false), None);
+        assert_eq!(slot_tooltip(None, later(900)), None);
     }
 
     #[test]
@@ -1662,14 +1738,164 @@ mod tests {
     #[test]
     fn chip_sits_beside_its_anchor() {
         let anchor = Rectangle::new(Point::new(1040.0, 300.0), Size::new(8.0, 40.0));
-        let short = chip_rect(anchor, 320.0, "Stack", None);
+        let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
+        let short = chip_rect(bounds, anchor, 320.0, "Stack", None);
         assert!(short.x + short.width <= anchor.x);
         assert!((short.center().y - 320.0).abs() < 0.01);
-        let long = chip_rect(anchor, 320.0, "Clipboard is empty", None);
+        let long = chip_rect(bounds, anchor, 320.0, "Clipboard is empty", None);
         assert!(long.width > short.width);
         assert!((long.x + long.width - (short.x + short.width)).abs() < 0.01);
-        let accented = chip_rect(anchor, 320.0, "Stack", Some(" more"));
+        let accented = chip_rect(bounds, anchor, 320.0, "Stack", Some(" more"));
         assert!(accented.width > short.width);
+    }
+
+    /// A strip of `notes` with nothing showing beyond its bars.
+    fn plain_strip<'a>(
+        notes: &'a [Note],
+        entries: &'a [Entry],
+        magnification: &'a MagnificationState,
+        drag: &'a Option<DragState>,
+        bars: &'a BarSettings,
+    ) -> BarStrip<'a> {
+        BarStrip {
+            notes,
+            entries,
+            progress: &[],
+            magnification,
+            drag,
+            scroll_offset: 0.0,
+            peek: None,
+            bars,
+            height_fraction: 1.0,
+            paper_tint: 0.0,
+            default_note_width: 260.0,
+            theme: theme::Theme::default(),
+            open: None,
+            collapse: None,
+            dimmed: Vec::new(),
+            pulse: Vec::new(),
+            add_shake: 0.0,
+            clipboard_hint: false,
+            toast: false,
+            panel_open: false,
+        }
+    }
+
+    const STRIP_BOUNDS: Rectangle = Rectangle {
+        x: 1000.0,
+        y: 0.0,
+        width: STRIP_WIDTH,
+        height: 900.0,
+    };
+
+    #[test]
+    fn slot_tooltip_suppressed_while_panel_open() {
+        let notes = [Note::new(crate::note::PALETTE[0])];
+        let entries = crate::strip_model::entries(&notes);
+        let (magnification, drag, bars) = (MagnificationState::new(), None, BarSettings::default());
+        let mut strip = plain_strip(&notes, &entries, &magnification, &drag, &bars);
+        let layout = strip.layout_in(STRIP_BOUNDS);
+        let at = Instant::now();
+        let hover = Some((Slot::Search, at));
+        let later = at + Duration::from_millis(700);
+        assert!(strip.hint(&layout, hover, later).is_some());
+        strip.panel_open = true;
+        assert_eq!(strip.hint(&layout, hover, later), None);
+        // The toast is the app's to hide; other chips still show.
+        strip.clipboard_hint = true;
+        assert!(strip.hint(&layout, hover, later).is_some());
+    }
+
+    #[test]
+    fn hint_hides_everything_with_the_peek() {
+        let notes = [Note::new(crate::note::PALETTE[0])];
+        let entries = crate::strip_model::entries(&notes);
+        let (magnification, drag, bars) = (MagnificationState::new(), None, BarSettings::default());
+        let mut strip = plain_strip(&notes, &entries, &magnification, &drag, &bars);
+        let layout = strip.layout_in(STRIP_BOUNDS);
+        let at = Instant::now();
+        let hover = Some((Slot::Add, at));
+        let later = at + Duration::from_millis(900);
+        assert!(strip.hint(&layout, hover, later).is_some());
+        strip.peek = Some((0, 0.5));
+        assert_eq!(strip.hint(&layout, hover, later), None, "not with the peek");
+        strip.toast = true;
+        assert_eq!(strip.hint(&layout, hover, later), None);
+        // A peek that has closed again hides nothing.
+        strip.peek = Some((0, 0.0));
+        assert_eq!(strip.hint(&layout, hover, later), Some(TOAST));
+    }
+
+    #[test]
+    fn tooltip_due_at_the_redraw_instant_shows() {
+        let notes = [Note::new(crate::note::PALETTE[0])];
+        let entries = crate::strip_model::entries(&notes);
+        let (magnification, drag, bars) = (MagnificationState::new(), None, BarSettings::default());
+        let strip = plain_strip(&notes, &entries, &magnification, &drag, &bars);
+        let layout = strip.layout_in(STRIP_BOUNDS);
+        let mut state = StripState::default();
+        // Hovered now; the frame comes exactly when the tooltip is due.
+        let at = Instant::now();
+        state.hover_slot(Some(Slot::Add), at);
+        let due = at + TOOLTIP_DELAY;
+        strip.note_frame(&mut state, &layout, due);
+        assert!(state.chip_fading(due));
+        let (hint, alpha) = strip
+            .frame_chip(&state, &layout)
+            .expect("the tooltip shows");
+        assert_eq!(hint.text, ADD_TOOLTIP);
+        assert_eq!(alpha, 0.0, "fading in from that frame");
+        strip.note_frame(&mut state, &layout, due + CHIP_FADE / 2);
+        let (_, alpha) = strip.frame_chip(&state, &layout).unwrap();
+        assert!((alpha - 0.5).abs() < 0.01);
+        assert!(
+            state.tooltip_due(due).is_none(),
+            "no redraw left to wait for"
+        );
+    }
+
+    #[test]
+    fn chip_stays_inside_bounds() {
+        let bounds = Rectangle::new(Point::new(1000.0, 100.0), Size::new(STRIP_WIDTH, 400.0));
+        let top = Rectangle::new(Point::new(1040.0, 100.0), Size::new(8.0, 4.0));
+        let chip = chip_rect(bounds, top, 101.0, "Stack", None);
+        assert_eq!(chip.y, bounds.y);
+        let bottom = Rectangle::new(Point::new(1040.0, 496.0), Size::new(8.0, 4.0));
+        let chip = chip_rect(bounds, bottom, 499.0, "Stack", None);
+        assert!((chip.y + chip.height - (bounds.y + bounds.height)).abs() < 0.01);
+        // Centred where there is room.
+        let chip = chip_rect(bounds, top, 300.0, "Stack", None);
+        assert!((chip.center_y() - 300.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn toast_stays_until_a_drag_moves() {
+        let notes = [
+            Note::new(crate::note::PALETTE[0]),
+            Note::new(crate::note::PALETTE[1]),
+        ];
+        let entries = crate::strip_model::entries(&notes);
+        let (magnification, bars) = (MagnificationState::new(), BarSettings::default());
+        let y = 400.0;
+        let still = Some(DragState {
+            bar_index: 1,
+            origin_y: y,
+            current_y: y + 2.0,
+        });
+        let mut strip = plain_strip(&notes, &entries, &magnification, &still, &bars);
+        strip.toast = true;
+        let layout = strip.layout_in(STRIP_BOUNDS);
+        let toast = toast_rect(&layout, STRIP_BOUNDS);
+        assert_eq!(strip.hint(&layout, None, Instant::now()), Some(TOAST));
+        assert!(strip.toast_press(STRIP_BOUNDS, toast.center()).is_some());
+        let moved = Some(DragState {
+            bar_index: 1,
+            origin_y: y,
+            current_y: y + 40.0,
+        });
+        strip.drag = &moved;
+        assert_ne!(strip.hint(&layout, None, Instant::now()), Some(TOAST));
+        assert!(strip.toast_press(STRIP_BOUNDS, toast.center()).is_none());
     }
 
     #[test]
@@ -1699,9 +1925,10 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: true,
+            panel_open: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
-        let toast = toast_rect(&strip.layout_in(bounds));
+        let toast = toast_rect(&strip.layout_in(bounds), bounds);
         // The chip sits left of `+` and reads "Note deleted · Undo".
         let add = strip.layout_in(bounds).add_button;
         assert!(toast.x + toast.width <= add.x);
@@ -1760,6 +1987,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            panel_open: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -1819,6 +2047,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            panel_open: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -1872,6 +2101,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            panel_open: false,
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -1911,6 +2141,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            panel_open: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -1951,6 +2182,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            panel_open: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
