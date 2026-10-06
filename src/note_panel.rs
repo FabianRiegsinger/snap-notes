@@ -190,7 +190,7 @@ fn pin_button<'a>(pinned: bool, theme: theme::Theme, alpha: f32) -> Element<'a, 
 }
 
 /// A tooltip's card.
-fn tip_label<'a>(tip: &'a str, theme: theme::Theme) -> Element<'a, Message> {
+fn tip_label<'a>(tip: impl text::IntoFragment<'a>, theme: theme::Theme) -> Element<'a, Message> {
     container(text(tip).size(TEXT_SM).font(theme::BODY_FONT))
         .padding(Padding::new(space(1)).left(space(2)).right(space(2)))
         .style(move |_theme: &Theme| container::Style {
@@ -206,15 +206,44 @@ fn tip_label<'a>(tip: &'a str, theme: theme::Theme) -> Element<'a, Message> {
 /// The title field's placeholder.
 const TITLE_PLACEHOLDER: &str = "Title \u{2014} @15:00 adds a reminder";
 
-/// The header label's text and ink for a reminder status; `None` shows
-/// nothing. The bell goes with the text unless it is `Invalid`.
-fn reminder_label(status: &reminder::Status) -> Option<(String, f32)> {
-    match status {
-        reminder::Status::None => None,
-        reminder::Status::Pending(label) => Some((label.clone(), 0.65)),
-        reminder::Status::Fired(label) => Some((format!("{label} \u{b7} fired"), 0.65)),
-        reminder::Status::Invalid => Some(("not a reminder".to_string(), 0.45)),
-    }
+/// Notes narrower than this show the reminder as a bell alone.
+const REMINDER_LABEL_MIN_WIDTH: f32 = 320.0;
+
+/// What the header shows for a reminder status.
+#[derive(Debug, Clone, PartialEq)]
+struct ReminderLabel {
+    bell: bool,
+    text: Option<String>,
+    ink: f32,
+    /// Shown on hover when the text is left out.
+    tooltip: Option<String>,
+}
+
+/// The header's reminder label for `status` in a note `width` wide; `None`
+/// shows nothing. A fired reminder is dimmed. A narrow note keeps just the
+/// bell, with the text as its tooltip.
+fn reminder_label(status: &reminder::Status, width: f32) -> Option<ReminderLabel> {
+    let (text, ink, bell) = match status {
+        reminder::Status::None => return None,
+        reminder::Status::Pending(label) => (label.clone(), 0.65, true),
+        reminder::Status::Fired(label) => (label.clone(), 0.45, true),
+        reminder::Status::Invalid => ("not a reminder".to_string(), 0.45, false),
+    };
+    Some(if width < REMINDER_LABEL_MIN_WIDTH {
+        ReminderLabel {
+            bell: true,
+            text: None,
+            ink,
+            tooltip: Some(text),
+        }
+    } else {
+        ReminderLabel {
+            bell,
+            text: Some(text),
+            ink,
+            tooltip: None,
+        }
+    })
 }
 
 /// The focus ring's border while `focused`, otherwise a plain rounded edge.
@@ -423,20 +452,25 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
 
         // The reminder's state right of the title: bell and time, or why
         // the tag isn't one. Its width hugs the text so the title keeps the row.
-        let reminder_tag = reminder_label(&reminder).map(|(label, ink)| {
-            let bell = (!matches!(reminder, reminder::Status::Invalid))
-                .then(|| icon(Icon::Bell, TEXT_SM).color(theme.ink(ink * a)));
-            row![
-                bell,
-                text(label)
+        let reminder_tag = reminder_label(&reminder, size.width).map(|l| {
+            let ink = theme.ink(l.ink * a);
+            let tag = row![
+                l.bell.then(|| icon(Icon::Bell, TEXT_SM).color(ink)),
+                l.text.map(|label| text(label)
                     .size(TEXT_SM)
                     .font(theme::BODY_FONT)
-                    .color(theme.ink(ink * a))
-                    .wrapping(text::Wrapping::None)
+                    .color(ink)
+                    .wrapping(text::Wrapping::None))
             ]
             .spacing(space(1))
             .align_y(iced::Alignment::Center)
-            .width(Length::Shrink)
+            .width(Length::Shrink);
+            match l.tooltip {
+                Some(tip) => Element::from(
+                    tooltip(tag, tip_label(tip, theme), tooltip::Position::Bottom).gap(4),
+                ),
+                None => tag.into(),
+            }
         });
 
         // Any press on the header, title and buttons included, leaves edit
@@ -692,39 +726,6 @@ fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding
 mod tests {
     use super::*;
 
-    #[test]
-    fn title_placeholder_mentions_reminders() {
-        assert_eq!(TITLE_PLACEHOLDER, "Title \u{2014} @15:00 adds a reminder");
-    }
-
-    #[test]
-    fn reminder_label_text_for_each_status() {
-        use reminder::Status;
-        assert_eq!(reminder_label(&Status::None), None);
-        assert_eq!(
-            reminder_label(&Status::Pending("Fri 09:00".into())),
-            Some(("Fri 09:00".to_string(), 0.65))
-        );
-        assert_eq!(
-            reminder_label(&Status::Fired("Fri 09:00".into())),
-            Some(("Fri 09:00 \u{b7} fired".to_string(), 0.65))
-        );
-        assert_eq!(
-            reminder_label(&Status::Invalid),
-            Some(("not a reminder".to_string(), 0.45))
-        );
-    }
-
-    #[test]
-    fn active_header_button_has_wash() {
-        let theme = theme::Theme::default();
-        let idle = header_button_style(theme, 1.0, false, button::Status::Active);
-        assert_eq!(idle.background, None);
-        assert_eq!(idle.text_color, theme.ink(0.65));
-        let on = header_button_style(theme, 1.0, true, button::Status::Active);
-        assert_eq!(on.background, Some(theme.ink(0.10).into()));
-        assert_eq!(on.text_color, theme.ink(1.0));
-    }
     fn press(ch: &str, command: bool, status: text_editor::Status) -> text_editor::KeyPress {
         let key = keyboard::Key::Character(ch.into());
         text_editor::KeyPress {
@@ -970,5 +971,71 @@ mod tests {
             &mut state,
         );
         assert_eq!(state.scrolled_to, None);
+    }
+
+    #[test]
+    fn title_placeholder_mentions_reminders() {
+        assert_eq!(TITLE_PLACEHOLDER, "Title \u{2014} @15:00 adds a reminder");
+    }
+
+    #[test]
+    fn reminder_label_text_for_each_status() {
+        use reminder::Status;
+        let wide = 400.0;
+        assert_eq!(reminder_label(&Status::None, wide), None);
+        assert_eq!(
+            reminder_label(&Status::Pending("Fri 09:00".into()), wide),
+            Some(ReminderLabel {
+                bell: true,
+                text: Some("Fri 09:00".into()),
+                ink: 0.65,
+                tooltip: None
+            })
+        );
+        assert_eq!(
+            reminder_label(&Status::Invalid, wide),
+            Some(ReminderLabel {
+                bell: false,
+                text: Some("not a reminder".into()),
+                ink: 0.45,
+                tooltip: None
+            })
+        );
+    }
+
+    #[test]
+    fn fired_label_is_dimmed_without_suffix() {
+        let l = reminder_label(&reminder::Status::Fired("Fri 09:00".into()), 400.0).unwrap();
+        assert!(l.bell);
+        assert_eq!(l.text.as_deref(), Some("Fri 09:00"));
+        assert_eq!(l.ink, 0.45);
+    }
+
+    #[test]
+    fn reminder_label_narrow_shows_bell_only() {
+        use reminder::Status;
+        let narrow = 319.0;
+        let p = reminder_label(&Status::Pending("Fri 09:00".into()), narrow).unwrap();
+        assert!(p.bell && p.text.is_none() && p.ink == 0.65);
+        assert_eq!(p.tooltip.as_deref(), Some("Fri 09:00"));
+        let f = reminder_label(&Status::Fired("Fri 09:00".into()), narrow).unwrap();
+        assert!(f.bell && f.text.is_none() && f.ink == 0.45);
+        assert_eq!(f.tooltip.as_deref(), Some("Fri 09:00"));
+        let i = reminder_label(&Status::Invalid, narrow).unwrap();
+        assert!(i.bell && i.text.is_none() && i.ink == 0.45);
+        assert_eq!(i.tooltip.as_deref(), Some("not a reminder"));
+        let wide = reminder_label(&Status::Pending("x".into()), 320.0).unwrap();
+        assert!(wide.text.is_some());
+    }
+
+    #[test]
+    fn active_header_button_has_wash() {
+        let theme = theme::Theme::default();
+        let idle = header_button_style(theme, 1.0, false, button::Status::Active);
+        assert_eq!(idle.background, None);
+        assert_eq!(idle.text_color, theme.ink(0.65));
+        let on = header_button_style(theme, 1.0, true, button::Status::Active);
+        assert_eq!(on.background, Some(theme.ink(0.10).into()));
+        assert_eq!(on.text_color, theme.ink(1.0));
     }
 }
