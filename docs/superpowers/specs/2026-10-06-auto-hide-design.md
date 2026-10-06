@@ -23,7 +23,7 @@ Branch: `feat/auto-hide`, based on `feat/ux-clarity`.
 
 | # | Topic | Decision |
 |---|---|---|
-| A1 | Setting | Toggle **"Auto-hide"** in Settings → Window, available on all platforms. **Session-only:** it is off at every app start and not saved (user: "starting the app should always auto-hide off"). Turning it off reveals the strip at once. |
+| A1 | Setting | Toggle **"Auto-hide"** in Settings → Window, available on all platforms. Default off. Persisted as `window.auto_hide`. Turning it off reveals the strip at once. |
 | A2 | States | `Shown → Hiding → Hidden → Revealing → Shown`. Hiding and Revealing are 200 ms slides; the eased offset uses the existing motion speed setting. A reveal that starts mid-hide reverses from the current offset, and the same applies the other way round. |
 | A3 | Offset | The strip, peek, chips and toast are drawn shifted right by `offset × (STRIP_WIDTH + margin)`, where `offset` runs from 0 (shown) to 1 (hidden). When `offset` is 1, nothing of the strip is visible. |
 | A4 | Edge zone | The rightmost 2 px of the window, vertically within the strip's band: from the top of the first bar (or the add slot when there are no bars) minus the bar gap, to `hit_bottom()`. This matches the band `is_interactive` already uses for the strip. |
@@ -34,7 +34,7 @@ Branch: `feat/auto-hide`, based on `feat/ux-clarity`.
 | A9 | Other reveals | Any action that shows a note or panel reveals the strip first, with no dwell: the global hotkey, the tray items New Note, New Note from Clipboard, Search… and Settings…, and the keyboard shortcuts. A panel that opens then blocks hiding (A7); an open note does not (A14). |
 | A10 | Tray Show/Hide | **Hide** works as today: the strip is fully hidden, with no edge zone and no reveal. **Show** returns to Shown, and auto-hide applies again after the grace period. Auto-hide is a separate layer under `visible`. |
 | A11 | Linux (no passthrough) | While Hidden, the docked window shrinks to 2 px wide. It keeps its height and position, so it covers the band. A `CursorEntered` event, or `CursorMoved` inside the window, counts as being in the edge zone. The 150 ms dwell is measured from the entry, and it is cancelled by `CursorLeft`. When a reveal starts, the window returns to its normal docked width first, then the slide plays. When a hide finishes, the window shrinks, but only while no note or panel is open. With one open, the window keeps its wide size, and its rightmost 2 px within the band act as the edge zone through `CursorMoved`. |
-| A12 | Startup | The app always starts with auto-hide off and the strip Shown (A1). |
+| A12 | Startup | The app always starts with the strip Shown, even with auto-hide on. The normal grace period (A6) then applies. |
 | A14 | Open note | An open note does not block hiding: the strip may slide away completely while the note panel stays where it is, fully usable and interactive. Being over the note panel counts as away from the strip, so the 800 ms grace applies. A note that folds closed while the strip is hidden folds toward its bar's hidden position. Opening a note from a bar or by hotkey reveals the strip first (A9); then A14 applies. |
 | A13 | Focus | Revealing never steals keyboard focus. Only the actions in A9 focus the window, as they do today. |
 
@@ -47,7 +47,7 @@ Branch: `feat/auto-hide`, based on `feat/ux-clarity`.
   - `pub fn step(&mut self, inputs: Inputs, now: Instant, dt: f32) -> bool` returns whether it is still animating. It encodes A2, A5–A8 and A12.
   - `pub fn offset(&self) -> f32`, `pub fn is_hidden(&self) -> bool` (offset 1 and phase Hidden), and `pub fn wants_frames(&self) -> bool` for slides and pending timers.
   - The constants REVEAL_DWELL (150 ms), HIDE_GRACE (800 ms) and SLIDE_SECS (0.2) live here.
-- **`settings.rs` / `settings_panel.rs`:** a session-only `auto_hide` flag held by the app (not in the saved settings), shown as a toggle in the Window group.
+- **`settings.rs` / `settings_panel.rs`:** `WindowSettings.auto_hide: bool` (serde default false), shown as the toggle in the Window group.
 - **`app.rs`:**
   - New field `auto_hide: AutoHide`.
   - A helper `fn auto_hide_inputs(&self, cursor) -> Inputs` computes the blockers from A7.
@@ -78,7 +78,7 @@ Branch: `feat/auto-hide`, based on `feat/ux-clarity`.
   - the offset is monotonic during slides;
   - a mid-slide reversal.
 - **`app`:**
-  - auto-hide is off on start and is not saved;
+  - the setting round-trips, its default is off, and the app starts Shown with it on;
   - with a note open and the cursor over the note, the strip hides and the note stays interactive;
   - with auto-hide on and an idle app, the strip ends Hidden and `is_interactive` is true only in the edge zone;
   - a firing reminder reveals it;
@@ -95,7 +95,7 @@ Branch: `feat/auto-hide`, based on `feat/ux-clarity`.
 
 ## README
 
-- Settings → Window: the Auto-hide toggle (per session; off at every start).
+- Settings → Window: the Auto-hide toggle .
 - How to reveal the strip: hold the cursor at the screen edge where the strip sits.
 - When the strip stays shown: while you use a note or panel, and while a reminder pulses.
 
