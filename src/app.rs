@@ -401,6 +401,8 @@ pub struct App {
     pending_focus: Option<PendingFocus>,
     /// The registered global hotkey; dropping it unregisters it.
     hotkey: Option<hotkey::Manager>,
+    /// Why the last hotkey registration failed; shown in Settings.
+    hotkey_error: Option<String>,
     /// The menu bar / tray icon exists.
     tray_ok: bool,
     /// The tray icon could not be created, so the Dock icon is shown this
@@ -574,6 +576,7 @@ impl App {
             entries_synced,
             pending_focus: None,
             hotkey: None,
+            hotkey_error: None,
             tray_ok: false,
             tray_failed: false,
             keep_open_until: None,
@@ -1548,6 +1551,7 @@ impl App {
                     selected_slot: self.palette_slot,
                     tray_ok: self.tray_ok,
                     dock_forced: self.tray_failed,
+                    hotkey_error: self.hotkey_error.as_deref(),
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
             }
@@ -2819,8 +2823,23 @@ impl App {
             || self.settings.settings().is_on(SettingToggle::GlobalHotkey);
         if !wanted {
             self.hotkey = None;
+            self.hotkey_error = None;
         } else if self.hotkey.is_none() {
-            self.hotkey = hotkey::register();
+            self.apply_registration(hotkey::register());
+        }
+    }
+
+    /// Keeps the registered hotkey, or the reason it failed.
+    fn apply_registration(&mut self, result: Result<hotkey::Manager, String>) {
+        match result {
+            Ok(manager) => {
+                self.hotkey = Some(manager);
+                self.hotkey_error = None;
+            }
+            Err(reason) => {
+                self.hotkey = None;
+                self.hotkey_error = Some(reason);
+            }
         }
     }
 
@@ -5283,6 +5302,31 @@ mod tests {
         assert!(!state.can_export(app.store.notes()));
         let task = app.update(Message::ExportRequested);
         assert_eq!(task.units(), 0);
+    }
+
+    #[test]
+    fn hotkey_error_set_and_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "1")]);
+        assert_eq!(app.hotkey_error, None);
+        app.apply_registration(Err("HotKey already registered".into()));
+        assert_eq!(
+            app.hotkey_error.as_deref(),
+            Some("HotKey already registered")
+        );
+        assert!(app.hotkey.is_none());
+        // Turning the hotkey off drops the stale reason (Settings only offers
+        // the toggle on macOS and Windows).
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            app.window_id = Some(window::Id::unique());
+            app.settings
+                .settings_mut()
+                .toggle(SettingToggle::GlobalHotkey);
+            assert!(!app.settings.settings().is_on(SettingToggle::GlobalHotkey));
+            app.sync_hotkey();
+            assert_eq!(app.hotkey_error, None);
+        }
     }
 
     #[test]

@@ -20,26 +20,27 @@ fn hotkey() -> HotKey {
 }
 
 /// Registers the hotkey. On failure (another app holds it, or there is no
-/// X11 display on Linux) the error goes to stderr and nothing else changes.
-pub fn register() -> Option<Manager> {
+/// X11 display on Linux) the reason goes to stderr and is returned, so
+/// Settings can show it.
+pub fn register() -> Result<Manager, String> {
     // The Linux backend only speaks X11; without a display it would fail
     // silently on its own thread.
     #[cfg(target_os = "linux")]
     if std::env::var_os("DISPLAY").is_none() {
-        eprintln!("global hotkey unavailable: it needs an X11 display");
-        return None;
+        let reason = "it needs an X11 display".to_string();
+        eprintln!("global hotkey unavailable: {reason}");
+        return Err(reason);
     }
-    let result = GlobalHotKeyManager::new().and_then(|manager| {
-        manager.register(hotkey())?;
-        Ok(manager)
-    });
-    match result {
-        Ok(manager) => Some(Manager { _manager: manager }),
-        Err(e) => {
+    GlobalHotKeyManager::new()
+        .and_then(|manager| {
+            manager.register(hotkey())?;
+            Ok(manager)
+        })
+        .map(|manager| Manager { _manager: manager })
+        .map_err(|e| {
             eprintln!("could not register the global hotkey: {e}");
-            None
-        }
-    }
+            e.to_string()
+        })
 }
 
 /// One item per hotkey press, pushed as it happens so the app can sleep

@@ -32,6 +32,8 @@ pub struct SettingsView<'a> {
     pub tray_ok: bool,
     /// The Dock icon is shown regardless of the setting (no tray icon).
     pub dock_forced: bool,
+    /// Why the global hotkey couldn't be registered, if it couldn't.
+    pub hotkey_error: Option<&'a str>,
 }
 
 /// A quiet text or icon button: an ink wash while hovered or pressed.
@@ -124,6 +126,11 @@ pub fn toggle_enabled(settings: &Settings, toggle: SettingToggle, tray_ok: bool)
 #[cfg(any(windows, target_os = "macos"))]
 const HOTKEY_LABEL: &str = "Global hotkey (Cmd/Ctrl+Shift+Space)";
 
+#[cfg(any(windows, target_os = "macos"))]
+fn hotkey_error_label(reason: &str) -> String {
+    format!("Couldn't register: {reason}")
+}
+
 #[cfg(target_os = "macos")]
 fn toggle_label(toggle: SettingToggle) -> &'static str {
     match toggle {
@@ -147,6 +154,7 @@ fn app_section<'a>(
     settings: &Settings,
     tray_ok: bool,
     dock_forced: bool,
+    hotkey_error: Option<&str>,
     theme: theme::Theme,
     a: f32,
 ) -> Element<'a, Message> {
@@ -167,6 +175,13 @@ fn app_section<'a>(
             switch = switch.on_toggle(move |_| Message::SettingToggled(t));
         }
         col = col.push(switch);
+        if let (SettingToggle::GlobalHotkey, Some(reason)) = (t, hotkey_error) {
+            col = col.push(
+                text(hotkey_error_label(reason))
+                    .size(TEXT_XS)
+                    .color(theme.danger(a)),
+            );
+        }
     }
     col.into()
 }
@@ -238,6 +253,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         selected_slot,
         tray_ok,
         dock_forced,
+        hotkey_error,
     } = v;
     let inner: Element<'_, Message> = if a < 0.01 {
         Space::new().width(Fill).height(Fill).into()
@@ -256,12 +272,14 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
             .spacing(space(4))
             .padding(Padding::ZERO.right(space(3)));
         #[cfg(not(any(windows, target_os = "macos")))]
-        let _ = (tray_ok, dock_forced);
+        let _ = (tray_ok, dock_forced, hotkey_error);
         for group in SettingsGroup::ALL {
             let section = match group {
                 // Only macOS and Windows have the menu bar / tray icon.
                 #[cfg(any(windows, target_os = "macos"))]
-                SettingsGroup::App => app_section(settings, tray_ok, dock_forced, theme, a),
+                SettingsGroup::App => {
+                    app_section(settings, tray_ok, dock_forced, hotkey_error, theme, a)
+                }
                 #[cfg(not(any(windows, target_os = "macos")))]
                 SettingsGroup::App => continue,
                 SettingsGroup::Palette => palette_section(settings, selected_slot, theme, a),
@@ -366,6 +384,15 @@ mod tests {
             let muted = theme::over(theme.ink(0.55), card);
             assert!(contrast(muted, card) > 3.0, "{mode:?} muted");
         }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn hotkey_error_label_names_the_reason() {
+        assert_eq!(
+            hotkey_error_label("HotKey already registered"),
+            "Couldn't register: HotKey already registered"
+        );
     }
 
     #[test]
