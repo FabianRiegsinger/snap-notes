@@ -13,12 +13,13 @@
 
 ### The bar strip
 - **Dock-style magnification:** move the cursor along the strip and nearby bars grow with smooth spring physics.
-- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, and click it to open the note. Its trash button deletes the note after asking first.
-- **Quick add:** click the `+` slot below the bars (the whole strip width counts), or press Cmd/Ctrl+N.
-- **Search:** click the 🔍 slot under `+`, press Cmd/Ctrl+F or choose **Search…** in the tray menu. See [Search](#search).
+- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, and click it to open the note. Its trash button deletes the note at once, see [Notes](#notes) for undo.
+- **Quick add:** click the `+` slot below the bars (the whole strip width counts), or press Cmd/Ctrl+N. Hovering `+` for 0.6 s shows "New note · Option-click: from clipboard" (Alt-click on Windows/Linux). If the clipboard is empty, a clipboard note shakes `+` and shows "Clipboard is empty".
+- **Search:** click the 🔍 slot under `+`, press Cmd/Ctrl+F or choose **Search…** in the tray menu. Hovering 🔍 shows "Search (Cmd+F)" (Ctrl+F elsewhere). See [Search](#search).
+- **Hints on Linux:** hover hints aren't shown there, the same as the peek.
 - **Reorder:** drag a bar up or down to move the note.
-- **Stacks:** drag a bar onto the middle of another bar to stack it. Dropping between bars still reorders. A stack's bar has card-edge lines. Its peek lists its notes (at most 8, then "+N more"), and clicking a title opens that note. **Unstack** in the peek splits the stack, and deleting the top note promotes the next one.
-- **Pinned notes:** the pin button in a note's header keeps it at the top of the strip, marked by a darker notch on its bar. Dragging stays within the pinned group, and pinning a stack pins all of it.
+- **Stacks:** drag a bar onto the middle of another bar to stack it. While you hover there, the bar shows "Stack". Dropping between bars still reorders. A stack's bar has card-edge lines. Its peek lists its notes (at most 8, then "+N more"), and clicking a title opens that note. **Unstack** in the peek splits the stack, and deleting the top note promotes the next one.
+- **Pinned notes:** the pin button in a note's header keeps it at the top of the strip, marked by a darker notch on its bar. The button has a filled background while pinned, and its tooltip reads "Pin to top" or "Unpin". Dragging stays within the pinned group, and pinning a stack pins all of it.
 - **Checklist progress:** a bar fills from the bottom by the share of done tasks, and is drawn faded once all are done. The peek shows done/total, summed over a stack.
 - **File drops:** drop a file on `+` or on empty space to create a note, or on a bar to append to that note (the top note of a stack). A `.txt` or `.md` file up to 1 MB adds its text, and a new note gets the file name as its title. An image file is added as an image, and any other file as its path. Dropping onto an open note inserts an image, as before.
 - **From the clipboard:** **New Note from Clipboard** in the tray menu, or Alt/Option-click on `+`, makes a note whose body is the clipboard's text or image.
@@ -30,7 +31,7 @@
 - **Move it anywhere:** drag the grip at the top. The note reopens where you left it, and double-clicking the grip docks it again.
 - **Resize it:** drag any edge or corner. Each note remembers its own size.
 - **Color code it:** pick from a 20-color palette with the swatch in the header.
-- **Delete with confirmation:** the trash button asks first, then folds the note away.
+- **Delete and undo:** the trash button in the header deletes the note at once, with no confirmation. The toast "Note deleted · Undo" stays for 5 s, and clicking Undo restores the note. Cmd/Ctrl+Z also undoes it, but only while no note is open. Only the latest delete can be undone.
 - **Copy:** the copy button in the header copies the note's title and body. Its icon shows a ✓ for a moment afterwards.
 - **Images:** drop a png, jpg, gif or webp file (up to 20 MB) onto an open note, paste an image-only clipboard with Cmd/Ctrl+V, or use the image button in the toolbar.
 - **Clickable links:** `http`, `https` and `mailto` links in the formatted view open in your browser.
@@ -48,7 +49,8 @@ Put a tag in a note's title:
 - **Local time:** times are local. Only the first tag counts, and it stays in the title.
 - **When it's due:** a system notification appears and the bar pulses until you open the note. Clicking a stack's bar opens the note whose reminder fired. Reminders missed while the app was closed fire at startup.
 - **Change it:** editing the tag sets a new reminder.
-- **Bell:** a bell icon in the note's header and in the peek shows that a reminder is set. Its tooltip shows the due time.
+- **Hint:** the empty title's placeholder suggests "@15:00".
+- **Label:** while the title has a tag, the note header shows a bell and the due time. A fired reminder shows them dimmed, and a tag that isn't understood shows "not a reminder". On notes narrower than 420 px only the bell shows, and its tooltip carries the text. The peek also shows a bell.
 
 ### Look and feel
 - **Inter and Lucide:** the interface uses the Inter typeface and a Lucide icon set, so text and icons look the same on every platform.
@@ -101,7 +103,7 @@ Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies l
 
 | Group | What you can adjust |
 |---|---|
-| App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey (Cmd/Ctrl+Shift+Space). |
+| App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey (Cmd/Ctrl+Shift+Space). If it can't be registered (for example, another app uses it), a red line under the toggle says why. On Linux, failures are only logged. |
 | Bars | Width, height and gap |
 | Hover | Magnification, how far it spreads, and the peek delay (0–3 s) |
 | Notes | Default size, paper tint (lighter/darker than the bar), and how faint the header controls are until you hover |
@@ -122,6 +124,7 @@ On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Ne
 | Cmd/Ctrl+F | Open or close search |
 | Cmd/Ctrl+, | Open or close settings |
 | Cmd/Ctrl+V | Paste an image into the open note |
+| Cmd/Ctrl+Z | Undo the last delete (only while no note is open) |
 | Enter | Open the first search result (in the search field) |
 | Esc | Leave edit mode, close search, export or settings, or fold the open note |
 
