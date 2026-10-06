@@ -21,7 +21,7 @@ use crate::search::{self, Hit};
 use crate::search_panel::{focus_field, search_panel, SearchView};
 use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore};
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
-use crate::store::NoteStore;
+use crate::store::{Deleted, NoteStore};
 use crate::strip_model::{self, Entry};
 use crate::theme;
 use crate::tray;
@@ -60,6 +60,8 @@ const REMINDER_POLL: Duration = Duration::from_secs(30);
 const PULSE_SECS: f32 = 1.4;
 /// How long "Clipboard is empty" shows beside `+`.
 const CLIPBOARD_HINT_FOR: Duration = Duration::from_millis(1500);
+/// How long the undo toast stays after a delete.
+const UNDO_FOR: Duration = Duration::from_secs(5);
 /// How long `+` shakes after an empty clipboard.
 const SHAKE_SECS: f32 = 0.3;
 
@@ -127,12 +129,9 @@ pub enum Message {
     BodyClicked(Option<usize>),
     /// A press on rendered text: the source offset of the character under it.
     BodyPressed(usize),
-    /// The trash button on the open peek of the note at this index.
-    PeekDeleteRequested(usize),
-    /// The peek's "Delete" answer: deletes its note.
-    PeekDeleteConfirmed,
-    /// The peek's "Cancel" answer.
-    PeekDeleteCancelled,
+    /// The trash button on the open peek of the note at this index:
+    /// deletes its note at once.
+    PeekDelete(usize),
     /// Leave edit mode and show the note rendered again.
     EditorBlurred,
     /// Flip the task checkbox on this source line.
@@ -145,13 +144,19 @@ pub enum Message {
     /// A press on the open note's border starts resizing it.
     ResizeStart(Edges),
     ClosePanel,
-    DeleteRequested,
+    /// The open note's trash button: it folds away, then is deleted.
+    DeleteNote(Uuid),
     CopyNote,
     TogglePin,
     /// `COPIED_FOR` after the copy of this note with this number: the copy
     /// button's check goes, unless something was copied again since.
     CopiedExpired(Uuid, u64),
-    ConfirmDelete(bool),
+    /// The undo toast, or Cmd/Ctrl+Z with no note open: brings the last
+    /// deleted note back.
+    UndoDelete,
+    /// `UNDO_FOR` after the delete at this instant: its toast goes, unless
+    /// another delete replaced it.
+    UndoExpired(Instant),
     ToggleColorPicker,
     /// Open or close the toolbar's text color grid.
     ToggleTextColorPicker,
@@ -308,8 +313,6 @@ pub struct App {
     /// The last press on rendered text, so quick follow-up clicks (which land
     /// on the editor it opened) select the word, then the line, around it.
     rendered_click: Option<RenderedClick>,
-    /// The open peek asks whether to delete this note.
-    peek_confirm_delete: Option<Uuid>,
     morph: Morph,
     anchor_y: f32,
     pending_delete: Option<Uuid>,
@@ -323,7 +326,8 @@ pub struct App {
     note_hovered: bool,
     drag: Option<DragState>,
     scroll_offset: f32,
-    confirm_delete: Option<Uuid>,
+    /// The latest delete and when it finished, while its undo toast shows.
+    last_deleted: Option<(Deleted, Instant)>,
     /// The note last copied and the copy's number; its copy button shows a
     /// check for `COPIED_FOR` after.
     copied_at: Option<(Uuid, u64)>,
@@ -518,7 +522,6 @@ impl App {
             broken_images: HashSet::new(),
             history: History::default(),
             rendered_click: None,
-            peek_confirm_delete: None,
             morph,
             anchor_y: 0.0,
             pending_delete: None,
@@ -529,7 +532,7 @@ impl App {
             note_hovered: false,
             drag: None,
             scroll_offset: 0.0,
-            confirm_delete: None,
+            last_deleted: None,
             copied_at: None,
             copies: 0,
             clipboard_empty_at: None,
@@ -816,22 +819,15 @@ impl App {
                     }
                 }
             }
-            Message::PeekDeleteRequested(entry) => {
+            Message::PeekDelete(entry) => {
                 let id = self.entry_note(entry).map(|i| self.store.notes()[i].id);
-                if id.is_some() && id == self.peek_note {
-                    self.peek_confirm_delete = id;
-                }
-            }
-            Message::PeekDeleteCancelled => self.peek_confirm_delete = None,
-            Message::PeekDeleteConfirmed => {
-                if let Some(id) = self.peek_confirm_delete.take() {
+                if let Some(id) = id.filter(|id| self.peek_note == Some(*id)) {
                     self.hide_peek();
                     if self.active_note == Some(id) {
                         // The note is open too: fold it away like its own trash button does.
-                        self.confirm_delete = Some(id);
-                        return self.update(Message::ConfirmDelete(true));
+                        return self.update(Message::DeleteNote(id));
                     }
-                    self.start_collapse(id);
+                    return self.start_collapse(id);
                 }
             }
             Message::BodyPressed(offset) => {
@@ -918,12 +914,14 @@ impl App {
                     self.animating = true;
                     self.color_picker_open = false;
                     self.text_color_picker_open = false;
-                    self.confirm_delete = None;
                 }
             }
-            Message::DeleteRequested => {
-                if let Some(id) = self.active_note {
-                    self.confirm_delete = Some(id);
+            Message::DeleteNote(id) => {
+                if self.active_note == Some(id) {
+                    // Fold the note back into its bar first, then delete it.
+                    self.pending_delete = Some(id);
+                    self.morph.close();
+                    self.animating = true;
                 }
             }
             Message::CopyNote => {
@@ -965,16 +963,25 @@ impl App {
                     return self.dock_window();
                 }
             }
-            Message::ConfirmDelete(confirmed) => {
-                if confirmed {
-                    if let Some(id) = self.confirm_delete.take() {
-                        // Fold the note back into its bar first, then delete it.
-                        self.pending_delete = Some(id);
-                        self.morph.close();
-                        self.animating = true;
-                    }
-                } else {
-                    self.confirm_delete = None;
+            // A drag holds a bar index the restored note would shift.
+            Message::UndoDelete if self.drag.is_some() => {}
+            Message::UndoDelete => {
+                if let Some((deleted, _)) = self.last_deleted.take() {
+                    self.store.restore(deleted);
+                    self.store.mark_dirty();
+                    let _ = self.store.save();
+                    self.store.did_save();
+                    return self.dock_window();
+                }
+            }
+            Message::UndoExpired(at) => {
+                if self
+                    .last_deleted
+                    .as_ref()
+                    .is_some_and(|(_, shown)| *shown == at)
+                {
+                    self.last_deleted = None;
+                    return self.dock_window();
                 }
             }
             Message::Tick(now) => {
@@ -998,9 +1005,11 @@ impl App {
                     | self.export_morph.tick(dt)
                     | self.mode_fade.tick(dt);
                 let collapse_active = self.collapsing.as_mut().is_some_and(|(_, m)| m.tick(dt));
-                if self.collapsing.is_some() && !collapse_active {
-                    self.finish_collapse();
-                }
+                let collapsed = if self.collapsing.is_some() && !collapse_active {
+                    self.finish_collapse()
+                } else {
+                    Task::none()
+                };
                 if self.peek.is_closed() {
                     self.peek_note = None;
                 }
@@ -1029,7 +1038,7 @@ impl App {
                     self.last_tick = None;
                 }
 
-                let focus = self.take_pending_focus();
+                let focus = Task::batch([collapsed, self.take_pending_focus()]);
                 if self.active_note.is_some() && self.morph.is_closed() {
                     return Task::batch([focus, self.finish_close()]);
                 }
@@ -1292,7 +1301,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Quit => {
-                self.finish_collapse();
+                let _ = self.finish_collapse();
                 let _ = self.store.save();
                 let _ = self.settings.save();
                 std::process::exit(0);
@@ -1335,6 +1344,14 @@ impl App {
                     }
                     Some('n') if modifiers.command() => return self.update(Message::AddNote),
                     Some('f') if modifiers.command() => return self.toggle_search(),
+                    // With a note open, Cmd/Ctrl+Z is its own undo (below).
+                    Some('z')
+                        if modifiers.command()
+                            && !modifiers.shift()
+                            && self.active_note.is_none() =>
+                    {
+                        return self.update(Message::UndoDelete)
+                    }
                     _ => {}
                 }
                 match key.as_ref() {
@@ -1451,7 +1468,6 @@ impl App {
             height_fraction: self.strip_fraction(),
             paper_tint: self.settings.settings().notes.paper_tint,
             default_note_width: self.settings.settings().notes.size,
-            peek_confirm: self.peek_confirm_delete.is_some(),
             theme: self.theme,
             open: self
                 .active_note
@@ -1462,6 +1478,7 @@ impl App {
             pulse: self.bar_pulse(),
             add_shake: self.shake_secs(Instant::now()).map_or(0.0, add_shake),
             clipboard_hint: self.clipboard_empty_at.is_some(),
+            toast: self.last_deleted.is_some(),
         })
         .width(Fill)
         .height(Fill)
@@ -1496,7 +1513,6 @@ impl App {
                         size: rect.size(),
                         morph_progress: self.morph.progress(),
                         content_alpha: frame.content_alpha,
-                        confirm_delete: self.confirm_delete.is_some(),
                         copied: self.copied_for(note.id),
                         pinned: self.top_pinned(note),
                         color_picker_open: self.color_picker_open,
@@ -1648,9 +1664,15 @@ impl App {
             return Task::none();
         }
         // Opening another note mid-fold still deletes the folding one.
-        if let Some(deleted) = self.pending_delete.take() {
-            self.start_collapse(deleted);
-        }
+        let collapse = match self.pending_delete.take() {
+            Some(deleted) => self.start_collapse(deleted),
+            None => Task::none(),
+        };
+        Task::batch([collapse, self.open_note_id(id)])
+    }
+
+    /// Opens the note `id`, or closes it when it is the open one.
+    fn open_note_id(&mut self, id: Uuid) -> Task<Message> {
         // A deleted note can't be opened while its bar collapses.
         if self.dying(id) {
             return Task::none();
@@ -1689,7 +1711,6 @@ impl App {
         self.reparse();
         self.color_picker_open = false;
         self.text_color_picker_open = false;
-        self.confirm_delete = None;
         if let Some(bar) = self
             .note_entry(index)
             .and_then(|entry| self.strip_layout().bars.get(entry).copied())
@@ -2048,18 +2069,19 @@ impl App {
         self.rendered_click = None;
         self.color_picker_open = false;
         self.text_color_picker_open = false;
-        self.confirm_delete = None;
         self.note_resize = None;
-        if let Some(id) = self.pending_delete.take() {
-            self.start_collapse(id);
-        }
-        self.dock_window()
+        let collapse = match self.pending_delete.take() {
+            Some(id) => self.start_collapse(id),
+            None => Task::none(),
+        };
+        Task::batch([collapse, self.dock_window()])
     }
 
     /// Starts shrinking the deleted note's bar away. A collapse still
-    /// running for another note finishes at once.
-    fn start_collapse(&mut self, id: Uuid) {
-        self.finish_collapse();
+    /// running for another note finishes at once (see `finish_collapse`
+    /// for the task it returns).
+    fn start_collapse(&mut self, id: Uuid) -> Task<Message> {
+        let finished = self.finish_collapse();
         let mut morph = Morph::with_secs(COLLAPSE_SECS, self.settings.settings().motion.speed);
         morph.restart();
         self.collapsing = Some((id, morph));
@@ -2067,6 +2089,7 @@ impl App {
             self.hide_peek();
         }
         self.animating = true;
+        finished
     }
 
     /// Fires every reminder due at `now`: a notification, a pulsing bar, and
@@ -2137,11 +2160,13 @@ impl App {
             .collect()
     }
 
-    /// Removes the collapsing note (if any) for good.
-    fn finish_collapse(&mut self) {
+    /// Removes the collapsing note (if any) for good and shows the undo
+    /// toast for it, replacing any earlier one. The task ends the toast
+    /// after `UNDO_FOR` and docks the window, which widens for it.
+    fn finish_collapse(&mut self) -> Task<Message> {
         let index = self.collapse().map(|(entry, _)| entry);
         let Some((id, _)) = self.collapsing.take() else {
-            return;
+            return Task::none();
         };
         // A bar dragged below the removed one moves up a slot; a drag on
         // the removed bar itself is dropped.
@@ -2152,11 +2177,20 @@ impl App {
                 drag.bar_index -= 1;
             }
         }
-        self.store.delete_note(id);
+        let deleted = self.store.delete_note(id);
         self.pulsing.remove(&id);
         let _ = self.store.save();
         self.store.did_save();
         self.scroll_offset = self.scroll_offset.min(self.strip_layout().max_scroll);
+        let Some(deleted) = deleted else {
+            return Task::none();
+        };
+        let at = Instant::now();
+        self.last_deleted = Some((deleted, at));
+        Task::batch([
+            self.dock_window(),
+            delayed(UNDO_FOR, Message::UndoExpired(at)),
+        ])
     }
 
     /// The collapsing bar and how far it has shrunk (eased). A stack's bar
@@ -2203,7 +2237,8 @@ impl App {
 
     /// Whether the window needs room left of the strip: always with
     /// `passthrough`, otherwise for an open note or panel, or a chip that
-    /// stays up on its own (hover chips don't widen it).
+    /// stays up on its own, such as the undo toast (hover chips don't
+    /// widen it).
     fn needs_wide_window(&self, passthrough: bool) -> bool {
         passthrough
             || self.active_note.is_some()
@@ -2211,6 +2246,7 @@ impl App {
             || self.search_open
             || self.export.is_some()
             || self.clipboard_empty_at.is_some()
+            || self.last_deleted.is_some()
     }
 
     /// Docks the window to the right screen edge, vertically centered. The
@@ -2246,7 +2282,8 @@ impl App {
     }
 
     /// Whether the window should catch the mouse at `position`: over the bar
-    /// stack, the open note or the settings. Everywhere else clicks go to the apps behind.
+    /// stack, the open note, the settings or the undo toast. Everywhere else
+    /// clicks go to the apps behind.
     fn is_interactive(&self, position: Point) -> bool {
         if !self.visible {
             return false;
@@ -2261,12 +2298,23 @@ impl App {
             frame.is_some_and(|frame| frame.rect.expand(8.0).contains(position))
         };
         let over_peek = self.peek_rect().is_some_and(|rect| rect.contains(position));
+        let over_toast = self
+            .toast_rect()
+            .is_some_and(|rect| rect.contains(position));
         over_strip
             || over_peek
+            || over_toast
             || over_panel(self.note_frame())
             || over_panel(self.settings_frame())
             || over_panel(self.search_frame())
             || over_panel(self.export_frame())
+    }
+
+    /// The undo toast's area, while it shows.
+    fn toast_rect(&self) -> Option<Rectangle> {
+        self.last_deleted
+            .as_ref()
+            .map(|_| crate::bar_strip::toast_rect(&self.strip_layout()))
     }
 
     /// Whether `id`'s copy button still shows its check.
@@ -2397,7 +2445,6 @@ impl App {
             bar,
             strip,
             &entry_peek_text(notes, entry, width),
-            self.peek_confirm_delete.is_some(),
             width,
         ))
     }
@@ -2405,7 +2452,6 @@ impl App {
     fn hide_peek(&mut self) {
         self.hover_bar = None;
         self.peek_note = None;
-        self.peek_confirm_delete = None;
         self.peek = Morph::peek(self.settings.settings().motion.speed);
     }
 
@@ -3019,31 +3065,19 @@ mod tests {
     }
 
     #[test]
-    fn peek_delete_asks_first_then_deletes() {
+    fn peek_trash_deletes_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_open_peek(&dir);
         let id = app.store.notes()[0].id;
-        let _ = app.update(Message::PeekDeleteRequested(0));
-        assert_eq!(app.peek_confirm_delete, Some(id));
-        assert_eq!(app.store.notes().len(), 1);
-        let _ = app.update(Message::PeekDeleteConfirmed);
+        let _ = app.update(Message::PeekDelete(0));
+        // No question first: the bar starts collapsing right away.
+        assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(id));
+        assert_eq!(app.peek_note, None);
         settle(&mut app);
         assert!(app.store.notes().is_empty());
         // Deleting saves at once, like deleting the open note.
         assert!(!app.store.is_dirty());
-        assert_eq!(app.peek_note, None);
-        assert_eq!(app.peek_confirm_delete, None);
-    }
-
-    #[test]
-    fn peek_delete_cancel_keeps_the_note() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with_open_peek(&dir);
-        let _ = app.update(Message::PeekDeleteRequested(0));
-        let _ = app.update(Message::PeekDeleteCancelled);
-        assert_eq!(app.peek_confirm_delete, None);
-        assert_eq!(app.store.notes().len(), 1);
-        assert!(app.peek_note.is_some());
+        assert_eq!(app.last_deleted.as_ref().map(|(d, _)| d.note.id), Some(id));
     }
 
     #[test]
@@ -3051,20 +3085,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_open_peek(&dir);
         app.store.add_note(&crate::note::PALETTE);
-        let _ = app.update(Message::PeekDeleteRequested(1));
-        assert_eq!(app.peek_confirm_delete, None);
-        let _ = app.update(Message::PeekDeleteConfirmed);
+        let _ = app.update(Message::PeekDelete(1));
+        assert!(app.collapsing.is_none());
+        settle(&mut app);
         assert_eq!(app.store.notes().len(), 2);
     }
 
     #[test]
-    fn closing_the_peek_drops_its_delete_question() {
+    fn peek_delete_needs_the_open_peek() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_open_peek(&dir);
-        let _ = app.update(Message::PeekDeleteRequested(0));
         app.hide_peek();
-        assert_eq!(app.peek_confirm_delete, None);
-        let _ = app.update(Message::PeekDeleteConfirmed);
+        let _ = app.update(Message::PeekDelete(0));
+        settle(&mut app);
         assert_eq!(app.store.notes().len(), 1);
     }
 
@@ -3123,13 +3156,15 @@ mod tests {
     }
 
     #[test]
-    fn deleting_collapses_the_bar_before_removing_it() {
+    fn header_trash_deletes_without_confirm() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_note(&dir, "first");
         app.store.add_note(&crate::note::PALETTE);
         let id = app.store.notes()[0].id;
-        let _ = app.update(Message::DeleteRequested);
-        let _ = app.update(Message::ConfirmDelete(true));
+        let _ = app.update(Message::DeleteNote(id));
+        // The note folds into its bar first; nothing asks.
+        assert_eq!(app.pending_delete, Some(id));
+        assert!(!app.morph.is_opening());
         tick_until(&mut app, |a| a.active_note.is_none());
         assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(id));
         assert!(app.store.notes().iter().any(|n| n.id == id));
@@ -3137,6 +3172,18 @@ mod tests {
         assert!(app.store.notes().iter().all(|n| n.id != id));
         assert_eq!(app.store.notes().len(), 1);
         assert!(app.collapsing.is_none());
+        assert!(!app.store.is_dirty());
+        assert_eq!(app.last_deleted.as_ref().map(|(d, _)| d.note.id), Some(id));
+    }
+
+    #[test]
+    fn header_trash_ignores_another_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "first");
+        let other = app.store.add_note(&crate::note::PALETTE);
+        let _ = app.update(Message::DeleteNote(other));
+        assert_eq!(app.pending_delete, None);
+        assert!(app.morph.is_opening());
     }
 
     #[test]
@@ -3144,8 +3191,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_open_peek(&dir);
         let id = app.store.notes()[0].id;
-        let _ = app.update(Message::PeekDeleteRequested(0));
-        let _ = app.update(Message::PeekDeleteConfirmed);
+        let _ = app.update(Message::PeekDelete(0));
         assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(id));
         assert_eq!(app.store.notes().len(), 1);
         assert!(app.animating);
@@ -3160,13 +3206,11 @@ mod tests {
         let mut app = app_with_open_peek(&dir);
         let b = app.store.add_note(&crate::note::PALETTE);
         let a = app.store.notes()[0].id;
-        let _ = app.update(Message::PeekDeleteRequested(0));
-        let _ = app.update(Message::PeekDeleteConfirmed);
+        let _ = app.update(Message::PeekDelete(0));
         assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(a));
 
         app.peek_note = Some(b);
-        let _ = app.update(Message::PeekDeleteRequested(1));
-        let _ = app.update(Message::PeekDeleteConfirmed);
+        let _ = app.update(Message::PeekDelete(1));
         assert!(app.store.notes().iter().all(|n| n.id != a));
         assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(b));
         assert_eq!(app.store.notes().len(), 1);
@@ -3177,8 +3221,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_open_peek(&dir);
         app.store.add_note(&crate::note::PALETTE);
-        let _ = app.update(Message::PeekDeleteRequested(0));
-        let _ = app.update(Message::PeekDeleteConfirmed);
+        let _ = app.update(Message::PeekDelete(0));
         let bar = app.strip_layout().bars[0];
         let _ = app.update(Message::BarClicked(0));
         assert_eq!(app.active_note, None);
@@ -3251,7 +3294,7 @@ mod tests {
         let (mut app, ids) = app_with_bars(&dir, 3);
         let bar = app.strip_layout().bars[1];
         let _ = app.update(Message::DragStart(1, bar.center().y));
-        app.start_collapse(ids[1]);
+        let _ = app.start_collapse(ids[1]);
         settle(&mut app);
         assert!(app.drag.is_none());
         // The press is released on the bar that slid into its place.
@@ -3269,7 +3312,7 @@ mod tests {
         let _ = app.update(Message::DragStart(1, bar.center().y));
         // Dragged to the top: dropping it would reorder past the end.
         let _ = app.update(Message::DragMove(0.0));
-        app.start_collapse(ids[1]);
+        let _ = app.start_collapse(ids[1]);
         settle(&mut app);
         assert!(app.drag.is_none());
         let _ = app.update(Message::DragEnd);
@@ -3357,9 +3400,7 @@ mod tests {
         assert!(app.store.stack(a1, a));
         assert!(app.store.stack(a2, a));
         app.sync_entries();
-        let _ = app.update(Message::PeekDeleteRequested(0));
-        assert_eq!(app.peek_confirm_delete, Some(a));
-        let _ = app.update(Message::PeekDeleteConfirmed);
+        let _ = app.update(Message::PeekDelete(0));
         // The stack's bar stays while its top goes.
         assert_eq!(app.collapse(), None);
         settle(&mut app);
@@ -3370,8 +3411,7 @@ mod tests {
         // Deleting a member just removes it.
         let _ = app.update(Message::OpenStackMember(a2));
         settle(&mut app);
-        let _ = app.update(Message::DeleteRequested);
-        let _ = app.update(Message::ConfirmDelete(true));
+        let _ = app.update(Message::DeleteNote(a2));
         settle(&mut app);
         assert_eq!(order(&app), vec![a1, b]);
         assert!(app.store.notes().iter().all(|n| n.stack.is_none()));
@@ -3383,7 +3423,7 @@ mod tests {
         let (mut app, ids) = app_with_bars(&dir, 3);
         assert!(app.store.stack(ids[1], ids[0]));
         app.sync_entries();
-        app.start_collapse(ids[0]);
+        let _ = app.start_collapse(ids[0]);
         let bar = app.strip_layout().bars[0];
         let _ = app.update(Message::StripHover(Some(bar.center().y)));
         assert_eq!(app.hover_bar.map(|(id, _)| id), Some(ids[1]));
@@ -3402,7 +3442,7 @@ mod tests {
         app.sync_entries();
         let bar = app.strip_layout().bars[1];
         let _ = app.update(Message::DragStart(1, bar.center().y));
-        app.start_collapse(ids[2]);
+        let _ = app.start_collapse(ids[2]);
         assert_eq!(app.collapse().map(|(entry, _)| entry), Some(1));
         settle(&mut app);
         assert!(app.drag.is_none());
@@ -4277,6 +4317,132 @@ mod tests {
         assert!(app.needs_wide_window(false), "room for the chip");
         let _ = app.update(Message::ClipboardEmptyExpired(at));
         assert!(!app.needs_wide_window(false), "shrinks back");
+    }
+
+    /// Deletes the docked note `id` and lets its bar collapse.
+    fn delete_docked(app: &mut App, id: Uuid) {
+        let _ = app.start_collapse(id);
+        settle(app);
+        assert!(app.store.notes().iter().all(|n| n.id != id));
+    }
+
+    #[test]
+    fn undo_restores_deleted_note_and_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 3);
+        app.store.did_save();
+        delete_docked(&mut app, ids[1]);
+        let _ = app.update(Message::UndoDelete);
+        assert_eq!(order(&app), ids);
+        assert!(app.last_deleted.is_none());
+        // Saved at once, and nothing opens.
+        assert!(!app.store.is_dirty());
+        let saved = NoteStore::load(dir.path().join("notes.json"));
+        let saved: Vec<Uuid> = saved.notes().iter().map(|n| n.id).collect();
+        assert_eq!(saved, ids);
+        assert_eq!(app.active_note, None);
+        assert_eq!(app.entries().len(), 3);
+        // Only once.
+        let _ = app.update(Message::UndoDelete);
+        assert_eq!(order(&app), ids);
+    }
+
+    #[test]
+    fn undo_restores_stack_top_with_members() {
+        let dir = tempfile::tempdir().unwrap();
+        // [A, a1, a2 (under A), B]
+        let (mut app, ids) = app_with_bars(&dir, 4);
+        assert!(app.store.stack(ids[1], ids[0]));
+        assert!(app.store.stack(ids[2], ids[0]));
+        app.sync_entries();
+        delete_docked(&mut app, ids[0]);
+        assert_eq!(app.store.notes()[0].stack, None);
+        let _ = app.update(Message::UndoDelete);
+        assert_eq!(order(&app), ids);
+        let stacks: Vec<Option<Uuid>> = app.store.notes().iter().map(|n| n.stack).collect();
+        assert_eq!(stacks, vec![None, Some(ids[0]), Some(ids[0]), None]);
+        assert_eq!(app.entries().len(), 2);
+    }
+
+    #[test]
+    fn cmd_z_without_open_note_undoes_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 2);
+        delete_docked(&mut app, ids[0]);
+        let _ = app.update(cmd_z(false));
+        assert_eq!(order(&app), ids);
+        assert!(app.last_deleted.is_none());
+    }
+
+    #[test]
+    fn cmd_z_with_open_note_is_editor_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "first");
+        let other = app.store.add_note(&crate::note::PALETTE);
+        app.sync_entries();
+        delete_docked(&mut app, other);
+        assert!(app.active_note.is_some());
+        let task = app.update(cmd_z(false));
+        // The open note's undo runs (after its title focus check) ...
+        assert!(task.units() > 0);
+        // ... and the deleted note stays deleted, its toast up.
+        assert!(app.store.notes().iter().all(|n| n.id != other));
+        assert!(app.last_deleted.is_some());
+    }
+
+    #[test]
+    fn undo_toast_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 2);
+        assert!(!app.needs_wide_window(false));
+        delete_docked(&mut app, ids[0]);
+        let at = app.last_deleted.as_ref().map(|(_, at)| *at).unwrap();
+        // Without passthrough the window widens to show the toast.
+        assert!(app.needs_wide_window(false));
+        // An older toast's expiry leaves a newer one alone.
+        let _ = app.update(Message::UndoExpired(at - Duration::from_secs(1)));
+        assert!(app.last_deleted.is_some());
+        let _ = app.update(Message::UndoExpired(at));
+        assert!(app.last_deleted.is_none());
+        assert!(!app.needs_wide_window(false));
+        // Expired: nothing to undo.
+        let _ = app.update(Message::UndoDelete);
+        assert_eq!(order(&app), vec![ids[1]]);
+    }
+
+    #[test]
+    fn second_delete_replaces_toast() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 3);
+        delete_docked(&mut app, ids[0]);
+        let first = app.last_deleted.as_ref().map(|(_, at)| *at).unwrap();
+        delete_docked(&mut app, ids[1]);
+        assert_eq!(
+            app.last_deleted.as_ref().map(|(d, _)| d.note.id),
+            Some(ids[1])
+        );
+        // The first toast's timer no longer clears the second.
+        let _ = app.update(Message::UndoExpired(first));
+        assert!(app.last_deleted.is_some());
+        let _ = app.update(Message::UndoDelete);
+        assert_eq!(order(&app), vec![ids[1], ids[2]]);
+    }
+
+    #[test]
+    fn toast_area_is_interactive() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_bars(&dir, 2);
+        assert_eq!(app.toast_rect(), None);
+        delete_docked(&mut app, ids[0]);
+        let toast = app.toast_rect().expect("the toast shows");
+        // Its left end reaches past the strip, where clicks would otherwise
+        // fall through.
+        let left_end = Point::new(toast.x + 2.0, toast.center_y());
+        assert!(left_end.x < app.window_size.width - STRIP_WIDTH);
+        assert!(app.is_interactive(left_end));
+        let at = app.last_deleted.as_ref().map(|(_, at)| *at).unwrap();
+        let _ = app.update(Message::UndoExpired(at));
+        assert!(!app.is_interactive(left_end));
     }
 
     #[test]
@@ -5450,7 +5616,7 @@ mod tests {
         let (mut app, ids) = app_with_notes(&dir, &[("Top", "top"), ("Next", "next")]);
         assert!(app.store.stack(ids[1], ids[0]));
         app.sync_entries();
-        app.start_collapse(ids[0]);
+        let _ = app.start_collapse(ids[0]);
         let path = file_in(&dir, "x.txt", b"more");
         let _ = app.update(Message::StripFileDropped(Some(0), path));
         assert_eq!(app.store.notes().len(), 2);
@@ -5459,12 +5625,11 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_delete_survives_hotkey_mid_fold() {
+    fn delete_survives_hotkey_mid_fold() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_note(&dir, "first");
         let id = app.store.notes()[0].id;
-        let _ = app.update(Message::DeleteRequested);
-        let _ = app.update(Message::ConfirmDelete(true));
+        let _ = app.update(Message::DeleteNote(id));
         tick_a_little(&mut app);
         assert_eq!(app.active_note, Some(id));
         let _ = app.update(Message::HotkeyPressed);

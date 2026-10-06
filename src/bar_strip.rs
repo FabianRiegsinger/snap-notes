@@ -213,6 +213,10 @@ const SEARCH_TOOLTIP: &str = if cfg!(target_os = "macos") {
     "Search (Ctrl+F)"
 };
 const CLIPBOARD_EMPTY: &str = "Clipboard is empty";
+/// The undo toast after a delete reads "Note deleted · Undo", the link
+/// part in full ink.
+const TOAST_TEXT: &str = "Note deleted · ";
+const TOAST_ACCENT: &str = "Undo";
 
 /// The tooltip of the slot hovered since `hover`'s instant, once it has
 /// rested there for `TOOLTIP_DELAY`; none while the peek shows.
@@ -236,12 +240,20 @@ enum HintAt {
     Search,
 }
 
-/// A hint chip: its label and what it explains.
+/// A hint chip: its label (with an accented tail) and what it explains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Hint {
     text: &'static str,
+    accent: Option<&'static str>,
     at: HintAt,
 }
+
+/// The undo toast: a chip beside the `+` slot.
+const TOAST: Hint = Hint {
+    text: TOAST_TEXT,
+    accent: Some(TOAST_ACCENT),
+    at: HintAt::Add,
+};
 
 /// Whether a pressed bar has moved far enough to count as dragged.
 fn drag_moved(drag: &DragState) -> bool {
@@ -254,6 +266,7 @@ fn drag_hint(bars: &[Rectangle], drag: Option<&DragState>) -> Option<Hint> {
     let drag = drag.filter(|d| drag_moved(d))?;
     stack_target(bars, drag.bar_index, drag.current_y).map(|onto| Hint {
         text: "Stack",
+        accent: None,
         at: HintAt::Bar(onto),
     })
 }
@@ -370,8 +383,6 @@ fn chip_frame(anchor: Rectangle, y: f32, label: Size) -> Rectangle {
 
 /// Where the chip labelled `text` (and `accent`) beside `anchor` at `y`
 /// is drawn, for hit-testing without a renderer.
-// The undo toast's hit area will use it; until then only the tests do.
-#[allow(dead_code)]
 pub fn chip_rect(anchor: Rectangle, y: f32, text: &str, accent: Option<&str>) -> Rectangle {
     let label = chip_paragraph(text, accent, Color::TRANSPARENT).min_bounds();
     chip_frame(anchor, y, label)
@@ -418,6 +429,12 @@ pub fn draw_chip(
         rect,
     );
     rect
+}
+
+/// Where the undo toast shows on `strip`: the whole chip is its hit area.
+pub fn toast_rect(strip: &StripLayout) -> Rectangle {
+    let anchor = strip.add_button;
+    chip_rect(anchor, anchor.center_y(), TOAST.text, TOAST.accent)
 }
 
 /// The strip shows a settings slot only where no tray menu offers Settings.
@@ -577,8 +594,6 @@ pub struct BarStrip<'a> {
     /// Width of a note without a size of its own; the peek is as wide as the
     /// note it opens.
     pub default_note_width: f32,
-    /// The open peek asks whether to delete its note.
-    pub peek_confirm: bool,
     pub theme: theme::Theme,
     /// The bar holding the open (or opening) note and the note's morph
     /// progress.
@@ -596,6 +611,8 @@ pub struct BarStrip<'a> {
     pub add_shake: f32,
     /// Shows "Clipboard is empty" beside the `+` slot.
     pub clipboard_hint: bool,
+    /// Shows the undo toast after a delete beside the `+` slot.
+    pub toast: bool,
 }
 
 impl<'a> BarStrip<'a> {
@@ -629,7 +646,7 @@ impl<'a> BarStrip<'a> {
         let (i, _) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
         let (_, width, text) = self.peek_parts(i, bar)?;
-        peek_target(bar, bounds, &text, self.peek_confirm, width)
+        peek_target(bar, bounds, &text, width)
             .contains(pos)
             .then_some(i)
     }
@@ -647,28 +664,19 @@ impl<'a> BarStrip<'a> {
         }
     }
 
-    /// What a press at `pos` on the open peek does: delete-related clicks
-    /// and a stack's rows and Unstack button once it is fully open,
-    /// otherwise opening the note. While the confirmation shows, other
-    /// presses on the peek do nothing.
+    /// What a press at `pos` on the open peek does: its trash button and a
+    /// stack's rows and Unstack button once it is fully open, otherwise
+    /// opening the note.
     fn peek_press(&self, bounds: Rectangle, pos: Point) -> Option<Option<Message>> {
         let i = self.peek_hit(bounds, pos)?;
         let (_, progress) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
         let (_, width, text) = self.peek_parts(i, bar)?;
-        let parts = peek_layout(bar, bounds, 1.0, &text, self.peek_confirm, width);
+        let parts = peek_layout(bar, bounds, 1.0, &text, width);
         let row = parts.stack_rows.iter().position(|r| r.contains(pos));
         let open = progress >= 0.99;
-        Some(if self.peek_confirm {
-            if parts.delete.contains(pos) {
-                Some(Message::PeekDeleteConfirmed)
-            } else if parts.cancel.contains(pos) {
-                Some(Message::PeekDeleteCancelled)
-            } else {
-                None
-            }
-        } else if open && parts.trash.contains(pos) {
-            Some(Message::PeekDeleteRequested(i))
+        Some(if open && parts.trash.contains(pos) {
+            Some(Message::PeekDelete(i))
         } else if open && parts.unstack.is_some_and(|u| u.contains(pos)) {
             Some(Message::Unstack(i))
         } else if let Some(row) = row.filter(|_| open) {
@@ -682,7 +690,7 @@ impl<'a> BarStrip<'a> {
 
     /// The hint chip to show at `now`, if any: never with the peek. While
     /// dragging only the stack cue; otherwise the empty clipboard, then the
-    /// hovered slot's tooltip.
+    /// undo toast, then the hovered slot's tooltip.
     fn hint(
         &self,
         strip: &StripLayout,
@@ -698,15 +706,30 @@ impl<'a> BarStrip<'a> {
         if self.clipboard_hint {
             return Some(Hint {
                 text: CLIPBOARD_EMPTY,
+                accent: None,
                 at: HintAt::Add,
             });
+        }
+        if self.toast {
+            return Some(TOAST);
         }
         let text = slot_tooltip(slot_hover, now, false)?;
         let at = match slot_hover?.0 {
             Slot::Add => HintAt::Add,
             Slot::Search => HintAt::Search,
         };
-        Some(Hint { text, at })
+        Some(Hint {
+            text,
+            accent: None,
+            at,
+        })
+    }
+
+    /// What a press at `pos` on the undo toast does, while it shows.
+    fn toast_press(&self, bounds: Rectangle, pos: Point) -> Option<Message> {
+        let strip = self.layout_in(bounds);
+        (self.hint(&strip, None, Instant::now()) == Some(TOAST) && toast_rect(&strip).contains(pos))
+            .then_some(Message::UndoDelete)
     }
 
     /// How far a slot at magnification `scale` has revealed its glyph (0..=1).
@@ -780,7 +803,6 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                             CORNER_RADIUS,
                             progress,
                             self.paper_tint,
-                            self.peek_confirm,
                             cursor.position(),
                             width,
                         );
@@ -1118,7 +1140,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     anchor,
                     anchor.center_y(),
                     hint.text,
-                    None,
+                    hint.accent,
                     chip_alpha(since, now),
                 );
             }
@@ -1174,6 +1196,11 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(pos) = cursor.position() {
+                    if let Some(message) = self.toast_press(bounds, pos) {
+                        shell.publish(message);
+                        shell.capture_event();
+                        return;
+                    }
                     let strip = self.layout_in(bounds);
                     // Clicking the open peek opens its note, or deletes it.
                     if let Some(action) = self.peek_press(bounds, pos) {
@@ -1229,6 +1256,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         if let Some(pos) = cursor.position() {
             let strip = self.layout_in(layout.bounds());
             if self.peek_hit(layout.bounds(), pos).is_some()
+                || self.toast_press(layout.bounds(), pos).is_some()
                 || strip.bars.iter().any(|bar| bar.contains(pos))
                 || strip.slot_message(pos).is_some()
             {
@@ -1306,14 +1334,8 @@ fn search_glyph(slot: Rectangle) -> SearchGlyph {
 
 /// Where the fully open peek of the note on `bar` sits: the area that
 /// keeps it open while hovered and opens the note when clicked.
-pub fn peek_target(
-    bar: Rectangle,
-    bounds: Rectangle,
-    text: &PeekText,
-    confirming: bool,
-    width: f32,
-) -> Rectangle {
-    peek_layout(bar, bounds, 1.0, text, confirming, width).rect
+pub fn peek_target(bar: Rectangle, bounds: Rectangle, text: &PeekText, width: f32) -> Rectangle {
+    peek_layout(bar, bounds, 1.0, text, width).rect
 }
 
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
@@ -1575,6 +1597,7 @@ mod tests {
             drag_hint(&bars, Some(&drag(120.0))),
             Some(Hint {
                 text: "Stack",
+                accent: None,
                 at: HintAt::Bar(0)
             })
         );
@@ -1650,6 +1673,62 @@ mod tests {
     }
 
     #[test]
+    fn toast_click_sends_undo() {
+        let notes = [crate::note::Note::new(crate::note::PALETTE[0])];
+        let entries = crate::strip_model::entries(&notes);
+        let magnification = MagnificationState::new();
+        let drag = None;
+        let bars = BarSettings::default();
+        let mut strip = BarStrip {
+            notes: &notes,
+            entries: &entries,
+            progress: &[],
+            magnification: &magnification,
+            drag: &drag,
+            scroll_offset: 0.0,
+            peek: None,
+            bars: &bars,
+            height_fraction: 1.0,
+            paper_tint: 0.0,
+            default_note_width: 260.0,
+            theme: theme::Theme::default(),
+            open: None,
+            collapse: None,
+            dimmed: Vec::new(),
+            pulse: Vec::new(),
+            add_shake: 0.0,
+            clipboard_hint: false,
+            toast: true,
+        };
+        let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
+        let toast = toast_rect(&strip.layout_in(bounds));
+        // The chip sits left of `+` and reads "Note deleted · Undo".
+        let add = strip.layout_in(bounds).add_button;
+        assert!(toast.x + toast.width <= add.x);
+        assert_eq!(format!("{TOAST_TEXT}{TOAST_ACCENT}"), "Note deleted · Undo");
+        // The whole chip undoes, its label as much as its edges.
+        for pos in [
+            toast.center(),
+            Point::new(toast.x + 1.0, toast.y + 1.0),
+            Point::new(toast.x + toast.width - 1.0, toast.y + toast.height - 1.0),
+        ] {
+            assert!(matches!(
+                strip.toast_press(bounds, pos),
+                Some(Message::UndoDelete)
+            ));
+        }
+        assert!(strip
+            .toast_press(bounds, Point::new(toast.x - 2.0, toast.center_y()))
+            .is_none());
+        // Hidden (and so not clickable) while the peek shows.
+        strip.peek = Some((0, 0.5));
+        assert!(strip.toast_press(bounds, toast.center()).is_none());
+        strip.peek = None;
+        strip.toast = false;
+        assert!(strip.toast_press(bounds, toast.center()).is_none());
+    }
+
+    #[test]
     fn stack_peek_rows_open_their_notes() {
         let notes = [
             crate::note::Note::new(crate::note::PALETTE[0]),
@@ -1673,7 +1752,6 @@ mod tests {
             height_fraction: 1.0,
             paper_tint: 0.0,
             default_note_width: 260.0,
-            peek_confirm: false,
             theme: theme::Theme::default(),
             open: None,
             collapse: None,
@@ -1681,11 +1759,12 @@ mod tests {
             pulse: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
+            toast: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
         let (_, width, text) = strip.peek_parts(0, bar).unwrap();
-        let parts = peek_layout(bar, bounds, 1.0, &text, false, width);
+        let parts = peek_layout(bar, bounds, 1.0, &text, width);
         let press = |pos| strip.peek_press(bounds, pos);
         let member = notes[1].id;
         assert!(matches!(
@@ -1732,7 +1811,6 @@ mod tests {
             height_fraction: 1.0,
             paper_tint: 0.0,
             default_note_width: 260.0,
-            peek_confirm: false,
             theme: theme::Theme::default(),
             open: None,
             collapse: None,
@@ -1740,11 +1818,12 @@ mod tests {
             pulse: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
+            toast: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
         let (_, width, text) = strip.peek_parts(0, bar).unwrap();
-        let parts = peek_layout(bar, bounds, 1.0, &text, false, width);
+        let parts = peek_layout(bar, bounds, 1.0, &text, width);
         let more = parts.stack_more.unwrap();
         assert!(matches!(
             strip.peek_press(bounds, more.center()),
@@ -1761,7 +1840,7 @@ mod tests {
         let bar = Rectangle::new(Point::new(48.0, 400.0), Size::new(6.0, 30.0));
         let strip = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let note = crate::note::Note::new(crate::note::PALETTE[0]);
-        let rect = peek_target(bar, strip, &peek_text(&note, 260.0), false, 260.0);
+        let rect = peek_target(bar, strip, &peek_text(&note, 260.0), 260.0);
         assert!(rect.width > STRIP_WIDTH);
         assert!(rect.contains(Point::new(bar.x - 100.0, bar.center().y)));
     }
@@ -1785,7 +1864,6 @@ mod tests {
             height_fraction: 1.0,
             paper_tint: 0.0,
             default_note_width: 500.0,
-            peek_confirm: false,
             theme: theme::Theme::default(),
             open: None,
             collapse: None,
@@ -1793,12 +1871,13 @@ mod tests {
             pulse: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
+            toast: false,
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
         let width = note_peek_width(&notes[0], strip.default_note_width, bar);
         assert_eq!(
-            peek_target(bar, bounds, &peek_text(&notes[0], width), false, width).width,
+            peek_target(bar, bounds, &peek_text(&notes[0], width), width).width,
             260.0
         );
         let inside = Point::new(bar.x + bar.width - 100.0, bar.center().y);
@@ -1824,7 +1903,6 @@ mod tests {
             height_fraction: 1.0,
             paper_tint: 0.0,
             default_note_width: 260.0,
-            peek_confirm: false,
             theme: theme::Theme::default(),
             open: None,
             collapse: None,
@@ -1832,6 +1910,7 @@ mod tests {
             pulse: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
+            toast: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -1864,7 +1943,6 @@ mod tests {
             height_fraction: 1.0,
             paper_tint: 0.0,
             default_note_width: 260.0,
-            peek_confirm: false,
             theme: theme::Theme::default(),
             open: None,
             collapse: None,
@@ -1872,10 +1950,11 @@ mod tests {
             pulse: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
+            toast: false,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
-        let peek = peek_target(bar, bounds, &peek_text(&notes[0], 260.0), false, 260.0);
+        let peek = peek_target(bar, bounds, &peek_text(&notes[0], 260.0), 260.0);
         // The peek's top right corner (where its trash sits) lies inside the
         // strip, above the bar it grew from.
         let on_peek_in_strip = Point::new(peek.x + peek.width - 4.0, peek.y + 4.0);

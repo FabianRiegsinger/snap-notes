@@ -110,7 +110,6 @@ pub struct PostIt<'a> {
     pub size: Size,
     pub morph_progress: f32,
     pub content_alpha: f32,
-    pub confirm_delete: bool,
     /// The note was just copied; the copy button shows a check.
     pub copied: bool,
     /// The note (its stack's top) is pinned; the pin button draws at full ink.
@@ -318,7 +317,6 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         size,
         morph_progress,
         content_alpha: a,
-        confirm_delete,
         copied,
         pinned,
         color_picker_open,
@@ -338,7 +336,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     } else {
         0.0
     };
-    let controls = if hovered || dragging || color_picker_open || confirm_delete {
+    let controls = if hovered || dragging || color_picker_open {
         a
     } else {
         a * idle_control_alpha
@@ -430,7 +428,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                         theme,
                         controls
                     ),
-                    header_button(Icon::Trash, Message::DeleteRequested, theme, controls),
+                    header_button(Icon::Trash, Message::DeleteNote(note.id), theme, controls),
                     header_button(Icon::Close, Message::ClosePanel, theme, controls),
                 ]
                 .spacing(2)
@@ -575,52 +573,6 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         }
         col = col.push(body);
 
-        if confirm_delete {
-            let choice = |label: &'static str, msg: Message, danger: bool| {
-                pressable(
-                    text(label).size(TEXT_SM),
-                    Padding::new(space(1)).left(space(3)).right(space(3)),
-                    msg,
-                )
-                .style(move |_theme: &Theme, status| {
-                    let pressed = matches!(status, button::Status::Pressed);
-                    button::Style {
-                        background: Some(if danger {
-                            let fill = theme.danger(0.95 * a);
-                            if pressed {
-                                theme::mix(fill, Color::BLACK, 0.18)
-                            } else {
-                                fill
-                            }
-                            .into()
-                        } else {
-                            theme.ink(if pressed { 0.22 } else { 0.12 } * a).into()
-                        }),
-                        text_color: if danger { Color::WHITE } else { theme.ink(a) },
-                        border: border::rounded(RADIUS_CONTROL),
-                        ..Default::default()
-                    }
-                })
-            };
-            col = col.push(
-                container(
-                    row![
-                        text("Delete this note?").size(TEXT_SM).color(theme.ink(a)),
-                        Space::new().width(Fill),
-                        choice("Cancel", Message::ConfirmDelete(false), false),
-                        choice("Delete", Message::ConfirmDelete(true), true),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center),
-                )
-                .padding(Padding::new(10.0).left(18))
-                .style(move |_theme: &Theme| container::Style {
-                    background: Some(theme.ink(0.06 * a).into()),
-                    border: border::rounded(border::bottom(RADIUS_SURFACE)),
-                    ..Default::default()
-                }),
-            );
-        }
         col.into()
     };
 

@@ -16,7 +16,6 @@ struct StoreFile {
 
 /// A deleted note and where it was, so the delete can be undone.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // read by the undo toast (Task 3)
 pub struct Deleted {
     pub note: Note,
     pub index: usize,
@@ -187,7 +186,6 @@ impl NoteStore {
     /// top, the promoted note and its members back under it. The store's
     /// invariants are restored if other changes got in the way. The caller
     /// saves.
-    #[allow(dead_code)] // used by the undo toast (Task 3)
     pub fn restore(&mut self, deleted: Deleted) {
         let Deleted {
             note,
