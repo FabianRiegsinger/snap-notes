@@ -70,6 +70,10 @@ const SHAKE_SECS: f32 = 0.3;
 /// hidden strip.
 const EDGE_ZONE: f32 = 2.0;
 
+/// Without passthrough, the docked window's width while the strip is
+/// hidden: just enough to notice the cursor at the screen edge.
+const EDGE_SLIVER: f32 = 2.0;
+
 /// The strip's band, top and bottom: from the first bar (or the add slot
 /// without bars) less a bar gap, down to the last slot's hit area.
 fn strip_band(strip: &StripLayout, gap: f32) -> (f32, f32) {
@@ -232,6 +236,8 @@ pub enum Message {
     WindowResized(Size),
     Key(keyboard::Event),
     CursorMoved(Point),
+    /// The cursor entered the window; no position comes with it.
+    CursorEnteredWindow,
     CursorLeftWindow,
     MouseButton(bool),
     WindowUnfocused,
@@ -539,7 +545,7 @@ impl App {
         let search_morph = Morph::new(s.motion.speed);
         let export_morph = Morph::new(s.motion.speed);
         let mode_fade = Self::settled_fade(s.motion.speed);
-        let window_size = Size::new(Self::docked_width(s, SUPPORTS_PASSTHROUGH), 600.0);
+        let window_size = Size::new(Self::docked_width(s, SUPPORTS_PASSTHROUGH, false), 600.0);
         let data_dir = store.dir().to_path_buf();
         let strip_entries = strip_model::entries(store.notes());
         let strip_progress = strip_model::progress(store.notes(), &strip_entries);
@@ -1488,6 +1494,13 @@ impl App {
                 }
                 return self.update_passthrough(Some(position));
             }
+            Message::CursorEnteredWindow => {
+                // Anywhere in the sliver is the edge zone, so the entry
+                // alone starts the dwell; a move soon gives the real spot.
+                if self.pointer.is_none() && self.is_sliver() {
+                    self.pointer = Some(Point::ORIGIN);
+                }
+            }
             Message::CursorLeftWindow => {
                 self.last_cursor = None;
                 self.pointer = None;
@@ -1709,6 +1722,7 @@ impl App {
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 Some(Message::CursorMoved(position))
             }
+            iced::Event::Mouse(mouse::Event::CursorEntered) => Some(Message::CursorEnteredWindow),
             iced::Event::Mouse(mouse::Event::CursorLeft) => Some(Message::CursorLeftWindow),
             iced::Event::Mouse(mouse::Event::ButtonPressed(_)) => Some(Message::MouseButton(true)),
             iced::Event::Mouse(mouse::Event::ButtonReleased(_)) => {
@@ -2324,15 +2338,30 @@ impl App {
     }
 
     /// Window width: room for an open note when `wide` (see
-    /// `needs_wide_window`), else just the strip. With passthrough the window
-    /// is always wide, so opening and closing never resize it (a resize is a
-    /// separate move + resize and flickers for a frame).
-    fn docked_width(settings: &Settings, wide: bool) -> f32 {
+    /// `needs_wide_window`), else the edge sliver when `sliver`, else just
+    /// the strip. With passthrough the window is always wide, so opening and
+    /// closing never resize it (a resize is a separate move + resize and
+    /// flickers for a frame).
+    fn docked_width(settings: &Settings, wide: bool, sliver: bool) -> f32 {
         if wide {
             settings.open_width()
+        } else if sliver {
+            EDGE_SLIVER
         } else {
             STRIP_WIDTH
         }
+    }
+
+    /// Whether the window shrinks to the edge sliver: without
+    /// `passthrough`, while auto-hide has the strip fully hidden and
+    /// nothing needs the wide window. A reveal widens it before sliding.
+    fn wants_sliver(&self, passthrough: bool) -> bool {
+        !passthrough && self.auto_hide.is_hidden() && !self.needs_wide_window(passthrough)
+    }
+
+    /// The window is currently the edge sliver.
+    fn is_sliver(&self) -> bool {
+        self.window_size.width <= EDGE_SLIVER
     }
 
     /// Whether the window needs room left of the strip: always with
@@ -2349,6 +2378,15 @@ impl App {
             || self.last_deleted.is_some()
     }
 
+    /// The docked window's width, with or without `passthrough`.
+    fn window_width(&self, passthrough: bool) -> f32 {
+        Self::docked_width(
+            self.settings.settings(),
+            self.needs_wide_window(passthrough),
+            self.wants_sliver(passthrough),
+        )
+    }
+
     /// Docks the window to the right screen edge, vertically centered. The
     /// strip is centered inside, so it sits at the middle of the right screen
     /// border. Does nothing if the window is already there.
@@ -2363,15 +2401,19 @@ impl App {
             monitor
         } else {
             Size::new(
-                Self::docked_width(
-                    self.settings.settings(),
-                    self.needs_wide_window(SUPPORTS_PASSTHROUGH),
-                ),
+                self.window_width(SUPPORTS_PASSTHROUGH),
                 (monitor.height * self.settings.settings().window.height_fraction).round(),
             )
         };
         if size == self.window_size {
             return Task::none();
+        }
+        // The right edge stays put, so a cursor that doesn't move keeps its
+        // screen spot; e.g. on the strip after the sliver widens to reveal.
+        if !SUPPORTS_PASSTHROUGH {
+            if let Some(pointer) = &mut self.pointer {
+                pointer.x += size.width - self.window_size.width;
+            }
         }
         let y = ((monitor.height - size.height) / 2.0).round();
         self.window_size = size;
@@ -2413,7 +2455,12 @@ impl App {
 
     /// Whether `position` is in the edge zone: the window's rightmost
     /// `EDGE_ZONE` px within the strip's band.
+    /// In the edge sliver every point counts: the window only spans the
+    /// docked height anyway.
     fn in_edge(&self, position: Point) -> bool {
+        if self.is_sliver() {
+            return true;
+        }
         position.x >= self.window_size.width - EDGE_ZONE && self.over_strip(position)
     }
 
@@ -2451,6 +2498,7 @@ impl App {
     /// while it slides.
     fn drive_auto_hide(&mut self, now: Instant, dt: f32) -> Task<Message> {
         let was_in_place = self.strip_x_offset() == 0.0;
+        let was = self.auto_hide.phase();
         let inputs = self.auto_hide_inputs();
         self.force_reveal = false;
         let speed = self.settings.settings().motion.speed;
@@ -2458,6 +2506,20 @@ impl App {
             self.animating = true;
         }
         let mut tasks = Vec::new();
+        let phase = self.auto_hide.phase();
+        if phase != was {
+            if phase == autohide::Phase::Hiding {
+                // The strip may not see the cursor go once it slides (no
+                // passthrough, no polling); drop the hover so the bars
+                // don't magnify around a stale spot when they come back.
+                self.cursor_y = None;
+                self.update_hover();
+                self.animating = true;
+            }
+            // Without passthrough: shrink to the sliver once Hidden, widen
+            // before a reveal slides in.
+            tasks.push(self.dock_window());
+        }
         if let Some(deadline) = self.auto_hide.next_deadline() {
             if self.auto_hide_wake != Some(deadline) {
                 self.auto_hide_wake = Some(deadline);
@@ -6342,5 +6404,100 @@ mod tests {
         assert!(app.is_interactive(app.strip_layout().bars[0].center()));
         run_for(&mut app, Instant::now(), 2000);
         assert_eq!(app.auto_hide.offset(), 0.0);
+    }
+
+    /// Docks `app` the way `dock_window` would without passthrough.
+    fn dock_without_passthrough(app: &mut App) {
+        app.window_size.width = app.window_width(false);
+    }
+
+    #[test]
+    fn linux_hidden_window_is_a_sliver() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        let open = app.settings.settings().open_width();
+        assert_eq!(app.window_width(false), STRIP_WIDTH);
+        assert_eq!(app.window_width(true), open);
+        hide_strip(&mut app);
+        assert_eq!(app.window_width(false), EDGE_SLIVER);
+        assert_eq!(app.window_width(true), open, "passthrough stays wide");
+
+        // Anywhere inside the sliver counts as the edge zone.
+        dock_without_passthrough(&mut app);
+        let _ = app.update(Message::CursorMoved(Point::new(0.5, 3.0)));
+        assert!(app.auto_hide.next_deadline().is_some(), "no dwell started");
+        let _ = app.update(Message::CursorLeftWindow);
+        assert_eq!(
+            app.auto_hide.next_deadline(),
+            None,
+            "leaving kept the dwell"
+        );
+        // Entering is enough, even before any move.
+        let _ = app.update(Message::CursorEnteredWindow);
+        assert!(
+            app.auto_hide.next_deadline().is_some(),
+            "entry didn't count"
+        );
+    }
+
+    #[test]
+    fn sliver_grows_before_reveal_slide() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        let t = hide_strip(&mut app);
+        dock_without_passthrough(&mut app);
+        let entered = t.max(Instant::now());
+        let _ = app.update(Message::CursorEnteredWindow);
+        let _ = app.update(Message::Tick(
+            entered + REVEAL_DWELL + Duration::from_millis(5),
+        ));
+        assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
+        assert!(app.strip_x_offset() > 0.0, "the slide already ran");
+        assert_eq!(app.window_width(false), STRIP_WIDTH, "still a sliver");
+    }
+
+    #[test]
+    fn sliver_not_used_while_note_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        let _ = app.update(Message::BarClicked(0));
+        let note = app.note_target_rect();
+        let _ = app.update(Message::CursorMoved(note.center()));
+        hide_strip(&mut app);
+        assert!(app.note_open());
+        let open = app.settings.settings().open_width();
+        assert_eq!(app.window_width(false), open);
+        dock_without_passthrough(&mut app);
+
+        // The wide window's rightmost 2 px within the band are the edge.
+        let edge = edge_point(&app);
+        assert!(app.in_edge(edge));
+        assert!(!app.in_edge(Point::new(app.window_size.width - 3.0, edge.y)));
+        assert!(!app.in_edge(Point::new(edge.x, app.window_size.height - 2.0)));
+        let _ = app.update(Message::CursorMoved(edge));
+        assert!(app.auto_hide.next_deadline().is_some(), "no dwell started");
+
+        // Once the note closes, the hidden window shrinks.
+        let _ = app.update(Message::CursorMoved(app.note_target_rect().center()));
+        let _ = app.update(Message::ClosePanel);
+        tick_until(&mut app, |app| app.active_note.is_none());
+        assert!(app.auto_hide.is_hidden());
+        assert_eq!(app.window_width(false), EDGE_SLIVER);
+    }
+
+    #[test]
+    fn hide_start_clears_stale_hover() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        let bar = app.strip_layout().bars[0].center();
+        let _ = app.update(Message::StripHover(Some(bar.y)));
+        assert!(app.cursor_y.is_some());
+        // The pointer leaves without the strip seeing it go.
+        let _ = app.update(Message::CursorLeftWindow);
+        let t = run_for(&mut app, Instant::now(), 900);
+        assert!(app.auto_hide.offset() > 0.0, "didn't start hiding");
+        assert_eq!(app.cursor_y, None, "stale hover kept");
+        assert!(app.hover_bar.is_none());
+        run_for(&mut app, t, 400);
     }
 }
