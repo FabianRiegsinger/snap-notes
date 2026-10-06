@@ -150,6 +150,9 @@ pub enum Message {
     /// A file dropped with no note open: onto this bar (entry) index, or
     /// `None` for the add slot, empty strip space or beside the strip.
     StripFileDropped(Option<usize>, PathBuf),
+    /// A file is dragged over the window: no cursor moves arrive meanwhile,
+    /// so the last cursor position is forgotten until one does.
+    FileHovered,
     /// The tray item or an Alt/Option-click on `+`: a new note holding the
     /// clipboard's text or image.
     ClipboardNote,
@@ -1039,6 +1042,7 @@ impl App {
                 return self.update(Message::StripFileDropped(entry, path));
             }
             Message::StripFileDropped(entry, path) => return self.drop_on_strip(entry, &path),
+            Message::FileHovered => self.last_cursor = None,
             Message::ClipboardNote => return self.clipboard_note(read_clipboard()),
             Message::ImagePicked(id, Some(path))
                 if self.active_note == Some(id) && self.morph.is_opening() =>
@@ -1572,6 +1576,7 @@ impl App {
                 Some(Message::MouseButton(false))
             }
             iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowUnfocused),
+            iced::Event::Window(window::Event::FileHovered(_)) => Some(Message::FileHovered),
             iced::Event::Window(window::Event::FileDropped(path)) => {
                 Some(Message::ImageDropped(path))
             }
@@ -4005,18 +4010,34 @@ mod tests {
         app.sync_entries();
         let bars = app.strip_layout().bars;
         assert_eq!(bars.len(), 2);
-        app.last_cursor = Some(bars[0].center());
+        let _ = app.update(Message::FileHovered);
+        let _ = app.update(Message::CursorMoved(bars[0].center()));
         let _ = app.update(Message::ImageDropped(file_in(&dir, "x.txt", b"more")));
         assert_eq!(app.store.notes()[0].content, "first\n\nmore");
         assert_eq!(app.store.notes()[0].title, "a");
         assert_eq!(app.store.notes()[2].content, "");
         // An empty body takes the text without a blank line.
-        app.last_cursor = Some(bars[1].center());
+        let _ = app.update(Message::FileHovered);
+        let _ = app.update(Message::CursorMoved(bars[1].center()));
         let _ = app.update(Message::ImageDropped(file_in(&dir, "y.md", b"new")));
         assert_eq!(app.store.notes()[1].content, "new");
         assert_eq!(app.store.notes().len(), 3);
         assert_eq!(app.active_note, None);
         assert!(app.store.is_dirty());
+    }
+
+    #[test]
+    fn drop_after_file_hover_without_cursor_move_creates_new_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = app_with_notes(&dir, &[("a", "first")]);
+        app.sync_entries();
+        let bar = app.strip_layout().bars[0];
+        let _ = app.update(Message::CursorMoved(bar.center()));
+        let _ = app.update(Message::FileHovered);
+        let _ = app.update(Message::ImageDropped(file_in(&dir, "x.txt", b"more")));
+        assert_eq!(app.store.notes()[0].content, "first");
+        assert_eq!(app.store.notes().len(), 2);
+        assert_eq!(new_note(&app).content, "more");
     }
 
     #[test]
