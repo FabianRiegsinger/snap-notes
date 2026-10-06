@@ -64,12 +64,10 @@ impl AutoHide {
             return false;
         }
 
+        let active = inputs.in_use_area || inputs.blocked || inputs.force_reveal;
         // Activity restarts the grace; it only counts down while Shown.
-        if inputs.in_use_area || inputs.blocked || inputs.force_reveal || self.phase != Phase::Shown
-        {
+        if active || self.phase != Phase::Shown {
             self.idle_since = None;
-        } else if self.idle_since.is_none() {
-            self.idle_since = Some(now);
         }
 
         if inputs.in_edge && self.phase == Phase::Hidden {
@@ -111,6 +109,12 @@ impl AutoHide {
                 }
             }
             Phase::Shown | Phase::Hidden => {}
+        }
+
+        // Arm the grace on any step that ends in Shown while idle, so
+        // `next_deadline()` reports it at once.
+        if self.phase == Phase::Shown && !active && self.idle_since.is_none() {
+            self.idle_since = Some(now);
         }
 
         matches!(self.phase, Phase::Hiding | Phase::Revealing)
@@ -418,7 +422,6 @@ mod tests {
         assert_eq!(m.phase(), Phase::Revealing);
         m.step(idle(), t2, 1.0, 1.0);
         assert_eq!(m.phase(), Phase::Shown);
-        m.step(idle(), t2, 0.0, 1.0);
         m.step(idle(), t2 + MS(799), 0.0, 1.0);
         assert_eq!(m.phase(), Phase::Shown);
         m.step(idle(), t2 + MS(800), 0.0, 1.0);
@@ -437,7 +440,6 @@ mod tests {
         let t3 = t2 + REVEAL_DWELL;
         m.step(idle(), t3, 1.0, 1.0);
         assert_eq!(m.phase(), Phase::Shown);
-        m.step(idle(), t3, 0.0, 1.0);
         m.step(idle(), t3 + MS(799), 0.0, 1.0);
         assert_eq!(m.phase(), Phase::Shown);
         m.step(idle(), t3 + MS(800), 0.0, 1.0);
@@ -494,5 +496,20 @@ mod tests {
         m.step(blocked, t, 1.0, 1.0);
         assert_eq!(m.phase(), Phase::Shown);
         assert_eq!(m.offset(), 0.0);
+    }
+
+    #[test]
+    fn grace_armed_on_step_that_finishes_reveal() {
+        let (mut m, t) = hidden(Instant::now());
+        m.step(edge(), t, 0.0, 1.0);
+        m.step(edge(), t + REVEAL_DWELL, 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Revealing);
+        let now = t + MS(400);
+        assert!(!m.step(idle(), now, 1.0, 1.0));
+        assert_eq!(m.phase(), Phase::Shown);
+        assert_eq!(m.next_deadline(), Some(now + HIDE_GRACE));
+        // The deadline alone hides it; no extra arming step in between.
+        m.step(idle(), now + HIDE_GRACE, 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Hiding);
     }
 }
