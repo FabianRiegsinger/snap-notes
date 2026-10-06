@@ -55,15 +55,18 @@ impl Default for AutoHide {
 }
 
 impl AutoHide {
-    /// Advances the machine. Returns true while it needs frames or has a
-    /// pending dwell/grace deadline.
+    /// Advances the machine. Returns true only while sliding (Hiding or
+    /// Revealing), i.e. while frames are needed. Pending dwell and grace
+    /// deadlines are reported only through `next_deadline()`.
     pub fn step(&mut self, inputs: Inputs, now: Instant, dt: f32, speed: f32) -> bool {
         if !inputs.enabled {
             *self = Self::default();
             return false;
         }
 
-        if inputs.in_use_area || inputs.blocked {
+        // Activity restarts the grace; it only counts down while Shown.
+        if inputs.in_use_area || inputs.blocked || inputs.force_reveal || self.phase != Phase::Shown
+        {
             self.idle_since = None;
         } else if self.idle_since.is_none() {
             self.idle_since = Some(now);
@@ -83,6 +86,7 @@ impl AutoHide {
         if reveal_now || dwelled {
             self.phase = Phase::Revealing;
             self.edge_since = None;
+            self.idle_since = None;
         } else if self.phase == Phase::Shown
             && self
                 .idle_since
@@ -109,7 +113,7 @@ impl AutoHide {
             Phase::Shown | Phase::Hidden => {}
         }
 
-        matches!(self.phase, Phase::Hiding | Phase::Revealing) || self.next_deadline().is_some()
+        matches!(self.phase, Phase::Hiding | Phase::Revealing)
     }
 
     /// Eased offset, 0 (shown) to 1 (hidden). Hides ease in and reveals ease
@@ -349,6 +353,7 @@ mod tests {
         assert!(!m.step(Inputs::default(), t, 0.0, 1.0));
         assert_eq!(m.phase(), Phase::Shown);
         assert_eq!(m.offset(), 0.0);
+        assert_eq!(m.next_deadline(), None);
 
         // Also mid-slide, even with a blocker set.
         let t0 = Instant::now();
@@ -363,6 +368,7 @@ mod tests {
         m.step(off, t0 + HIDE_GRACE, 0.0, 1.0);
         assert_eq!(m.phase(), Phase::Shown);
         assert_eq!(m.offset(), 0.0);
+        assert_eq!(m.next_deadline(), None);
     }
 
     #[test]
@@ -370,7 +376,7 @@ mod tests {
         let t0 = Instant::now();
         let mut m = AutoHide::default();
         assert_eq!(m.next_deadline(), None);
-        assert!(m.step(idle(), t0, 0.0, 1.0));
+        assert!(!m.step(idle(), t0, 0.0, 1.0));
         assert_eq!(m.next_deadline(), Some(t0 + HIDE_GRACE));
         m.step(in_use(), t0 + MS(100), 0.0, 1.0);
         assert_eq!(m.next_deadline(), None);
@@ -378,9 +384,115 @@ mod tests {
         let (mut m, t) = hidden(t0);
         assert_eq!(m.next_deadline(), None);
         assert!(!m.step(idle(), t, 0.0, 1.0));
-        assert!(m.step(edge(), t, 0.0, 1.0));
+        assert!(!m.step(edge(), t, 0.0, 1.0));
         assert_eq!(m.next_deadline(), Some(t + REVEAL_DWELL));
         m.step(idle(), t + MS(10), 0.0, 1.0);
         assert_eq!(m.next_deadline(), None);
+    }
+
+    fn force() -> Inputs {
+        Inputs {
+            force_reveal: true,
+            ..idle()
+        }
+    }
+
+    #[test]
+    fn step_reports_frames_only_while_sliding() {
+        let t0 = Instant::now();
+        let mut m = AutoHide::default();
+        assert!(!m.step(idle(), t0, 0.016, 1.0));
+        assert!(!m.step(idle(), t0 + HIDE_GRACE - MS(1), 0.016, 1.0));
+        assert!(m.step(idle(), t0 + HIDE_GRACE, 0.016, 1.0));
+        assert!(m.step(idle(), t0 + HIDE_GRACE, 0.016, 1.0));
+        assert!(!m.step(idle(), t0 + HIDE_GRACE, 1.0, 1.0));
+    }
+
+    #[test]
+    fn forced_reveal_after_long_hidden_stays_shown_for_grace() {
+        let (mut m, t) = hidden(Instant::now());
+        // Hidden well beyond the grace period, with idle input throughout.
+        m.step(idle(), t + MS(5000), 0.0, 1.0);
+        let t2 = t + MS(5100);
+        m.step(force(), t2, 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Revealing);
+        m.step(idle(), t2, 1.0, 1.0);
+        assert_eq!(m.phase(), Phase::Shown);
+        m.step(idle(), t2, 0.0, 1.0);
+        m.step(idle(), t2 + MS(799), 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Shown);
+        m.step(idle(), t2 + MS(800), 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Hiding);
+    }
+
+    #[test]
+    fn dwell_reveal_restarts_grace() {
+        let (mut m, t) = hidden(Instant::now());
+        m.step(idle(), t + MS(3000), 0.0, 1.0);
+        let t2 = t + MS(4000);
+        m.step(edge(), t2, 0.0, 1.0);
+        m.step(edge(), t2 + REVEAL_DWELL, 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Revealing);
+        assert_eq!(m.next_deadline(), None);
+        let t3 = t2 + REVEAL_DWELL;
+        m.step(idle(), t3, 1.0, 1.0);
+        assert_eq!(m.phase(), Phase::Shown);
+        m.step(idle(), t3, 0.0, 1.0);
+        m.step(idle(), t3 + MS(799), 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Shown);
+        m.step(idle(), t3 + MS(800), 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Hiding);
+    }
+
+    #[test]
+    fn force_reveal_while_shown_extends_grace() {
+        let t0 = Instant::now();
+        let mut m = AutoHide::default();
+        m.step(idle(), t0, 0.0, 1.0);
+        m.step(force(), t0 + MS(700), 0.0, 1.0);
+        m.step(idle(), t0 + MS(750), 0.0, 1.0);
+        m.step(idle(), t0 + MS(1549), 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Shown);
+        m.step(idle(), t0 + MS(1550), 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Hiding);
+    }
+
+    #[test]
+    fn oversized_dt_finishes_slide_in_one_step() {
+        let t0 = Instant::now();
+        let mut m = AutoHide::default();
+        m.step(idle(), t0, 0.0, 1.0);
+        m.step(idle(), t0 + HIDE_GRACE, 10.0, 1.0);
+        assert_eq!(m.phase(), Phase::Hidden);
+        assert_eq!(m.offset(), 1.0);
+    }
+
+    #[test]
+    fn earlier_now_does_not_panic() {
+        let t0 = Instant::now() + MS(10_000);
+        let mut m = AutoHide::default();
+        m.step(idle(), t0, 0.0, 1.0);
+        m.step(idle(), t0 - MS(5000), 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Shown);
+        let (mut m, t) = hidden(t0);
+        m.step(edge(), t, 0.0, 1.0);
+        m.step(edge(), t - MS(1000), 0.0, 1.0);
+        assert_eq!(m.phase(), Phase::Hidden);
+    }
+
+    #[test]
+    fn blocked_while_revealing_ends_shown() {
+        let t0 = Instant::now();
+        let blocked = Inputs {
+            blocked: true,
+            ..idle()
+        };
+        let (mut m, t) = hidden(t0);
+        m.step(force(), t, 0.0, 1.0);
+        m.step(blocked, t, SLIDE_SECS / 2.0, 1.0);
+        assert_eq!(m.phase(), Phase::Revealing);
+        m.step(blocked, t, 1.0, 1.0);
+        assert_eq!(m.phase(), Phase::Shown);
+        assert_eq!(m.offset(), 0.0);
     }
 }
