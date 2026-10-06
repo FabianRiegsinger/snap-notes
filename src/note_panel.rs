@@ -7,6 +7,7 @@ use crate::note::{Note, NoteColor};
 use crate::pass_wheel::pass_wheel;
 use crate::press_shift::press_shift;
 use crate::press_through::press_through;
+use crate::reminder;
 use crate::rich::Doc;
 use crate::rich_highlight;
 use crate::rich_view;
@@ -121,8 +122,8 @@ pub struct PostIt<'a> {
     pub dragging: bool,
     /// Progress (0..=1) of the fade after switching edit/render mode.
     pub mode_fade: f32,
-    /// The title's reminder time (`Tue 15:00`); a bell shows while set.
-    pub reminder: Option<String>,
+    /// What the title says about a reminder, for the header label.
+    pub reminder: reminder::Status,
 }
 
 /// A button whose background darkens while pressed and whose label sinks
@@ -137,11 +138,33 @@ pub(crate) fn pressable<'a>(
         .on_press(message)
 }
 
+/// The header button's look: a faint ink wash when hovered, a darker one
+/// when pressed, and a persistent wash at full ink while `active`.
+fn header_button_style(
+    theme: theme::Theme,
+    alpha: f32,
+    active: bool,
+    status: button::Status,
+) -> button::Style {
+    button::Style {
+        background: match status {
+            button::Status::Hovered => Some(theme.ink(0.12 * alpha).into()),
+            button::Status::Pressed => Some(theme.ink(0.22 * alpha).into()),
+            _ if active => Some(theme.ink(0.10 * alpha).into()),
+            _ => None,
+        },
+        text_color: theme.ink(if active { alpha } else { 0.65 * alpha }),
+        border: border::rounded(RADIUS_CONTROL),
+        ..Default::default()
+    }
+}
+
 /// A header control: a Lucide icon on a faint ink wash when hovered, a
-/// darker one when pressed.
+/// darker one when pressed. `active` keeps the wash on, for a toggle that is on.
 fn header_button<'a>(
     glyph: Icon,
     message: Message,
+    active: bool,
     theme: theme::Theme,
     alpha: f32,
 ) -> Element<'a, Message> {
@@ -150,41 +173,48 @@ fn header_button<'a>(
         Padding::new(space(1)).left(space(2)).right(space(2)),
         message,
     )
-    .style(move |_theme: &Theme, status| button::Style {
-        background: match status {
-            button::Status::Hovered => Some(theme.ink(0.12 * alpha).into()),
-            button::Status::Pressed => Some(theme.ink(0.22 * alpha).into()),
-            _ => None,
-        },
-        text_color: theme.ink(0.65 * alpha),
-        border: border::rounded(RADIUS_CONTROL),
-        ..Default::default()
-    })
+    .style(move |_theme: &Theme, status| header_button_style(theme, alpha, active, status))
     .into()
 }
 
-/// The header's pin toggle: full ink while pinned, a faint header button
-/// otherwise.
+/// The header's pin toggle: washed and at full ink while pinned.
 fn pin_button<'a>(pinned: bool, theme: theme::Theme, alpha: f32) -> Element<'a, Message> {
-    if !pinned {
-        return header_button(Icon::Pin, Message::TogglePin, theme, alpha);
-    }
-    pressable(
-        icon(Icon::Pin, TEXT_SM),
-        Padding::new(space(1)).left(space(2)).right(space(2)),
-        Message::TogglePin,
+    let tip = if pinned { "Unpin" } else { "Pin to top" };
+    tooltip(
+        header_button(Icon::Pin, Message::TogglePin, pinned, theme, alpha),
+        tip_label(tip, theme),
+        tooltip::Position::Bottom,
     )
-    .style(move |_theme: &Theme, status| button::Style {
-        background: match status {
-            button::Status::Hovered => Some(theme.ink(0.12 * alpha).into()),
-            button::Status::Pressed => Some(theme.ink(0.22 * alpha).into()),
-            _ => None,
-        },
-        text_color: theme.ink(alpha),
-        border: border::rounded(RADIUS_CONTROL),
-        ..Default::default()
-    })
+    .gap(4)
     .into()
+}
+
+/// A tooltip's card.
+fn tip_label<'a>(tip: &'a str, theme: theme::Theme) -> Element<'a, Message> {
+    container(text(tip).size(TEXT_SM).font(theme::BODY_FONT))
+        .padding(Padding::new(space(1)).left(space(2)).right(space(2)))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(theme.card().into()),
+            text_color: Some(theme.ink(1.0)),
+            border: border::rounded(RADIUS_CONTROL),
+            shadow: theme.shadows(1.0)[0],
+            ..Default::default()
+        })
+        .into()
+}
+
+/// The title field's placeholder.
+const TITLE_PLACEHOLDER: &str = "Title \u{2014} @15:00 adds a reminder";
+
+/// The header label's text and ink for a reminder status; `None` shows
+/// nothing. The bell goes with the text unless it is `Invalid`.
+fn reminder_label(status: &reminder::Status) -> Option<(String, f32)> {
+    match status {
+        reminder::Status::None => None,
+        reminder::Status::Pending(label) => Some((label.clone(), 0.65)),
+        reminder::Status::Fired(label) => Some((format!("{label} \u{b7} fired"), 0.65)),
+        reminder::Status::Invalid => Some(("not a reminder".to_string(), 0.45)),
+    }
 }
 
 /// The focus ring's border while `focused`, otherwise a plain rounded edge.
@@ -348,7 +378,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     let inner: Element<'_, Message> = if a < 0.01 {
         Space::new().width(Fill).height(Fill).into()
     } else {
-        let title = text_input("Title", &note.title)
+        let title = text_input(TITLE_PLACEHOLDER, &note.title)
             .id(TITLE_ID)
             .on_input(Message::TitleEdited)
             .size(TEXT_MD)
@@ -391,25 +421,22 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             },
         );
 
-        // A bell left of the title while it sets a reminder; hovering it
-        // shows when.
-        let bell = reminder.map(|when| {
-            let label = container(text(when).size(TEXT_SM).font(theme::BODY_FONT))
-                .padding(Padding::new(space(1)).left(space(2)).right(space(2)))
-                .style(move |_theme: &Theme| container::Style {
-                    background: Some(theme.card().into()),
-                    text_color: Some(theme.ink(1.0)),
-                    border: border::rounded(RADIUS_CONTROL),
-                    shadow: theme.shadows(1.0)[0],
-                    ..Default::default()
-                });
-            tooltip(
-                container(icon(Icon::Bell, TEXT_SM).color(theme.ink(0.65 * a)))
-                    .padding(Padding::new(0.0).left(2)),
-                label,
-                tooltip::Position::Bottom,
-            )
-            .gap(4)
+        // The reminder's state right of the title: bell and time, or why
+        // the tag isn't one. Its width hugs the text so the title keeps the row.
+        let reminder_tag = reminder_label(&reminder).map(|(label, ink)| {
+            let bell = (!matches!(reminder, reminder::Status::Invalid))
+                .then(|| icon(Icon::Bell, TEXT_SM).color(theme.ink(ink * a)));
+            row![
+                bell,
+                text(label)
+                    .size(TEXT_SM)
+                    .font(theme::BODY_FONT)
+                    .color(theme.ink(ink * a))
+                    .wrapping(text::Wrapping::None)
+            ]
+            .spacing(space(1))
+            .align_y(iced::Alignment::Center)
+            .width(Length::Shrink)
         });
 
         // Any press on the header, title and buttons included, leaves edit
@@ -417,19 +444,26 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         let header = press_through(
             container(
                 row![
-                    bell,
                     // Cmd shortcuts reach the app instead of typing.
                     command_passthrough(title),
+                    reminder_tag,
                     color_btn,
                     pin_button(pinned, theme, controls),
                     header_button(
                         if copied { Icon::Check } else { Icon::Copy },
                         Message::CopyNote,
+                        false,
                         theme,
                         controls
                     ),
-                    header_button(Icon::Trash, Message::DeleteNote(note.id), theme, controls),
-                    header_button(Icon::Close, Message::ClosePanel, theme, controls),
+                    header_button(
+                        Icon::Trash,
+                        Message::DeleteNote(note.id),
+                        false,
+                        theme,
+                        controls
+                    ),
+                    header_button(Icon::Close, Message::ClosePanel, false, theme, controls),
                 ]
                 .spacing(2)
                 .align_y(iced::Alignment::Center),
@@ -656,6 +690,41 @@ fn body_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn title_placeholder_mentions_reminders() {
+        assert_eq!(TITLE_PLACEHOLDER, "Title \u{2014} @15:00 adds a reminder");
+    }
+
+    #[test]
+    fn reminder_label_text_for_each_status() {
+        use reminder::Status;
+        assert_eq!(reminder_label(&Status::None), None);
+        assert_eq!(
+            reminder_label(&Status::Pending("Fri 09:00".into())),
+            Some(("Fri 09:00".to_string(), 0.65))
+        );
+        assert_eq!(
+            reminder_label(&Status::Fired("Fri 09:00".into())),
+            Some(("Fri 09:00 \u{b7} fired".to_string(), 0.65))
+        );
+        assert_eq!(
+            reminder_label(&Status::Invalid),
+            Some(("not a reminder".to_string(), 0.45))
+        );
+    }
+
+    #[test]
+    fn active_header_button_has_wash() {
+        let theme = theme::Theme::default();
+        let idle = header_button_style(theme, 1.0, false, button::Status::Active);
+        assert_eq!(idle.background, None);
+        assert_eq!(idle.text_color, theme.ink(0.65));
+        let on = header_button_style(theme, 1.0, true, button::Status::Active);
+        assert_eq!(on.background, Some(theme.ink(0.10).into()));
+        assert_eq!(on.text_color, theme.ink(1.0));
+    }
     fn press(ch: &str, command: bool, status: text_editor::Status) -> text_editor::KeyPress {
         let key = keyboard::Key::Character(ch.into());
         text_editor::KeyPress {
@@ -797,7 +866,6 @@ mod tests {
         ));
     }
 
-    use super::*;
     use iced::advanced::widget::operation::scrollable::RelativeOffset;
     use iced::{Point, Size};
 

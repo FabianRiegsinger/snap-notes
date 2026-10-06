@@ -1520,7 +1520,7 @@ impl App {
                         hovered: self.note_hovered,
                         dragging: self.note_drag.is_some(),
                         mode_fade: self.mode_fade.progress(),
-                        reminder: reminder::at(note).map(reminder::label),
+                        reminder: reminder::status(note, chrono::Local::now()),
                     });
                     let note_view = mouse_area(note_view)
                         .on_enter(Message::NoteHovered(true))

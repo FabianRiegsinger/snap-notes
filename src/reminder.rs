@@ -204,7 +204,6 @@ pub fn display(title: &str) -> String {
 /// Whether the title has something that looks like a reminder tag: an `@`
 /// at the start or after whitespace, followed by a letter or digit. It may
 /// still fail to parse.
-#[allow(dead_code)] // used by the header label (Task 4)
 pub fn candidate(title: &str) -> bool {
     title.char_indices().any(|(i, c)| {
         c == '@'
@@ -220,7 +219,6 @@ pub fn candidate(title: &str) -> bool {
 }
 
 /// What a note's title says about a reminder, for the header.
-#[allow(dead_code)] // used by the header label (Task 4)
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     /// No tag.
@@ -234,7 +232,6 @@ pub enum Status {
 }
 
 /// The note's reminder status. A tag without an anchor counts from `now`.
-#[allow(dead_code)] // used by the header label (Task 4)
 pub fn status(note: &Note, now: DateTime<Local>) -> Status {
     let time = at(note).or_else(|| parse(&note.title, now));
     match time {

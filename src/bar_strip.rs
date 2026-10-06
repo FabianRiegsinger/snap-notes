@@ -60,7 +60,7 @@ fn progress_alpha(progress: Option<(usize, usize)>) -> f32 {
 }
 
 /// Height of the pinned bar's notch.
-const NOTCH_HEIGHT: f32 = 2.0;
+const NOTCH_HEIGHT: f32 = 3.0;
 
 /// The pinned notch: the bar's colour darkened, at the bar's alpha.
 fn notch_color(bar: Color, alpha: f32) -> Color {
@@ -2025,6 +2025,11 @@ mod tests {
         assert!((l.settings_button.unwrap().width - d.width * 4.0).abs() < 0.01);
         assert_eq!(l.add_button.size(), l.bars[0].size());
         assert_eq!(l.search_button.size(), l.bars[0].size());
+    }
+
+    #[test]
+    fn pinned_notch_is_three_px() {
+        assert_eq!(NOTCH_HEIGHT, 3.0);
     }
 
     #[test]
