@@ -454,10 +454,12 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             },
         );
         // The color bubble opens above the button on its own layer, so the
-        // header and body stay put.
+        // header and body stay put. Not while the note unfolds: an overlay
+        // doesn't fade or move with it.
         let color_btn = color_bubble(
             color_btn,
-            color_picker_open.then(|| color_picker(note.color, palette, color_hex, theme)),
+            (color_picker_open && morph_progress >= 1.0)
+                .then(|| color_picker(note.color, palette, color_hex, theme)),
             theme,
         );
 
@@ -920,6 +922,15 @@ mod tests {
     /// color bubble open or not. Returns every node's bounds and the
     /// bubble's card, if any shows.
     fn note_layout(top: f32, bubble_open: bool) -> (Vec<Rectangle>, Option<Rectangle>) {
+        note_layout_at(top, bubble_open, 1.0)
+    }
+
+    /// `note_layout` with the note unfolded `morph_progress` of the way.
+    fn note_layout_at(
+        top: f32,
+        bubble_open: bool,
+        morph_progress: f32,
+    ) -> (Vec<Rectangle>, Option<Rectangle>) {
         use iced::advanced::layout::{self, Layout};
         use iced::advanced::widget::Tree;
 
@@ -944,7 +955,7 @@ mod tests {
             data_dir: Path::new("."),
             broken_images: &broken,
             size: Size::new(420.0, 320.0),
-            morph_progress: 1.0,
+            morph_progress,
             content_alpha: 1.0,
             copied: false,
             pinned: false,
@@ -1011,6 +1022,12 @@ mod tests {
             "{card:?}"
         );
         assert!((card.center_x() - button.center_x()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn bubble_waits_for_the_note_to_unfold() {
+        assert_eq!(note_layout_at(400.0, true, 0.6).1, None);
+        assert!(note_layout_at(400.0, true, 1.0).1.is_some());
     }
 
     #[test]

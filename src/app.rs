@@ -1509,7 +1509,12 @@ impl App {
                     keyboard::Key::Named(Named::Escape) => return self.update(Message::ClosePanel),
                     // In edit mode the body editor's own key binding handles
                     // undo/redo; the title field ignores them, so skip it here.
-                    keyboard::Key::Character(_) if !self.editing && self.active_note.is_some() => {
+                    // With the color bubble open, its hex field has the keys.
+                    keyboard::Key::Character(_)
+                        if !self.editing
+                            && self.active_note.is_some()
+                            && !self.color_picker_open =>
+                    {
                         if let Some(step) =
                             shortcut.and_then(|c| crate::note_panel::history_key(c, modifiers))
                         {
@@ -5034,6 +5039,42 @@ mod tests {
         assert!(!app.color_picker_open);
         assert!(app.morph.is_opening(), "the note stays open");
         assert!(app.active_note.is_some());
+    }
+
+    #[test]
+    fn switching_notes_closes_the_bubble() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        app.store.add_note(&crate::note::PALETTE);
+        let _ = app.update(Message::ToggleColorPicker);
+        // The other note's bar: the morph restarts for it.
+        let other = app.store.notes()[1].id;
+        let entry = app.id_entry(other).unwrap();
+        let _ = app.update(Message::BarClicked(entry));
+        assert_eq!(app.active_note, Some(other));
+        assert!(!app.color_picker_open);
+    }
+
+    #[test]
+    fn undo_key_leaves_the_body_alone_while_the_bubble_is_open() {
+        use keyboard::key::{Code, Physical};
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let _ = app.update(Message::ToggleColorPicker);
+        let cmd_z = Message::Key(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character("z".into()),
+            modified_key: keyboard::Key::Character("z".into()),
+            physical_key: Physical::Code(Code::KeyZ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::COMMAND,
+            text: None,
+            repeat: false,
+        });
+        // No undo step is sent: the hex field has the keys.
+        assert_eq!(app.update(cmd_z.clone()).units(), 0);
+        let _ = app.update(Message::CloseColorBubble);
+        assert!(app.update(cmd_z).units() > 0, "body undo when closed");
+        assert_eq!(app.store.notes()[0].content, "x");
     }
 
     #[test]

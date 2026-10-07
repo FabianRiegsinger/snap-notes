@@ -2,7 +2,7 @@
 
 use crate::app::{NOTE_GAP, NOTE_MARGIN};
 use crate::bar_strip::STRIP_WIDTH;
-use crate::note::{NoteColor, DEFAULT_PALETTE, PALETTE};
+use crate::note::{NoteColor, DEFAULT_PALETTE, DEFAULT_SLOTS, PALETTE};
 use crate::resize::MAX_NOTE_WIDTH;
 
 use serde::Serialize;
@@ -519,17 +519,20 @@ impl Settings {
 }
 
 /// The palette for a saved one (`None` for an entry that isn't a color).
-/// The palette used to hold 20 colors and now holds six: the old default
-/// becomes the new one; any other keeps its first six, and missing or bad
-/// entries take the default's color for their slot. Notes keep their colors.
+/// The palette used to hold 20 colors and now holds six. A 20-color one
+/// keeps the slots of the six palette names (see `DEFAULT_SLOTS`), so those
+/// tags and the highlight keep their colors; any other keeps its first six.
+/// Missing or bad entries take the default's color for their slot. Notes
+/// keep their colors.
 fn migrate_palette(saved: &[Option<NoteColor>]) -> Vec<NoteColor> {
-    if saved.len() == PALETTE.len() && saved.iter().zip(PALETTE).all(|(s, p)| *s == Some(p)) {
-        return DEFAULT_PALETTE.to_vec();
-    }
+    let old = saved.len() == PALETTE.len();
     DEFAULT_PALETTE
         .iter()
         .enumerate()
-        .map(|(slot, default)| saved.get(slot).copied().flatten().unwrap_or(*default))
+        .map(|(slot, default)| {
+            let from = if old { DEFAULT_SLOTS[slot] } else { slot };
+            saved.get(from).copied().flatten().unwrap_or(*default)
+        })
         .collect()
 }
 
@@ -656,7 +659,7 @@ pub const PRESETS: [NoteColor; 60] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::note::{DEFAULT_PALETTE, PALETTE};
+    use crate::note::{DEFAULT_PALETTE, DEFAULT_SLOTS, PALETTE};
 
     #[test]
     fn defaults_match_current_constants() {
@@ -827,8 +830,9 @@ mod tests {
         hexes[3] = "#FFF".into();
         let json = serde_json::json!({ "palette": hexes }).to_string();
         let s = Settings::from_json(&json);
-        assert_eq!(s.palette[2], PRESETS[2]);
-        assert_eq!(s.palette[3], DEFAULT_PALETTE[3]);
+        // Slot 1 is old slot 3 (peach), which is bad; slot 2 is old slot 5.
+        assert_eq!(s.palette[1], DEFAULT_PALETTE[1]);
+        assert_eq!(s.palette[2], PRESETS[5]);
         let short = Settings::from_json(r##"{"palette":["#FFF"]}"##);
         assert_eq!(short.palette, DEFAULT_PALETTE.to_vec());
     }
@@ -841,13 +845,38 @@ mod tests {
     }
 
     #[test]
-    fn custom_palette_keeps_its_first_six() {
+    fn custom_twenty_palette_keeps_the_six_named_slots() {
         let hexes: Vec<String> = PRESETS[..20].iter().map(|c| c.to_hex()).collect();
         let s = Settings::from_json(&serde_json::json!({ "palette": hexes }).to_string());
-        assert_eq!(s.palette, PRESETS[..6].to_vec());
+        let want: Vec<NoteColor> = DEFAULT_SLOTS.iter().map(|&i| PRESETS[i]).collect();
+        assert_eq!(s.palette, want);
         // A palette saved after the migration loads as it is.
         let again = Settings::from_json(&serde_json::to_string(&s).unwrap());
-        assert_eq!(again.palette, PRESETS[..6].to_vec());
+        assert_eq!(again.palette, want);
+    }
+
+    #[test]
+    fn migration_keeps_palette_tags_and_highlight_colors() {
+        use crate::rich::{parse, COLOR_NAMES};
+        // The old default with a customised slot outside the six (rose)
+        // and one of the six (peach).
+        let mut old = PALETTE;
+        old[1] = PRESETS[0];
+        old[3] = PRESETS[7];
+        let hexes: Vec<String> = old.iter().map(|c| c.to_hex()).collect();
+        let s = Settings::from_json(&serde_json::json!({ "palette": hexes }).to_string());
+        // Before, a name showed its slot of the 20-color palette.
+        for slot in DEFAULT_SLOTS {
+            let name = COLOR_NAMES[slot];
+            let doc = parse(&format!("{{{name}}}x{{/}}"), &s.palette);
+            assert_eq!(doc.blocks[0].spans[0].color, Some(old[slot]), "{name}");
+        }
+        let doc = parse("==x==", &s.palette);
+        assert_eq!(doc.blocks[0].spans[0].background, Some(old[5]));
+        assert_eq!(s.palette[1], PRESETS[7]);
+        // The other names go back to their fixed colors.
+        let doc = parse("{rose}x{/}", &s.palette);
+        assert_eq!(doc.blocks[0].spans[0].color, Some(PALETTE[1]));
     }
 
     #[test]

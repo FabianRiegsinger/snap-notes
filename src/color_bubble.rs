@@ -35,17 +35,19 @@ pub struct Placement {
 }
 
 /// Places a card of `size` above `anchor`, centered on it, within a window
-/// of `window` size; below it when there's no room above.
+/// of `window` size; below it when there's no room above. When it fits on
+/// neither side, it goes where there is more room and is moved into the
+/// window.
 pub fn place(anchor: Rectangle, size: Size, window: Size) -> Placement {
     let max_x = (window.width - MARGIN - size.width).max(MARGIN);
     let x = (anchor.center_x() - size.width / 2.0).clamp(MARGIN, max_x);
     let above = anchor.y - GAP - TAIL - size.height;
-    let below = above < MARGIN;
-    let y = if below {
-        anchor.y + anchor.height + GAP + TAIL
-    } else {
-        above
-    };
+    let under = anchor.y + anchor.height + GAP + TAIL;
+    let room_above = above + size.height - MARGIN;
+    let room_below = window.height - MARGIN - under;
+    let below = room_above < size.height && (room_below >= size.height || room_below > room_above);
+    let max_y = (window.height - MARGIN - size.height).max(MARGIN);
+    let y = if below { under } else { above }.clamp(MARGIN, max_y);
     let card = Rectangle::new(Point::new(x, y), size);
     Placement {
         card,
@@ -358,7 +360,8 @@ impl overlay::Overlay<Message, Theme, iced::Renderer> for Bubble<'_, '_> {
 
         // The tail: a bordered triangle, then the card's color over it and
         // over the card's border where the two meet.
-        let below = card.y >= self.anchor.y + self.anchor.height;
+        // Moved into a short window, the card may overlap the button.
+        let below = card.center_y() > self.anchor.center_y();
         let (edge, toward) = if below {
             (card.y, -1.0)
         } else {
@@ -433,8 +436,11 @@ impl overlay::Overlay<Message, Theme, iced::Renderer> for Bubble<'_, '_> {
                     .position()
                     .is_some_and(|p| dismisses(p, card, self.anchor)) =>
             {
-                // Not captured: the press still reaches what it is on.
+                // Captured: the press only closes the bubble, it doesn't
+                // also act on the note.
                 shell.publish(Message::CloseColorBubble);
+                shell.capture_event();
+                return;
             }
             _ => {}
         }
@@ -520,6 +526,110 @@ mod tests {
         // Just enough room above keeps it there.
         let fits = button(300.0, MARGIN + CARD.height + TAIL + GAP);
         assert!(!place(fits, CARD, WINDOW).below);
+    }
+
+    #[test]
+    fn card_stays_in_a_short_window() {
+        let short = Size::new(800.0, 200.0);
+        // More room below: it goes there, pulled up to fit.
+        let p = place(button(300.0, 60.0), CARD, short);
+        assert!(p.below);
+        assert_eq!(p.card.y, short.height - MARGIN - CARD.height);
+        // More room above: it stays there, pushed down to fit.
+        let p = place(button(300.0, 130.0), CARD, short);
+        assert!(!p.below);
+        assert_eq!(p.card.y, MARGIN);
+    }
+
+    /// Sends `event` to the open bubble of a 22 px button at (0, 300) in an
+    /// 800 × 600 window, the cursor at `cursor`. Returns the card's bounds,
+    /// the messages and whether the event was captured.
+    fn bubble_event(event: Event, cursor: Point) -> (Rectangle, Vec<Message>, bool) {
+        use iced::advanced::clipboard;
+        use iced::advanced::layout::Limits;
+
+        let window = Size::new(800.0, 600.0);
+        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(14.0),
+        ));
+        let card = Space::new().width(200).height(120).into();
+        let mut root: Element<'_, Message> = iced::widget::column![
+            Space::new().height(300),
+            color_bubble(
+                Space::new().width(22).height(22),
+                Some(card),
+                theme::Theme::default()
+            ),
+        ]
+        .into();
+        let mut tree = Tree::new(&root);
+        let node =
+            root.as_widget_mut()
+                .layout(&mut tree, &renderer, &Limits::new(Size::ZERO, window));
+        let mut overlay = root
+            .as_widget_mut()
+            .overlay(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &Rectangle::with_size(window),
+                Vector::ZERO,
+            )
+            .expect("open bubble");
+        let overlay_node = overlay.as_overlay_mut().layout(&renderer, window);
+        let mut layout = Layout::new(&overlay_node);
+        while layout.bounds().size() == window {
+            layout = layout.children().next().expect("a card");
+        }
+        let card = layout.bounds();
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+        overlay.as_overlay_mut().update(
+            &event,
+            Layout::new(&overlay_node),
+            mouse::Cursor::Available(cursor),
+            &renderer,
+            &mut clipboard::Null,
+            &mut shell,
+        );
+        let captured = shell.event_status() == iced::event::Status::Captured;
+        (card, messages, captured)
+    }
+
+    fn closes(messages: &[Message]) -> bool {
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::CloseColorBubble))
+    }
+
+    #[test]
+    fn bubble_captures_escape_and_closes() {
+        use keyboard::key::{Code, Named, Physical};
+        let escape = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(Named::Escape),
+            modified_key: keyboard::Key::Named(Named::Escape),
+            physical_key: Physical::Code(Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        });
+        let (_, messages, captured) = bubble_event(escape, Point::new(700.0, 50.0));
+        assert!(closes(&messages) && captured);
+    }
+
+    #[test]
+    fn press_outside_closes_without_reaching_the_note() {
+        let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let (card, messages, captured) = bubble_event(press.clone(), Point::new(700.0, 500.0));
+        assert!(closes(&messages) && captured);
+        // On the card: kept, and the press stays on it.
+        let (_, messages, captured) = bubble_event(press.clone(), card.center());
+        assert!(!closes(&messages) && captured);
+        // On the button: left to the button, which toggles the bubble.
+        let (_, messages, captured) = bubble_event(press, Point::new(11.0, 311.0));
+        assert!(!closes(&messages) && !captured);
     }
 
     #[test]

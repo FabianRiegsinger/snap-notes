@@ -103,6 +103,7 @@ Notes are written in Markdown plus a few color and size tags. An open note shows
 - **Line breaks:** a single newline stays a line break.
 - **Raw HTML:** shows as typed and is never rendered.
 - **Older notes:** keep their text, but a line indented by 4 spaces now shows as a code block, and a line followed by `---` as a heading.
+- **Older palettes:** the palette now holds six colors. If you had customized it, `coral`, `peach`, `amber`, `mint`, `sky`, `lavender` and `==highlight==` keep your colors; the other 14 names go back to their fixed colors.
 
 ### Settings
 Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group except Data has a Reset button. There is no theme setting: dark mode follows the system.
