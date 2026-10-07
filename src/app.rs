@@ -678,10 +678,10 @@ impl App {
                 }
             }
             Message::ToggleSettings => {
-                self.force_reveal = true;
                 if self.settings_open && self.settings_morph.is_opening() {
                     return self.update(Message::CloseSettings);
                 }
+                self.force_reveal = true;
                 let close_note = self.update(Message::ClosePanel);
                 self.close_search();
                 self.close_export();
@@ -759,6 +759,10 @@ impl App {
                 self.settings.settings_mut().toggle(toggle);
                 if toggle == SettingToggle::DockIcon {
                     self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
+                }
+                if toggle == SettingToggle::AutoHide {
+                    // `update` steps auto-hide right after this.
+                    return Task::none();
                 }
                 self.sync_hotkey();
                 return self.apply_app_visibility();
@@ -1482,6 +1486,11 @@ impl App {
             }
             Message::Key(_) => {}
             Message::CursorMoved(position) => {
+                // A real OS file drag sends no cursor moves, so one means
+                // the hover ended without an event.
+                if self.drag.is_none() {
+                    self.file_hover = false;
+                }
                 self.last_cursor = Some(position);
                 self.pointer = Some(position);
                 if let Some(offset) = self.note_drag {
@@ -6171,8 +6180,8 @@ mod tests {
     }
 
     /// Lets the idle strip's grace run out and its slide finish.
-    fn hide_strip(app: &mut App) -> Instant {
-        let t = run_for(app, Instant::now(), 1200);
+    fn hide_strip(app: &mut App, from: Instant) -> Instant {
+        let t = run_for(app, from, 1200);
         assert!(app.auto_hide.is_hidden(), "the idle strip didn't hide");
         t
     }
@@ -6215,9 +6224,9 @@ mod tests {
         let mut app = auto_hide_app(&dir);
         let t0 = Instant::now();
         // Shown at first, for the grace.
-        run_for(&mut app, t0, 700);
+        let t = run_for(&mut app, t0, 700);
         assert_eq!(app.auto_hide.offset(), 0.0);
-        hide_strip(&mut app);
+        hide_strip(&mut app, t);
         assert_eq!(app.strip_x_offset(), STRIP_WIDTH + HIDE_MARGIN);
 
         let edge = edge_point(&app);
@@ -6236,7 +6245,7 @@ mod tests {
     fn edge_dwell_reveals_strip() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = auto_hide_app(&dir);
-        hide_strip(&mut app);
+        hide_strip(&mut app, Instant::now());
         let edge = edge_point(&app);
         let before = Instant::now();
         let _ = app.update(Message::CursorMoved(edge));
@@ -6259,11 +6268,11 @@ mod tests {
 
         // Leaving the edge zone early resets the dwell.
         let _ = app.update(Message::CursorMoved(Point::new(100.0, 100.0)));
-        hide_strip(&mut app);
+        let t = hide_strip(&mut app, t);
         let _ = app.update(Message::CursorMoved(edge));
         let _ = app.update(Message::CursorMoved(Point::new(100.0, edge.y)));
         assert_eq!(app.auto_hide.next_deadline(), None);
-        run_for(&mut app, Instant::now(), 500);
+        run_for(&mut app, t, 500);
         assert!(app.auto_hide.is_hidden());
     }
 
@@ -6274,7 +6283,7 @@ mod tests {
         let _ = app.update(Message::BarClicked(0));
         let note = app.note_target_rect();
         let _ = app.update(Message::CursorMoved(note.center()));
-        let t = hide_strip(&mut app);
+        let t = hide_strip(&mut app, Instant::now());
         assert!(app.note_open());
         // The note stays where it is, fully usable.
         assert_eq!(app.note_frame().map(|f| f.rect), Some(note));
@@ -6320,7 +6329,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (app, ids) = app_with_notes(&dir, &[("Plain", ""), (DUE_TITLE, "")]);
         let mut app = with_auto_hide(app);
-        hide_strip(&mut app);
+        hide_strip(&mut app, Instant::now());
         let _ = app.update(Message::ReminderTick);
         assert!(app.pulsing.contains(&ids[1]));
         assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
@@ -6338,10 +6347,56 @@ mod tests {
     }
 
     #[test]
+    fn auto_hide_toggle_skips_other_settings_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        // With a window id, the fall-through would return the tray and
+        // dock tasks (and sync the hotkey).
+        app.window_id = Some(window::Id::unique());
+        let task = app.handle(Message::SettingToggled(SettingToggle::AutoHide));
+        assert_eq!(task.units(), 0, "the toggle ran other settings code");
+        let other = app.handle(Message::SettingToggled(SettingToggle::DockIcon));
+        assert!(other.units() > 0, "control: other toggles do apply");
+    }
+
+    #[test]
+    fn wake_is_scheduled_once_per_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        hide_strip(&mut app, Instant::now());
+        let _ = app.update(Message::CursorMoved(edge_point(&app)));
+        let deadline = app.auto_hide.next_deadline().expect("no dwell started");
+        assert_eq!(app.auto_hide_wake, Some(deadline));
+        for _ in 0..3 {
+            let _ = app.update(Message::CursorMoved(edge_point(&app)));
+            let _ = app.update(Message::CursorPolled(Some(edge_point(&app))));
+            assert_eq!(app.auto_hide.next_deadline(), Some(deadline));
+            assert_eq!(app.auto_hide_wake, Some(deadline), "wake rescheduled");
+        }
+        // The wake itself clears it.
+        let _ = app.handle(Message::AutoHideWake(deadline));
+        assert_eq!(app.auto_hide_wake, None);
+    }
+
+    #[test]
+    fn stale_file_hover_clears_on_cursor_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        let _ = app.update(Message::FileHovered);
+        let t = run_for(&mut app, Instant::now(), 2000);
+        assert_eq!(app.auto_hide.offset(), 0.0, "hid under a file hover");
+        // The drag ended without an event; the next cursor move shows it.
+        let _ = app.update(Message::CursorMoved(Point::new(100.0, 100.0)));
+        assert!(!app.file_hover);
+        run_for(&mut app, t, 1200);
+        assert!(app.auto_hide.is_hidden(), "stuck shown");
+    }
+
+    #[test]
     fn hotkey_reveals_strip() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = auto_hide_app(&dir);
-        hide_strip(&mut app);
+        hide_strip(&mut app, Instant::now());
         let _ = app.update(Message::HotkeyPressed);
         assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
         let t = run_for(&mut app, Instant::now(), 300);
@@ -6357,10 +6412,13 @@ mod tests {
             cmd_key_on("n", keyboard::key::Code::KeyN),
             Message::TrayMenu("new".into()),
             Message::TrayMenu("settings".into()),
+            Message::TrayMenu("clip".into()),
             Message::AddNote,
         ] {
             let _ = app.update(Message::CloseSettings);
             let _ = app.update(Message::ClosePanel);
+            // An empty clipboard's hint (expiry message not delivered here).
+            app.clipboard_empty_at = None;
             let t = run_for(&mut app, Instant::now(), 400);
             run_for(&mut app, t, 1200);
             assert!(app.auto_hide.is_hidden());
@@ -6377,14 +6435,14 @@ mod tests {
     fn tray_hide_overrides_auto_hide() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = auto_hide_app(&dir);
-        hide_strip(&mut app);
+        let t = hide_strip(&mut app, Instant::now());
         let edge = edge_point(&app);
         let _ = app.update(Message::TrayMenu("toggle".into()));
         assert!(!app.visible);
         // Fully hidden: no edge zone, no reveal.
         assert!(!app.is_interactive(edge));
         let _ = app.update(Message::CursorMoved(edge));
-        run_for(&mut app, Instant::now(), 1000);
+        let t = run_for(&mut app, t, 1000);
         assert!(!app.visible);
         assert!(!app.is_interactive(edge));
         // Show brings the strip back, then auto-hide applies again.
@@ -6392,20 +6450,20 @@ mod tests {
         let _ = app.update(Message::CursorMoved(Point::new(100.0, 100.0)));
         assert!(app.visible);
         assert_eq!(app.auto_hide.offset(), 0.0);
-        hide_strip(&mut app);
+        hide_strip(&mut app, t);
     }
 
     #[test]
     fn turning_auto_hide_off_reveals() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = auto_hide_app(&dir);
-        hide_strip(&mut app);
+        let t = hide_strip(&mut app, Instant::now());
         let _ = app.update(Message::SettingToggled(SettingToggle::AutoHide));
         assert!(!app.settings.settings().window.auto_hide);
         assert_eq!(app.auto_hide.offset(), 0.0);
         assert_eq!(app.strip_x_offset(), 0.0);
         assert!(app.is_interactive(app.strip_layout().bars[0].center()));
-        run_for(&mut app, Instant::now(), 2000);
+        run_for(&mut app, t, 2000);
         assert_eq!(app.auto_hide.offset(), 0.0);
     }
 
@@ -6421,7 +6479,7 @@ mod tests {
         let open = app.settings.settings().open_width();
         assert_eq!(app.window_width(false), STRIP_WIDTH);
         assert_eq!(app.window_width(true), open);
-        hide_strip(&mut app);
+        hide_strip(&mut app, Instant::now());
         assert_eq!(app.window_width(false), EDGE_SLIVER);
         assert_eq!(app.window_width(true), open, "passthrough stays wide");
 
@@ -6446,7 +6504,7 @@ mod tests {
     fn sliver_width_restored_once_revealing() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = auto_hide_app(&dir);
-        let t = hide_strip(&mut app);
+        let t = hide_strip(&mut app, Instant::now());
         dock_without_passthrough(&mut app);
         let entered = t.max(Instant::now());
         let _ = app.update(Message::CursorMoved(edge_point(&app)));
@@ -6469,7 +6527,7 @@ mod tests {
         let _ = app.update(Message::BarClicked(0));
         let note = app.note_target_rect();
         let _ = app.update(Message::CursorMoved(note.center()));
-        hide_strip(&mut app);
+        hide_strip(&mut app, Instant::now());
         assert!(app.note_open());
         let open = app.settings.settings().open_width();
         assert_eq!(app.window_width(false), open);
@@ -6511,7 +6569,7 @@ mod tests {
     fn sliver_edge_requires_band() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = auto_hide_app(&dir);
-        hide_strip(&mut app);
+        hide_strip(&mut app, Instant::now());
         dock_without_passthrough(&mut app);
         let mid = edge_point(&app).y;
         assert!(app.in_edge(Point::new(1.0, mid)));

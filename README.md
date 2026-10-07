@@ -27,7 +27,7 @@
 - **Auto-hide:** off by default, switch it on in Settings → Window. The strip then slides off the right edge 0.8 s after the cursor leaves the strip, its peek or the undo toast. To bring it back, hold the cursor against the right screen edge where the strip sits for about 0.15 s. The setting is saved, but the strip is always shown when the app starts.
   - **Stays shown:** while a search, settings or export panel is open, during a bar or file drag, while the undo toast or the "Clipboard is empty" hint shows, and after a reminder fires. A fired reminder slides the strip in and it stays until you open that note.
   - **Open notes:** an open note does not keep the strip shown. The strip can slide away while the note stays open and usable.
-  - **Other ways back:** the global hotkey, the tray's **New Note**, **New Note from Clipboard**, **Search…** and **Settings…**, and Cmd/Ctrl+N and Cmd/Ctrl+F.
+  - **Other ways back:** the global hotkey, the tray's **New Note**, **New Note from Clipboard**, **Search…**, **Settings…** and **Export…**, and Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+,.
   - **Tray Hide:** **Hide Notes** still hides everything, and the edge does nothing until you choose **Show**.
   - **On Linux:** while the strip is hidden, the window shrinks to a 2 px sliver at the screen edge. Move the cursor into it to reveal the strip.
 
