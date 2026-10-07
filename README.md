@@ -97,7 +97,7 @@ Notes are written in Markdown plus a few color and size tags. An open note shows
 | Font size | `{size:20}text{/}` (8–48) |
 | Literal brace | `\{` |
 
-- **Color names:** `coral`, `rose`, `blush`, `peach`, `tangerine`, `amber`, `lemon`, `sand`, `lime`, `sage`, `mint`, `teal`, `aqua`, `sky`, `cornflower`, `periwinkle`, `lavender`, `orchid`, `mocha`, `slate`. They follow your palette in Settings, while hex colors stay fixed.
+- **Color names:** `coral`, `rose`, `blush`, `peach`, `tangerine`, `amber`, `lemon`, `sand`, `lime`, `sage`, `mint`, `teal`, `aqua`, `sky`, `cornflower`, `periwinkle`, `lavender`, `orchid`, `mocha`, `slate`. `coral`, `peach`, `amber`, `mint`, `sky` and `lavender` name your palette's six slots and follow it in Settings; the other names and hex colors stay fixed.
 - **Tags nest:** `{coral}{size:20}big red{/} red{/}`. `{/}` closes the innermost tag, and an unclosed tag ends with its paragraph.
 - **Highlight with `==`:** only when it hugs the text (`==word==`), so `a == b` stays as typed.
 - **Line breaks:** a single newline stays a line break.
@@ -115,7 +115,7 @@ Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies l
 | Notes | Default size, paper tint (lighter/darker than the bar), and how faint the header controls are until you hover |
 | Motion | Animation speed (0.25–3×) |
 | Window | How much of the screen height the strip may use, and **Auto-hide** (off by default, see [The bar strip](#the-bar-strip)) |
-| Palette | Replace any of the 20 note colors from 60 presets. Notes using the old color follow along. |
+| Palette | Replace any of the 6 note colors from 60 presets. Notes using the old color follow along. |
 | Data | **Export…** your notes to one file (see [Export](#export)) |
 
 ### Menu bar / tray

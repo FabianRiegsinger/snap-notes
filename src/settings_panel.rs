@@ -204,7 +204,7 @@ fn palette_section<'a>(
     theme: theme::Theme,
     a: f32,
 ) -> Element<'a, Message> {
-    const PER_ROW: usize = 5;
+    const PER_ROW: usize = 6;
     let mut col = column![group_header(SettingsGroup::Palette, theme, a)].spacing(space(2));
     for (r, chunk) in settings.palette.chunks(PER_ROW).enumerate() {
         let slots = chunk.iter().enumerate().map(|(j, color)| {

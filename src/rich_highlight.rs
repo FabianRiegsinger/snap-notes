@@ -818,8 +818,8 @@ mod tests {
         assert_eq!(style_at(line, 0..1), Style::Marker);
         assert_eq!(style_at(line, 1..9), Style::Plain);
         // A color naming a slot the palette lacks is still markup.
-        let (spans, _) = spans::<&str>("{slate}x", &LineState::default(), &[], &PALETTE[..2]);
-        assert!(spans.contains(&(0..7, Style::Marker)));
+        let (spans, _) = spans::<&str>("{mint}x", &LineState::default(), &[], &PALETTE[..2]);
+        assert!(spans.contains(&(0..6, Style::Marker)));
         assert!(!spans.iter().any(|(_, s)| matches!(s, Style::Color(_))));
     }
 

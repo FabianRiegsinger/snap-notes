@@ -89,6 +89,20 @@ pub const PALETTE: [NoteColor; 20] = [
     NoteColor::new(0.467, 0.533, 0.600), // Slate #778899
 ];
 
+/// Indices into `PALETTE` of the default palette's six colors.
+pub const DEFAULT_SLOTS: [usize; 6] = [0, 3, 5, 10, 13, 16];
+
+/// The default palette new notes and the color bubble's presets pick from:
+/// Coral, Peach, Amber, Mint, Sky and Lavender.
+pub const DEFAULT_PALETTE: [NoteColor; 6] = [
+    PALETTE[DEFAULT_SLOTS[0]],
+    PALETTE[DEFAULT_SLOTS[1]],
+    PALETTE[DEFAULT_SLOTS[2]],
+    PALETTE[DEFAULT_SLOTS[3]],
+    PALETTE[DEFAULT_SLOTS[4]],
+    PALETTE[DEFAULT_SLOTS[5]],
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Note {
     pub id: Uuid,
@@ -240,6 +254,18 @@ mod tests {
                 "{} not documented",
                 color.to_hex()
             );
+        }
+    }
+
+    #[test]
+    fn default_palette_is_six_named_colors_of_the_palette() {
+        let hexes: Vec<String> = DEFAULT_PALETTE.iter().map(|c| c.to_hex()).collect();
+        assert_eq!(
+            hexes,
+            ["#FF6B6B", "#FFA07A", "#FFD93D", "#6BCB77", "#45B7D1", "#B983FF"]
+        );
+        for (color, slot) in DEFAULT_PALETTE.iter().zip(DEFAULT_SLOTS) {
+            assert_eq!(*color, PALETTE[slot]);
         }
     }
 

@@ -1,10 +1,12 @@
-use crate::note::NoteColor;
+use crate::note::{NoteColor, DEFAULT_SLOTS, PALETTE};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 
-/// Palette slot used by the `==text==` highlight shorthand.
-const HIGHLIGHT_SLOT: usize = 5;
+/// Palette slot used by the `==text==` highlight shorthand: amber.
+const HIGHLIGHT_SLOT: usize = 2;
 
-/// Tag color names, in palette slot order.
+/// Tag color names, in `PALETTE` order. The six the palette holds (see
+/// `DEFAULT_SLOTS`) name its slots and follow the user's palette; the others
+/// always show their `PALETTE` color.
 pub const COLOR_NAMES: [&str; 20] = [
     "coral",
     "rose",
@@ -105,10 +107,18 @@ fn resolve_color(name: &str, palette: &[NoteColor]) -> Option<Option<NoteColor>>
     if name.starts_with('#') {
         return NoteColor::parse_hex(name).map(Some);
     }
-    COLOR_NAMES
+    let index = COLOR_NAMES
         .iter()
-        .position(|n| n.eq_ignore_ascii_case(name))
-        .map(|slot| palette.get(slot).copied())
+        .position(|n| n.eq_ignore_ascii_case(name))?;
+    Some(match DEFAULT_SLOTS.iter().position(|&i| i == index) {
+        Some(slot) => palette.get(slot).copied(),
+        None => Some(PALETTE[index]),
+    })
+}
+
+/// The tag name of palette slot `slot` (the last slot's for any beyond it).
+fn slot_name(slot: usize) -> &'static str {
+    COLOR_NAMES[DEFAULT_SLOTS[slot.min(DEFAULT_SLOTS.len() - 1)]]
 }
 
 /// Parses the inside of a `{...}` tag; `None` means it is not a tag.
@@ -781,7 +791,7 @@ pub enum Format {
     Italic,
     Strike,
     Code,
-    /// Palette slot, written as its `COLOR_NAMES` tag.
+    /// Palette slot, written as its tag name.
     Color(usize),
     Highlight,
     Size(f32),
@@ -840,10 +850,7 @@ pub fn wrap_selection(
         Format::Strike => ("~~".to_string(), "~~".to_string()),
         Format::Code => ("`".to_string(), "`".to_string()),
         Format::Highlight => ("==".to_string(), "==".to_string()),
-        Format::Color(slot) => (
-            format!("{{{}}}", COLOR_NAMES[slot.min(COLOR_NAMES.len() - 1)]),
-            "{/}".to_string(),
-        ),
+        Format::Color(slot) => (format!("{{{}}}", slot_name(slot)), "{/}".to_string()),
         Format::Size(size) => (format!("{{size:{size}}}"), "{/}".to_string()),
         Format::Link => ("[".to_string(), "]()".to_string()),
     };
@@ -907,7 +914,7 @@ pub fn insert_block(content: &str, offset: usize, block: &str) -> (String, usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::note::PALETTE;
+    use crate::note::{DEFAULT_PALETTE, PALETTE};
 
     #[test]
     fn task_progress_counts_real_tasks() {
@@ -1080,18 +1087,31 @@ mod tests {
 
     #[test]
     fn color_tag_uses_current_slot() {
-        let mut palette = PALETTE;
+        let mut palette = DEFAULT_PALETTE;
         palette[0] = PALETTE[13];
-        let doc = parse("{coral}hot{/} cold", &palette);
+        palette[1] = PALETTE[2];
+        let doc = parse("{coral}hot{/} cold {peach}p{/}", &palette);
         assert_eq!(span(&doc, "hot").color, Some(PALETTE[13]));
-        assert_eq!(span(&doc, " cold").color, None);
+        assert_eq!(span(&doc, " cold ").color, None);
+        assert_eq!(span(&doc, "p").color, Some(PALETTE[2]));
+    }
+
+    #[test]
+    fn names_outside_the_palette_keep_their_colors() {
+        // The palette holds six of the twenty named colors; the other
+        // names still show their own color.
+        for palette in [&DEFAULT_PALETTE[..], &[]] {
+            let doc = parse("{rose}r{/}{bg:slate}s{/}", palette);
+            assert_eq!(span(&doc, "r").color, Some(PALETTE[1]));
+            assert_eq!(span(&doc, "s").background, Some(PALETTE[19]));
+        }
     }
 
     #[test]
     fn hex_and_bg_and_size_tags() {
         let doc = parse(
             "{#00FF00}g{/}{bg:sky}h{/}{size:99}big{/}{size:2}tiny{/}",
-            &PALETTE,
+            &DEFAULT_PALETTE,
         );
         assert_eq!(span(&doc, "g").color, NoteColor::parse_hex("#00FF00"));
         assert_eq!(span(&doc, "h").background, Some(PALETTE[13]));
@@ -1101,7 +1121,8 @@ mod tests {
 
     #[test]
     fn highlight_shorthand() {
-        let doc = parse("==hi==", &PALETTE);
+        let doc = parse("==hi==", &DEFAULT_PALETTE);
+        // Amber, as before the palette shrank to six.
         assert_eq!(span(&doc, "hi").background, Some(PALETTE[5]));
     }
 
@@ -1300,6 +1321,7 @@ mod tests {
     fn wrap_color_size_link() {
         let wrapped = |f| wrap_selection("x", 0, 1, f);
         assert_eq!(wrapped(Format::Color(0)).0, "{coral}x{/}");
+        assert_eq!(wrapped(Format::Color(1)).0, "{peach}x{/}");
         assert_eq!(wrapped(Format::Size(20.0)).0, "{size:20}x{/}");
         assert_eq!(wrapped(Format::Highlight).0, "==x==");
         assert_eq!(wrapped(Format::Strike).0, "~~x~~");
@@ -1324,7 +1346,7 @@ mod tests {
         assert_eq!(wrap_selection("ab", 2, 0, Format::Bold).0, "**ab**");
         assert_eq!(
             wrap_selection("a", 0, 1, Format::Color(99)).0,
-            "{slate}a{/}"
+            "{lavender}a{/}"
         );
         assert_eq!(offset_of("ab\ncd", 9, 0), 5);
         assert_eq!(offset_of("ab\ncd", 0, 99), 2);

@@ -2,7 +2,7 @@
 
 use crate::app::{NOTE_GAP, NOTE_MARGIN};
 use crate::bar_strip::STRIP_WIDTH;
-use crate::note::{NoteColor, PALETTE};
+use crate::note::{NoteColor, DEFAULT_PALETTE, PALETTE};
 use crate::resize::MAX_NOTE_WIDTH;
 
 use serde::Serialize;
@@ -138,7 +138,7 @@ impl Default for Settings {
             notes: NoteSettings::default(),
             motion: MotionSettings::default(),
             window: WindowSettings::default(),
-            palette: PALETTE.to_vec(),
+            palette: DEFAULT_PALETTE.to_vec(),
             app: AppSettings::default(),
         }
     }
@@ -377,18 +377,11 @@ impl Settings {
             settings.notes.size = NoteSettings::default().size;
         }
         if let Some(entries) = value.get("palette").and_then(|p| p.as_array()) {
-            if entries.len() == PALETTE.len() {
-                settings.palette = entries
-                    .iter()
-                    .zip(PALETTE)
-                    .map(|(entry, default)| {
-                        entry
-                            .as_str()
-                            .and_then(NoteColor::parse_hex)
-                            .unwrap_or(default)
-                    })
-                    .collect();
-            }
+            let saved: Vec<Option<NoteColor>> = entries
+                .iter()
+                .map(|entry| entry.as_str().and_then(NoteColor::parse_hex))
+                .collect();
+            settings.palette = migrate_palette(&saved);
         }
         let app = value.get("app");
         for (field, target) in [
@@ -511,11 +504,11 @@ impl Settings {
         let changes = self
             .palette
             .iter()
-            .zip(PALETTE)
-            .filter(|(old, _)| !PALETTE.contains(old))
+            .zip(DEFAULT_PALETTE)
+            .filter(|(old, _)| !DEFAULT_PALETTE.contains(old))
             .map(|(old, new)| (*old, new))
             .collect();
-        self.palette = PALETTE.to_vec();
+        self.palette = DEFAULT_PALETTE.to_vec();
         changes
     }
 
@@ -523,6 +516,21 @@ impl Settings {
     pub fn open_width(&self) -> f32 {
         STRIP_WIDTH + NOTE_GAP + MAX_NOTE_WIDTH + NOTE_MARGIN
     }
+}
+
+/// The palette for a saved one (`None` for an entry that isn't a color).
+/// The palette used to hold 20 colors and now holds six: the old default
+/// becomes the new one; any other keeps its first six, and missing or bad
+/// entries take the default's color for their slot. Notes keep their colors.
+fn migrate_palette(saved: &[Option<NoteColor>]) -> Vec<NoteColor> {
+    if saved.len() == PALETTE.len() && saved.iter().zip(PALETTE).all(|(s, p)| *s == Some(p)) {
+        return DEFAULT_PALETTE.to_vec();
+    }
+    DEFAULT_PALETTE
+        .iter()
+        .enumerate()
+        .map(|(slot, default)| saved.get(slot).copied().flatten().unwrap_or(*default))
+        .collect()
 }
 
 pub struct SettingsStore {
@@ -648,7 +656,7 @@ pub const PRESETS: [NoteColor; 60] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::note::PALETTE;
+    use crate::note::{DEFAULT_PALETTE, PALETTE};
 
     #[test]
     fn defaults_match_current_constants() {
@@ -668,7 +676,7 @@ mod tests {
         );
         assert_eq!(s.motion.speed, 1.0);
         assert_eq!(s.window.height_fraction, 0.9);
-        assert_eq!(s.palette, PALETTE.to_vec());
+        assert_eq!(s.palette, DEFAULT_PALETTE.to_vec());
     }
 
     #[test]
@@ -788,17 +796,20 @@ mod tests {
     #[test]
     fn replace_palette_color_returns_old() {
         let mut s = Settings::default();
-        assert_eq!(s.replace_palette_color(2, PRESETS[0]), Some(PALETTE[2]));
+        assert_eq!(
+            s.replace_palette_color(2, PRESETS[0]),
+            Some(DEFAULT_PALETTE[2])
+        );
         assert_eq!(s.palette[2], PRESETS[0]);
-        assert_eq!(s.replace_palette_color(20, PRESETS[0]), None);
+        assert_eq!(s.replace_palette_color(6, PRESETS[0]), None);
     }
 
     #[test]
     fn reset_palette_reports_changed_slots() {
         let mut s = Settings::default();
         s.replace_palette_color(1, PRESETS[5]);
-        assert_eq!(s.reset_palette(), vec![(PRESETS[5], PALETTE[1])]);
-        assert_eq!(s.palette, PALETTE.to_vec());
+        assert_eq!(s.reset_palette(), vec![(PRESETS[5], DEFAULT_PALETTE[1])]);
+        assert_eq!(s.palette, DEFAULT_PALETTE.to_vec());
         assert!(s.reset_palette().is_empty());
     }
 
@@ -817,9 +828,35 @@ mod tests {
         let json = serde_json::json!({ "palette": hexes }).to_string();
         let s = Settings::from_json(&json);
         assert_eq!(s.palette[2], PRESETS[2]);
-        assert_eq!(s.palette[3], PALETTE[3]);
+        assert_eq!(s.palette[3], DEFAULT_PALETTE[3]);
         let short = Settings::from_json(r##"{"palette":["#FFF"]}"##);
-        assert_eq!(short.palette, PALETTE.to_vec());
+        assert_eq!(short.palette, DEFAULT_PALETTE.to_vec());
+    }
+
+    #[test]
+    fn old_default_palette_becomes_the_new_six() {
+        let hexes: Vec<String> = PALETTE.iter().map(|c| c.to_hex()).collect();
+        let s = Settings::from_json(&serde_json::json!({ "palette": hexes }).to_string());
+        assert_eq!(s.palette, DEFAULT_PALETTE.to_vec());
+    }
+
+    #[test]
+    fn custom_palette_keeps_its_first_six() {
+        let hexes: Vec<String> = PRESETS[..20].iter().map(|c| c.to_hex()).collect();
+        let s = Settings::from_json(&serde_json::json!({ "palette": hexes }).to_string());
+        assert_eq!(s.palette, PRESETS[..6].to_vec());
+        // A palette saved after the migration loads as it is.
+        let again = Settings::from_json(&serde_json::to_string(&s).unwrap());
+        assert_eq!(again.palette, PRESETS[..6].to_vec());
+    }
+
+    #[test]
+    fn short_palette_is_padded_from_the_default() {
+        let hexes = [PRESETS[0].to_hex(), PRESETS[1].to_hex()];
+        let s = Settings::from_json(&serde_json::json!({ "palette": hexes }).to_string());
+        let mut want = vec![PRESETS[0], PRESETS[1]];
+        want.extend_from_slice(&DEFAULT_PALETTE[2..]);
+        assert_eq!(s.palette, want);
     }
 
     #[test]
@@ -831,8 +868,8 @@ mod tests {
     fn replacing_a_shared_color_leaves_its_notes_alone() {
         let mut s = Settings::default();
         let (a, b) = (PRESETS[0], PRESETS[1]);
-        assert_eq!(s.replace_palette_color(1, a), Some(PALETTE[1]));
-        assert_eq!(s.replace_palette_color(3, a), Some(PALETTE[3]));
+        assert_eq!(s.replace_palette_color(1, a), Some(DEFAULT_PALETTE[1]));
+        assert_eq!(s.replace_palette_color(3, a), Some(DEFAULT_PALETTE[3]));
         // Slot 1 still uses `a`, so its notes must keep it.
         assert_eq!(s.replace_palette_color(3, b), None);
         assert_eq!(s.palette[1], a);
@@ -842,7 +879,7 @@ mod tests {
     #[test]
     fn reset_palette_skips_colors_still_in_defaults() {
         let mut s = Settings::default();
-        s.replace_palette_color(0, PALETTE[5]);
+        s.replace_palette_color(0, DEFAULT_PALETTE[5]);
         assert!(s.reset_palette().is_empty());
     }
 
