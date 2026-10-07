@@ -36,6 +36,8 @@ winres = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+# A software renderer, to lay out views in tests.
+iced_tiny_skia = "0.14"
 ttf-parser = "0.25"
 
 [profile.release]

@@ -214,7 +214,20 @@ pub enum Message {
     /// The file dialog opened for the note with this id returned; ignored
     /// unless that note is still the open one.
     ImagePicked(Uuid, Option<PathBuf>),
+    /// A preset in the color bubble: recolors the open note and closes it.
     ColorChosen(NoteColor),
+    /// A press or drag on the bubble's color wheel: recolors the open note
+    /// at once and keeps the bubble open.
+    ColorAdjusted(NoteColor),
+    /// The bubble's hex field changed; a valid color applies at once.
+    ColorHexEdited(String),
+    /// Enter in the hex field.
+    ColorHexSubmitted,
+    /// Esc or a press outside the bubble.
+    CloseColorBubble,
+    /// Where the bubble's card is on screen, so presses on it never fall
+    /// through the window.
+    ColorBubbleMoved(Rectangle),
     DragStart(usize, f32),
     DragMove(f32),
     DragEnd,
@@ -348,6 +361,10 @@ pub struct App {
     /// Fades the toolbar and body in after switching edit/render mode.
     mode_fade: Morph,
     color_picker_open: bool,
+    /// The color bubble's hex field, as typed.
+    color_hex: String,
+    /// The bubble's card on screen, as last reported while open.
+    color_bubble_rect: Option<Rectangle>,
     text_color_picker_open: bool,
     note_hovered: bool,
     drag: Option<DragState>,
@@ -576,6 +593,8 @@ impl App {
             collapsing: None,
             mode_fade,
             color_picker_open: false,
+            color_hex: String::new(),
+            color_bubble_rect: None,
             text_color_picker_open: false,
             note_hovered: false,
             drag: None,
@@ -1146,6 +1165,13 @@ impl App {
             Message::ToggleColorPicker => {
                 self.color_picker_open = !self.color_picker_open;
                 self.text_color_picker_open = false;
+                if self.color_picker_open {
+                    self.color_bubble_rect = None;
+                    let notes = self.store.notes();
+                    if let Some(note) = notes.iter().find(|n| Some(n.id) == self.active_note) {
+                        self.color_hex = note.color.to_hex();
+                    }
+                }
             }
             Message::ToggleTextColorPicker => {
                 self.text_color_picker_open = !self.text_color_picker_open;
@@ -1205,14 +1231,26 @@ impl App {
                 });
             }
             Message::ColorChosen(color) => {
-                if let Some(id) = self.active_note {
-                    if let Some(note) = self.store.note_mut(id) {
-                        note.color = color;
-                        note.updated_at = chrono::Utc::now();
-                    }
-                    self.store.mark_dirty();
-                    self.color_picker_open = false;
+                self.recolor_open_note(color);
+                self.color_hex = color.to_hex();
+                self.color_picker_open = false;
+            }
+            Message::ColorAdjusted(color) => {
+                self.recolor_open_note(color);
+                self.color_hex = color.to_hex();
+            }
+            Message::ColorHexEdited(text) => {
+                // Anything but a whole color only changes the field.
+                if let Some(color) = crate::color_picker::parse_hex_field(&text) {
+                    self.recolor_open_note(color);
                 }
+                self.color_hex = text;
+            }
+            Message::ColorHexSubmitted | Message::CloseColorBubble => {
+                self.color_picker_open = false;
+            }
+            Message::ColorBubbleMoved(rect) => {
+                self.color_bubble_rect = Some(rect);
             }
             Message::PeekTick(now) => {
                 self.update_hover();
@@ -1451,6 +1489,9 @@ impl App {
                     _ => {}
                 }
                 match key.as_ref() {
+                    keyboard::Key::Named(Named::Escape) if self.color_picker_open => {
+                        self.color_picker_open = false
+                    }
                     keyboard::Key::Named(Named::Escape) if self.search_morph.is_opening() => {
                         self.close_search()
                     }
@@ -1626,6 +1667,7 @@ impl App {
                         copied: self.copied_for(note.id),
                         pinned: self.top_pinned(note),
                         color_picker_open: self.color_picker_open,
+                        color_hex: &self.color_hex,
                         text_color_picker_open: self.text_color_picker_open,
                         hovered: self.note_hovered,
                         dragging: self.note_drag.is_some(),
@@ -1836,6 +1878,16 @@ impl App {
         }
         self.animating = true;
         self.dock_window()
+    }
+
+    /// Gives the open note `color`; it is saved after the usual debounce.
+    fn recolor_open_note(&mut self, color: NoteColor) {
+        let Some(note) = self.active_note.and_then(|id| self.store.note_mut(id)) else {
+            return;
+        };
+        note.color = color;
+        note.updated_at = chrono::Utc::now();
+        self.store.mark_dirty();
     }
 
     /// Wraps the editor selection in `format`'s markup, writes the result
@@ -2446,7 +2498,13 @@ impl App {
         } else {
             self.in_use_area(position)
         };
+        // The color bubble can reach beyond the note.
+        let over_bubble = self.color_picker_open
+            && self
+                .color_bubble_rect
+                .is_some_and(|rect| rect.expand(8.0).contains(position));
         strip_used
+            || over_bubble
             || over_panel(self.note_frame())
             || over_panel(self.settings_frame())
             || over_panel(self.search_frame())
@@ -4907,6 +4965,101 @@ mod tests {
         for t in [0.3, 0.5, 2.0, -0.1] {
             assert_eq!(add_shake(t), 0.0, "t {t}");
         }
+    }
+
+    #[test]
+    fn color_button_toggles_the_bubble_with_the_note_color_as_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let hex = app.store.notes()[0].color.to_hex();
+        let _ = app.update(Message::ToggleColorPicker);
+        assert!(app.color_picker_open);
+        assert_eq!(app.color_hex, hex);
+        let _ = app.update(Message::ToggleColorPicker);
+        assert!(!app.color_picker_open);
+    }
+
+    #[test]
+    fn wheel_recolors_the_note_and_its_bar_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let _ = app.update(Message::ToggleColorPicker);
+        assert!(!app.store.is_dirty());
+        let color = NoteColor::new(0.2, 0.4, 0.8);
+        let _ = app.update(Message::ColorAdjusted(color));
+        // The bar shows the note's color straight from the store.
+        let top = app.entries()[0].top;
+        assert_eq!(app.store.notes()[top].color, color);
+        assert_eq!(app.entries_synced, app.store.revision());
+        assert!(app.store.is_dirty(), "saved through the debounce");
+        assert!(app.color_picker_open, "dragging keeps the bubble open");
+        assert_eq!(app.color_hex, color.to_hex());
+    }
+
+    #[test]
+    fn hex_field_applies_valid_colors_as_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let _ = app.update(Message::ToggleColorPicker);
+        let _ = app.update(Message::ColorHexEdited("45b7d1".into()));
+        assert_eq!(app.store.notes()[0].color.to_hex(), "#45B7D1");
+        // The field keeps what was typed.
+        assert_eq!(app.color_hex, "45b7d1");
+        let _ = app.update(Message::ColorHexEdited("#12".into()));
+        assert_eq!(app.store.notes()[0].color.to_hex(), "#45B7D1");
+        assert_eq!(app.color_hex, "#12");
+        assert!(app.color_picker_open);
+        let _ = app.update(Message::ColorHexSubmitted);
+        assert!(!app.color_picker_open);
+    }
+
+    #[test]
+    fn preset_recolors_and_closes_the_bubble() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let _ = app.update(Message::ToggleColorPicker);
+        let mint = crate::note::DEFAULT_PALETTE[3];
+        let _ = app.update(Message::ColorChosen(mint));
+        assert_eq!(app.store.notes()[0].color, mint);
+        assert_eq!(app.color_hex, mint.to_hex());
+        assert!(!app.color_picker_open);
+    }
+
+    #[test]
+    fn escape_closes_the_bubble_before_the_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let _ = app.update(Message::ToggleColorPicker);
+        let _ = app.update(escape());
+        assert!(!app.color_picker_open);
+        assert!(app.morph.is_opening(), "the note stays open");
+        assert!(app.active_note.is_some());
+    }
+
+    #[test]
+    fn press_outside_closes_the_bubble() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let _ = app.update(Message::ToggleColorPicker);
+        let _ = app.update(Message::CloseColorBubble);
+        assert!(!app.color_picker_open);
+        assert!(app.active_note.is_some());
+    }
+
+    #[test]
+    fn the_bubble_card_takes_presses_while_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let note = app.note_frame().unwrap().rect;
+        // The card sits above the note, outside its frame.
+        let card = Rectangle::new(Point::new(note.x, note.y - 200.0), Size::new(220.0, 150.0));
+        let on_card = card.center();
+        assert!(!app.is_interactive(on_card));
+        let _ = app.update(Message::ToggleColorPicker);
+        let _ = app.update(Message::ColorBubbleMoved(card));
+        assert!(app.is_interactive(on_card));
+        let _ = app.update(Message::CloseColorBubble);
+        assert!(!app.is_interactive(on_card));
     }
 
     #[test]

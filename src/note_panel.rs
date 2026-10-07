@@ -1,5 +1,6 @@
 use crate::animation::ease_out_cubic;
 use crate::app::Message;
+use crate::color_bubble::color_bubble;
 use crate::color_picker::color_picker;
 use crate::command_passthrough::command_passthrough;
 use crate::icons::{icon, Icon};
@@ -116,6 +117,8 @@ pub struct PostIt<'a> {
     /// The note (its stack's top) is pinned; the pin button draws at full ink.
     pub pinned: bool,
     pub color_picker_open: bool,
+    /// The color bubble's hex field, as typed.
+    pub color_hex: &'a str,
     /// The toolbar's text color grid is open.
     pub text_color_picker_open: bool,
     pub hovered: bool,
@@ -379,6 +382,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         copied,
         pinned,
         color_picker_open,
+        color_hex,
         text_color_picker_open,
         hovered,
         dragging,
@@ -448,6 +452,13 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 border: border::rounded(RADIUS_CONTROL),
                 ..Default::default()
             },
+        );
+        // The color bubble opens above the button on its own layer, so the
+        // header and body stay put.
+        let color_btn = color_bubble(
+            color_btn,
+            color_picker_open.then(|| color_picker(note.color, palette, color_hex, theme)),
+            theme,
         );
 
         // The reminder's state right of the title: bell and time, or why
@@ -624,12 +635,6 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         let divider = container(column![hairline, fade]).padding(Padding::ZERO.left(14).right(14));
 
         let mut col = column![grip, header, divider];
-        if color_picker_open {
-            col = col.push(
-                container(color_picker(&note.color, palette, theme))
-                    .padding(Padding::ZERO.left(14).bottom(6)),
-            );
-        }
         if editing {
             col = col.push(toolbar(
                 palette,
@@ -909,6 +914,114 @@ mod tests {
             assert!(total <= available.max(EDITOR_PADDING_Y), "{available}");
         }
         assert_eq!(editor_min_height(264.8) + EDITOR_PADDING_Y, 264.8);
+    }
+
+    /// Lays out the open note at `top` in an 800 × 900 window, with the
+    /// color bubble open or not. Returns every node's bounds and the
+    /// bubble's card, if any shows.
+    fn note_layout(top: f32, bubble_open: bool) -> (Vec<Rectangle>, Option<Rectangle>) {
+        use iced::advanced::layout::{self, Layout};
+        use iced::advanced::widget::Tree;
+
+        let window = Size::new(800.0, 900.0);
+        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(TEXT_SM),
+        ));
+        let note = Note::new(crate::note::PALETTE[0]);
+        let content = text_editor::Content::with_text("hello");
+        let doc = crate::rich::parse("hello", &crate::note::DEFAULT_PALETTE);
+        let broken = HashSet::new();
+        let view = post_it(PostIt {
+            note: &note,
+            theme: theme::Theme::default(),
+            palette: &crate::note::DEFAULT_PALETTE,
+            paper_tint: 0.0,
+            idle_control_alpha: 0.3,
+            content: &content,
+            editing: false,
+            doc: &doc,
+            data_dir: Path::new("."),
+            broken_images: &broken,
+            size: Size::new(420.0, 320.0),
+            morph_progress: 1.0,
+            content_alpha: 1.0,
+            copied: false,
+            pinned: false,
+            color_picker_open: bubble_open,
+            color_hex: "#FF6B6B",
+            text_color_picker_open: false,
+            hovered: true,
+            dragging: false,
+            mode_fade: 1.0,
+            reminder: reminder::status(&note),
+        });
+        let mut root: Element<'_, Message> =
+            iced::widget::column![Space::new().height(top), view].into();
+        let mut tree = Tree::new(&root);
+        let node = root.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, window),
+        );
+        fn collect(layout: Layout<'_>, out: &mut Vec<Rectangle>) {
+            out.push(layout.bounds());
+            for child in layout.children() {
+                collect(child, out);
+            }
+        }
+        let mut rects = Vec::new();
+        collect(Layout::new(&node), &mut rects);
+        let card = root
+            .as_widget_mut()
+            .overlay(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &Rectangle::with_size(window),
+                Vector::ZERO,
+            )
+            .map(|mut overlay| {
+                // Overlay groups span the window; the card is inside.
+                let node = overlay.as_overlay_mut().layout(&renderer, window);
+                let mut layout = Layout::new(&node);
+                while layout.bounds().size() == window {
+                    layout = layout.children().next().expect("a card");
+                }
+                layout.bounds()
+            });
+        (rects, card)
+    }
+
+    #[test]
+    fn bubble_leaves_the_note_layout_alone() {
+        let (closed, no_card) = note_layout(400.0, false);
+        let (open, card) = note_layout(400.0, true);
+        assert_eq!(no_card, None);
+        assert_eq!(open, closed, "header and body must not move");
+        let card = card.expect("open bubble shows a card");
+        // The color button: 12 px swatch + 5 px padding each side.
+        let button = *closed
+            .iter()
+            .find(|r| r.width == 22.0 && r.height == 22.0)
+            .expect("color button");
+        let tail = crate::color_bubble::TAIL + crate::color_bubble::GAP;
+        assert!(
+            (card.y + card.height + tail - button.y).abs() < 1e-3,
+            "{card:?}"
+        );
+        assert!((card.center_x() - button.center_x()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn bubble_flips_below_at_the_window_top() {
+        let (closed, card) = note_layout(0.0, true);
+        let card = card.expect("open bubble shows a card");
+        let button = closed
+            .iter()
+            .find(|r| r.width == 22.0 && r.height == 22.0)
+            .expect("color button");
+        assert!(card.y > button.y + button.height, "{card:?}");
     }
 
     #[derive(Default)]

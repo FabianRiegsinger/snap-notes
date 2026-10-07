@@ -3570,6 +3570,7 @@ dependencies = [
  "chrono",
  "global-hotkey",
  "iced",
+ "iced_tiny_skia",
  "image",
  "notify-rust",
  "objc2 0.6.4",
