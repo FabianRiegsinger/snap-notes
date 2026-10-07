@@ -10,6 +10,26 @@ pub fn enforce_single_instance() {
 #[cfg(not(target_os = "windows"))]
 pub fn enforce_single_instance() {}
 
+/// Picks a renderer setup that can draw a transparent window. On Windows only
+/// DX12 with a DirectComposition swapchain can; the default HWND swapchain and
+/// Vulkan paint the transparent parts black. Explicit settings in the
+/// environment win.
+#[cfg(target_os = "windows")]
+pub fn prepare_graphics() {
+    for (key, value) in [
+        ("WGPU_BACKEND", "dx12"),
+        ("WGPU_DX12_PRESENTATION_SYSTEM", "Visual"),
+    ] {
+        if std::env::var_os(key).is_none() {
+            // Runs first in `main`, before any other thread exists.
+            std::env::set_var(key, value);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn prepare_graphics() {}
+
 /// Whether the window can let clicks fall through to the apps behind it while
 /// still finding the cursor (see [`cursor_in_window`]). Where it can, the
 /// window keeps one fixed size and never resizes, which avoids flicker.

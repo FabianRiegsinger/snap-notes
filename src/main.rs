@@ -1,3 +1,6 @@
+// No console window next to the app on Windows.
+#![windows_subsystem = "windows"]
+
 mod animation;
 mod app;
 mod autohide;
@@ -39,6 +42,7 @@ use iced::window;
 use iced::{Color, Point, Size, Theme};
 
 fn main() -> iced::Result {
+    platform::prepare_graphics();
     platform::enforce_single_instance();
 
     let mut app = iced::application(App::boot, App::update, App::view);

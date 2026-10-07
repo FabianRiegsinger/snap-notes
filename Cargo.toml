@@ -42,3 +42,8 @@ ttf-parser = "0.25"
 opt-level = "z"
 lto = true
 strip = true
+
+# iced_wgpu 0.14 ignores wgpu's backend options from the environment; the
+# patch honours them so Windows can use a transparent DX12 swapchain.
+[patch.crates-io]
+iced_wgpu = { path = "vendor/iced_wgpu" }
