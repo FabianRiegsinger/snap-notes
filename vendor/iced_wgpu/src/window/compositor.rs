@@ -131,14 +131,18 @@ impl Compositor {
 
                 log::info!("Available alpha modes: {alpha_modes:#?}");
 
+                // snap-notes patch: prefer premultiplied alpha, which the
+                // shaders output. DX12's DirectComposition swapchain lists
+                // post-multiplied (straight) alpha, but DXGI rejects it there,
+                // so the surface failed to configure.
                 let preferred_alpha = if alpha_modes
-                    .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
-                {
-                    wgpu::CompositeAlphaMode::PostMultiplied
-                } else if alpha_modes
                     .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
                 {
                     wgpu::CompositeAlphaMode::PreMultiplied
+                } else if alpha_modes
+                    .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+                {
+                    wgpu::CompositeAlphaMode::PostMultiplied
                 } else {
                     wgpu::CompositeAlphaMode::Auto
                 };
