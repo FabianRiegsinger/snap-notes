@@ -73,7 +73,7 @@ Put a tag in a note's title:
 - **Dimmed bars:** while you type, the bars of notes that don't match dim.
 
 ### Export
-- **Open it:** **Export…** in the Settings group "Data", or in the tray menu.
+- **Open it:** **Export…** in the Settings group "Data" (Application tab), or in the tray menu.
 - **Pick notes:** every note starts checked. The All and None buttons toggle them all.
 - **Format:** `.md` or `.txt`, saved as one file through a save dialog. The suggested name is `snap-notes-YYYY-MM-DD.<ext>`.
 - **Markdown:** each note becomes a `# Title` heading followed by its Markdown. The custom color, size and highlight tags are removed. Single line breaks stay line breaks (as a trailing double space), except in code blocks.
@@ -108,16 +108,18 @@ Notes are written in Markdown plus a few color and size tags. An open note shows
 ### Settings
 Open them from the menu bar/tray icon, the ⚙ slot under 🔍 in the strip (Windows and Linux) or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group except Data has a Reset button. There is no theme setting: dark mode follows the system.
 
-| Group | What you can adjust |
-|---|---|
-| App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey (Cmd/Ctrl+Shift+Space). If it can't be registered (for example, another app uses it), a red line under the toggle says why. On Linux, failures are only logged. |
-| Bars | Width, height and gap |
-| Hover | Magnification, how far it spreads, and the peek delay (0–3 s) |
-| Notes | Default size, paper tint (lighter/darker than the bar), and how faint the header controls are until you hover |
-| Motion | Animation speed (0.25–3×) |
-| Window | How much of the screen height the strip may use, and **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)) |
-| Palette | Replace any of the 6 note colors from 60 presets. Notes using the old color follow along. |
-| Data | **Export…** your notes to one file (see [Export](#export)) |
+The groups are split across two tabs, **Application** and **Styling**. Settings always opens on Application.
+
+| Tab | Group | What you can adjust |
+|---|---|---|
+| Application | App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey (Cmd/Ctrl+Shift+Space). If it can't be registered (for example, another app uses it), a red line under the toggle says why. On Linux, failures are only logged. |
+| Application | Window | How much of the screen height the strip may use, and **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)) |
+| Application | Data | **Export…** your notes to one file (see [Export](#export)) |
+| Styling | Bars | Width, height and gap |
+| Styling | Hover | Magnification, how far it spreads, and the peek delay (0–3 s) |
+| Styling | Notes | Default size, paper tint (lighter/darker than the bar), and how faint the header controls are until you hover |
+| Styling | Motion | Animation speed (0.25–3×) |
+| Styling | Palette | Replace any of the 6 note colors from 60 presets. Notes using the old color follow along. |
 
 ### Menu bar / tray
 On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **New Note from Clipboard**, **Search…**, **Export…**, **Settings…** and **Quit**. Hiding the notes clears the screen completely until you show them again.

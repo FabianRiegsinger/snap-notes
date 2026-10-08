@@ -214,6 +214,41 @@ impl SettingsGroup {
     pub fn resettable(self) -> bool {
         self != SettingsGroup::Data
     }
+
+    /// The settings tab the group is shown on.
+    pub fn tab(self) -> SettingsTab {
+        match self {
+            SettingsGroup::App | SettingsGroup::Window | SettingsGroup::Data => {
+                SettingsTab::Application
+            }
+            SettingsGroup::Bars
+            | SettingsGroup::Hover
+            | SettingsGroup::Notes
+            | SettingsGroup::Motion
+            | SettingsGroup::Palette => SettingsTab::Styling,
+        }
+    }
+}
+
+/// The settings card's tabs; each shows its groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    /// How the app behaves: icons, hotkey, window and export.
+    #[default]
+    Application,
+    /// How the strip and notes look and move.
+    Styling,
+}
+
+impl SettingsTab {
+    pub const ALL: [SettingsTab; 2] = [SettingsTab::Application, SettingsTab::Styling];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Application => "Application",
+            SettingsTab::Styling => "Styling",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -660,6 +695,25 @@ pub const PRESETS: [NoteColor; 60] = [
 mod tests {
     use super::*;
     use crate::note::{DEFAULT_PALETTE, DEFAULT_SLOTS, PALETTE};
+
+    #[test]
+    fn groups_split_into_application_and_styling_tabs() {
+        let on = |tab| -> Vec<_> {
+            SettingsGroup::ALL
+                .into_iter()
+                .filter(|g| g.tab() == tab)
+                .collect()
+        };
+        use SettingsGroup::*;
+        assert_eq!(on(SettingsTab::Application), [App, Window, Data]);
+        assert_eq!(
+            on(SettingsTab::Styling),
+            [Bars, Hover, Notes, Motion, Palette]
+        );
+        assert_eq!(SettingsTab::default(), SettingsTab::Application);
+        let labels = SettingsTab::ALL.map(SettingsTab::label);
+        assert_eq!(labels, ["Application", "Styling"]);
+    }
 
     #[test]
     fn defaults_match_current_constants() {

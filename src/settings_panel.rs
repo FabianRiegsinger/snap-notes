@@ -6,7 +6,7 @@ use crate::color_picker::swatch;
 use crate::icons::{icon, Icon};
 use crate::note_panel::pressable;
 use crate::settings::SettingToggle;
-use crate::settings::{SettingKey, Settings, SettingsGroup, PRESETS};
+use crate::settings::{SettingKey, Settings, SettingsGroup, SettingsTab, PRESETS};
 use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM, TEXT_XS};
 
 use iced::widget::{button, column, container, row, scrollable, slider, text, toggler, Space};
@@ -23,6 +23,8 @@ pub struct SettingsView<'a> {
     pub size: Size,
     pub morph_progress: f32,
     pub content_alpha: f32,
+    /// The tab whose groups the card shows.
+    pub tab: SettingsTab,
     pub selected_slot: Option<usize>,
     /// The menu bar / tray icon exists. Without it the Dock icon is the
     /// only way back into the app, so it can't be turned off.
@@ -240,6 +242,53 @@ fn palette_section<'a>(
     col.into()
 }
 
+/// The tabs under the card's title, splitting its width: the active one in
+/// full ink over a solid underline, the others muted over a faint one.
+fn tab_bar<'a>(active: SettingsTab, theme: theme::Theme, a: f32) -> Element<'a, Message> {
+    let tabs = SettingsTab::ALL.map(|tab| {
+        let on = tab == active;
+        let label = text(tab.label())
+            .size(TEXT_SM)
+            .font(if on {
+                theme::TITLE_FONT
+            } else {
+                theme::BODY_FONT
+            })
+            .color(theme.ink(if on { a } else { 0.55 * a }))
+            .width(Fill)
+            .align_x(iced::alignment::Horizontal::Center);
+        let underline = container(Space::new().width(Fill).height(Fill))
+            .width(Fill)
+            .height(if on { 2.0 } else { 1.0 })
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(theme.ink(if on { 0.8 * a } else { 0.12 * a }).into()),
+                border: border::rounded(1.0),
+                ..Default::default()
+            });
+        let tab_column = column![label, underline]
+            .spacing(space(2))
+            .width(Fill)
+            .align_x(iced::Alignment::Center);
+        pressable(
+            tab_column,
+            Padding::new(0.0).top(space(1)),
+            Message::SettingsTabSelected(tab),
+        )
+        .width(Fill)
+        .style(move |_theme: &Theme, status| button::Style {
+            background: match status {
+                button::Status::Hovered if !on => Some(theme.ink(0.06 * a).into()),
+                button::Status::Pressed => Some(theme.ink(0.12 * a).into()),
+                _ => None,
+            },
+            border: border::rounded(border::top(RADIUS_CONTROL)),
+            ..Default::default()
+        })
+        .into()
+    });
+    row(tabs).into()
+}
+
 /// A solid quad under `content` that casts `shadow`.
 fn solid_layer<'a>(
     content: impl Into<Element<'a, Message>>,
@@ -262,6 +311,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         size,
         morph_progress: t,
         content_alpha: a,
+        tab,
         selected_slot,
         tray_ok,
         dock_forced,
@@ -285,7 +335,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
             .padding(Padding::ZERO.right(space(3)));
         #[cfg(not(any(windows, target_os = "macos")))]
         let _ = (tray_ok, dock_forced, hotkey_error);
-        for group in SettingsGroup::ALL {
+        for group in SettingsGroup::ALL.into_iter().filter(|g| g.tab() == tab) {
             let section = match group {
                 // Only macOS and Windows have the menu bar / tray icon.
                 #[cfg(any(windows, target_os = "macos"))]
@@ -314,10 +364,14 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
             body = body.push(section);
         }
 
-        column![header, scrollable(body).height(Fill)]
-            .spacing(space(3))
-            .padding(Padding::new(space(4)).right(space(1)))
-            .into()
+        column![
+            header,
+            tab_bar(tab, theme, a),
+            scrollable(body).height(Fill)
+        ]
+        .spacing(space(3))
+        .padding(Padding::new(space(4)).right(space(1)))
+        .into()
     };
     paper_card(inner, size, theme, t)
 }

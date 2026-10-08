@@ -20,7 +20,9 @@ use crate::rich::{self, BlockKind, Doc};
 use crate::rich_view;
 use crate::search::{self, Hit};
 use crate::search_panel::{focus_field, search_panel, SearchView};
-use crate::settings::{SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore};
+use crate::settings::{
+    SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore, SettingsTab,
+};
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::{Deleted, NoteStore};
 use crate::strip_model::{self, Entry};
@@ -142,6 +144,7 @@ pub enum Message {
     SettingChanged(SettingKey, f32),
     SettingToggled(SettingToggle),
     ResetGroup(SettingsGroup),
+    SettingsTabSelected(SettingsTab),
     /// Palette slot whose preset grid is open (`None` closes it).
     PaletteSlotSelected(Option<usize>),
     PaletteColorChosen(NoteColor),
@@ -413,6 +416,7 @@ pub struct App {
     settings_morph: Morph,
     /// Gear center when the panel opened; the panel stays centered on it.
     settings_anchor_y: f32,
+    settings_tab: SettingsTab,
     palette_slot: Option<usize>,
     /// The search panel is showing (kept while it folds back into its slot).
     search_open: bool,
@@ -629,6 +633,7 @@ impl App {
             settings_open: false,
             settings_morph,
             settings_anchor_y: 0.0,
+            settings_tab: SettingsTab::default(),
             palette_slot: None,
             search_open: false,
             search_morph,
@@ -716,6 +721,7 @@ impl App {
                     let gear = self.strip_layout().settings_anchor();
                     self.settings_anchor_y = gear.y + gear.height / 2.0;
                     self.settings_open = true;
+                    self.settings_tab = SettingsTab::default();
                     self.palette_slot = None;
                 }
                 self.settings_morph.open();
@@ -809,6 +815,10 @@ impl App {
                     return self.apply_app_visibility();
                 }
                 return self.apply_settings();
+            }
+            Message::SettingsTabSelected(tab) => {
+                self.settings_tab = tab;
+                self.palette_slot = None;
             }
             Message::PaletteSlotSelected(slot) => {
                 self.palette_slot = slot;
@@ -1713,6 +1723,7 @@ impl App {
                     size: rect.size(),
                     morph_progress: self.settings_morph.progress(),
                     content_alpha: frame.content_alpha,
+                    tab: self.settings_tab,
                     selected_slot: self.palette_slot,
                     tray_ok: self.tray_ok,
                     dock_forced: self.tray_failed,
@@ -5280,6 +5291,24 @@ mod tests {
         let _ = app.update(Message::ToggleSettings);
         assert!(app.settings_morph.is_opening());
         assert_eq!(app.settings_anchor_y, 123.0);
+    }
+
+    #[test]
+    fn settings_reopen_on_the_application_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let _ = app.update(Message::ToggleSettings);
+        settle(&mut app);
+        assert_eq!(app.settings_tab, SettingsTab::Application);
+        let _ = app.update(Message::PaletteSlotSelected(Some(0)));
+        let _ = app.update(Message::SettingsTabSelected(SettingsTab::Styling));
+        assert_eq!(app.settings_tab, SettingsTab::Styling);
+        assert_eq!(app.palette_slot, None);
+        let _ = app.update(Message::CloseSettings);
+        settle(&mut app);
+        assert!(!app.settings_open);
+        let _ = app.update(Message::ToggleSettings);
+        assert_eq!(app.settings_tab, SettingsTab::Application);
     }
 
     #[test]
