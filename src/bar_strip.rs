@@ -542,8 +542,9 @@ pub fn toast_rect(strip: &StripLayout, bounds: Rectangle) -> Rectangle {
     chip_rect(bounds, anchor, anchor.center_y(), TOAST.text, TOAST.accent)
 }
 
-/// The strip shows a settings slot only where no tray menu offers Settings.
-pub const SETTINGS_SLOT: bool = !cfg!(any(windows, target_os = "macos"));
+/// The strip shows a settings slot except on macOS, whose menu bar icon is
+/// always in sight. Windows hides tray icons in the overflow by default.
+pub const SETTINGS_SLOT: bool = !cfg!(target_os = "macos");
 
 /// The vertically centered `fraction` of `bounds` the bars are laid out in.
 pub fn band(bounds: Rectangle, fraction: f32) -> Rectangle {

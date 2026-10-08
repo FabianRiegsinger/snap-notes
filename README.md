@@ -106,7 +106,7 @@ Notes are written in Markdown plus a few color and size tags. An open note shows
 - **Older palettes:** the palette now holds six colors. If you had customized it, `coral`, `peach`, `amber`, `mint`, `sky`, `lavender` and `==highlight==` keep your colors; the other 14 names go back to their fixed colors.
 
 ### Settings
-Open them from the menu bar/tray icon or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group except Data has a Reset button. There is no theme setting: dark mode follows the system.
+Open them from the menu bar/tray icon, the ⚙ slot under 🔍 in the strip (Windows and Linux) or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group except Data has a Reset button. There is no theme setting: dark mode follows the system.
 
 | Group | What you can adjust |
 |---|---|
@@ -143,7 +143,8 @@ The Cmd/Ctrl shortcuts also work while you type in a note's title or body or in 
 |---|---|---|---|
 | Bar strip, peek, notes, settings | ✓ | ✓ | ✓ |
 | Click-through around the strip | ✓ | ✓ | The window shrinks to the strip instead |
-| Menu bar / tray icon | ✓ | ✓ | – (the strip has a settings slot instead) |
+| Menu bar / tray icon | ✓ | ✓ | – |
+| Settings slot in the strip | – | ✓ | ✓ |
 | Hide Dock icon / taskbar button | ✓ | ✓ | – |
 | Single instance | – | ✓ | – |
 
