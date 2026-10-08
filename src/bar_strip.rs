@@ -186,13 +186,17 @@ impl StripLayout {
         self.actions_hit_area.y + self.actions_hit_area.height
     }
 
+    /// Whether `pos` is over the Actions control (collapsed slot or expanded row).
+    pub fn over_actions(&self, pos: Point) -> bool {
+        self.actions_hit_area.contains(pos)
+    }
+
     /// What a press at `pos` on one of the slots below the bars does.
+    /// The collapsed Actions slot only expands on hover; presses do nothing
+    /// until New / Search / Settings are showing.
     pub fn slot_message(&self, pos: Point) -> Option<Message> {
         if !self.actions_expanded {
-            return self
-                .actions_hit_area
-                .contains(pos)
-                .then_some(Message::ToggleActions);
+            return None;
         }
         if self.add_hit_area.contains(pos) {
             Some(Message::AddNote)
@@ -200,8 +204,6 @@ impl StripLayout {
             Some(Message::ToggleSearch)
         } else if self.settings_hit_area.contains(pos) {
             Some(Message::ToggleSettings)
-        } else if self.actions_hit_area.contains(pos) {
-            Some(Message::CloseActions)
         } else {
             None
         }
@@ -1468,11 +1470,22 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
 
         match event {
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                if !self.slid() {
+                    let over = self.layout_in(bounds).over_actions(*position);
+                    if over != self.actions_expanded {
+                        shell.publish(Message::ActionsHovered(over));
+                    }
+                } else if self.actions_expanded {
+                    shell.publish(Message::ActionsHovered(false));
+                }
                 if let Some(message) = self.hover_message(bounds, *position) {
                     shell.publish(message);
                 }
             }
             Event::Mouse(mouse::Event::CursorLeft) => {
+                if self.actions_expanded {
+                    shell.publish(Message::ActionsHovered(false));
+                }
                 shell.publish(Message::StripHover(None));
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
@@ -1914,10 +1927,8 @@ mod tests {
         assert!(l
             .actions_hit_area
             .contains(Point::new(2.0, l.actions_button.y + 2.0)));
-        assert!(matches!(
-            l.slot_message(l.actions_button.center()),
-            Some(Message::ToggleActions)
-        ));
+        assert!(l.over_actions(l.actions_button.center()));
+        assert!(l.slot_message(l.actions_button.center()).is_none());
     }
 
     #[test]
@@ -2594,10 +2605,8 @@ mod tests {
         let l = layout(2, |_| 1.0, 900.0, 0.0);
         assert_eq!(l.settings_anchor(), l.actions_button);
         assert_eq!(l.search_anchor(), l.actions_button);
-        assert!(matches!(
-            l.slot_message(l.actions_button.center()),
-            Some(Message::ToggleActions)
-        ));
+        assert!(l.over_actions(l.actions_button.center()));
+        assert!(l.slot_message(l.actions_button.center()).is_none());
     }
 
     #[test]

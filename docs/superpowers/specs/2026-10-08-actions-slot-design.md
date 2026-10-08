@@ -9,10 +9,9 @@ Replace the three strip slots (New, Search, Settings) with one **Actions** contr
 - One Actions slot under the bars on every platform (including macOS).
 - **Collapsed:** hollow slot with the brand mark; tooltip “Actions”.
 - **Expanded:** horizontal row of New (+) / Search / Settings, right-aligned, short gap between them; same hollow/magnify language as today.
-- Click Actions → expand. Click Actions again while open → collapse.
-- Click an action → run it and collapse. Alt/Option on + still means clipboard note.
-- Esc or click elsewhere on the strip (including a note bar) → collapse.
-- Keyboard shortcuts and tray menu items still open each action directly; they also collapse Actions if it was open.
+- Hover Actions → expand. Leave the row → collapse. Click does not toggle expand.
+- Click an action while expanded → run it. Alt/Option on + still means clipboard note.
+- Keyboard shortcuts and tray menu items still open each action directly.
 - Panel mutual exclusion (search vs settings vs note) unchanged.
 
 ## Layout

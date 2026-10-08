@@ -113,9 +113,8 @@ pub enum Message {
     StripHover(Option<f32>),
     BarClicked(usize),
     AddNote,
-    /// Expands or collapses the strip's Actions slot.
-    ToggleActions,
-    CloseActions,
+    /// The cursor entered or left the strip's Actions control.
+    ActionsHovered(bool),
     ToggleSettings,
     CloseSettings,
     /// Cmd/Ctrl+F, the strip's search slot or the tray item.
@@ -712,14 +711,10 @@ impl App {
                     return self.open_note(index);
                 }
             }
-            Message::ToggleActions => {
-                self.actions_open = !self.actions_open;
-            }
-            Message::CloseActions => {
-                self.actions_open = false;
+            Message::ActionsHovered(open) => {
+                self.actions_open = open;
             }
             Message::ToggleSettings => {
-                self.actions_open = false;
                 if self.settings_open && self.settings_morph.is_opening() {
                     return self.update(Message::CloseSettings);
                 }
@@ -850,7 +845,6 @@ impl App {
                 }
             }
             Message::AddNote => {
-                self.actions_open = false;
                 self.force_reveal = true;
                 return self.create_note(None, String::new());
             }
@@ -1227,10 +1221,7 @@ impl App {
                 self.last_cursor = None;
             }
             Message::FileHoverEnded => self.file_hover = false,
-            Message::ClipboardNote => {
-                self.actions_open = false;
-                return self.clipboard_note(read_clipboard());
-            }
+            Message::ClipboardNote => return self.clipboard_note(read_clipboard()),
             Message::ImagePicked(id, Some(path))
                 if self.active_note == Some(id) && self.morph.is_opening() =>
             {
@@ -1300,7 +1291,6 @@ impl App {
             }
             Message::DragStart(index, _) if self.is_collapsing(index) => {}
             Message::DragStart(index, origin_y) => {
-                self.actions_open = false;
                 self.hide_peek();
                 // Origin is the press position, so a click without movement
                 // opens the note even when pressed far from the bar's center.
@@ -1526,9 +1516,6 @@ impl App {
                     _ => {}
                 }
                 match key.as_ref() {
-                    keyboard::Key::Named(Named::Escape) if self.actions_open => {
-                        self.actions_open = false
-                    }
                     keyboard::Key::Named(Named::Escape) if self.color_picker_open => {
                         self.color_picker_open = false
                     }
@@ -2884,7 +2871,6 @@ impl App {
     /// Opens the search panel, or closes it while it is showing. It closes
     /// the note and the settings, and starts with an empty query.
     fn toggle_search(&mut self) -> Task<Message> {
-        self.actions_open = false;
         self.force_reveal = true;
         if self.search_open && self.search_morph.is_opening() {
             self.close_search();
@@ -5317,17 +5303,14 @@ mod tests {
     }
 
     #[test]
-    fn actions_slot_expands_and_collapses() {
+    fn actions_slot_follows_hover() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_in(&dir);
         assert!(!app.actions_open);
-        let _ = app.update(Message::ToggleActions);
+        let _ = app.update(Message::ActionsHovered(true));
         assert!(app.actions_open);
         assert!(app.strip_layout().actions_expanded);
-        let _ = app.update(Message::ToggleSearch);
-        assert!(!app.actions_open);
-        let _ = app.update(Message::ToggleActions);
-        let _ = app.update(Message::CloseActions);
+        let _ = app.update(Message::ActionsHovered(false));
         assert!(!app.actions_open);
     }
 
