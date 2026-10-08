@@ -38,7 +38,10 @@ const DIVIDER_GAP: f32 = 8.0;
 const BODY_GAP: f32 = 8.0;
 /// The divider is inset like the note's.
 const DIVIDER_INSET: f32 = 14.0;
+/// Body lines shown at once; the wheel scrolls through the rest.
 const MAX_LINES: usize = 3;
+/// Body lines kept for scrolling, so a huge note stays cheap to peek.
+const MAX_SCROLL_LINES: usize = 500;
 /// The delete button in the header's top-right corner.
 const TRASH_SIZE: f32 = 22.0;
 const TRASH_INSET: f32 = 8.0;
@@ -56,6 +59,7 @@ const BODY_GLYPH: f32 = 0.55;
 
 pub struct PeekText {
     pub title: Option<String>,
+    /// The body's lines; the first `MAX_LINES` show, the rest scroll in.
     pub lines: Vec<String>,
     /// Done and total task items, shown in the header.
     pub progress: Option<(usize, usize)>,
@@ -81,6 +85,8 @@ pub struct PeekLayout {
     pub reminder: Rectangle,
     pub divider_y: f32,
     pub body: Point,
+    /// The body's shown rows, which scrolled lines are clipped to.
+    pub body_rect: Rectangle,
     /// The delete button in the header.
     pub trash: Rectangle,
     /// A stack's list rows, one per note of `PeekText::stack`.
@@ -178,7 +184,7 @@ fn truncate(line: &str, max_chars: usize) -> String {
     }
 }
 
-/// The title (if any) and the first lines of the body.
+/// The title (if any) and the body's lines.
 pub fn peek_text(note: &Note, width: f32) -> PeekText {
     let title = Some(note.title.trim())
         .filter(|t| !t.is_empty())
@@ -187,7 +193,7 @@ pub fn peek_text(note: &Note, width: f32) -> PeekText {
     PeekText {
         width,
         title,
-        lines: rich::plain_lines(&note.content, MAX_LINES)
+        lines: rich::plain_lines(&note.content, MAX_SCROLL_LINES)
             .iter()
             .map(|l| truncate(l, max_chars))
             .collect(),
@@ -236,11 +242,27 @@ fn title_height(text: &PeekText) -> f32 {
     text.title.as_deref().map_or(1, |t| title_rows(t, text)) as f32 * TITLE_LINE
 }
 
+/// Body rows the peek shows: up to `MAX_LINES`, at least one (for the
+/// placeholder of an empty body).
+fn shown_rows(text: &PeekText) -> usize {
+    text.lines.len().clamp(1, MAX_LINES)
+}
+
+/// How far the body scrolls to show its last line, in pixels.
+pub fn max_body_scroll(text: &PeekText) -> f32 {
+    text.lines.len().saturating_sub(MAX_LINES) as f32 * BODY_LINE
+}
+
+/// The body's scroll after a wheel `dy` (positive scrolls up) from `scroll`.
+pub fn scroll_body(text: &PeekText, scroll: f32, dy: f32) -> f32 {
+    (scroll - dy).clamp(0.0, max_body_scroll(text))
+}
+
 /// Height of the open peek: header, divider and body (at least one line,
 /// which shows a placeholder for an empty body).
 pub fn peek_height(text: &PeekText) -> f32 {
     let body = if text.stack.is_empty() {
-        text.lines.len().max(1) as f32 * BODY_LINE
+        shown_rows(text) as f32 * BODY_LINE
     } else {
         let rows = text.stack.len() + usize::from(text.stack_more > 0);
         rows as f32 * BODY_LINE + UNSTACK_GAP + UNSTACK_BUTTON.height
@@ -313,6 +335,10 @@ pub fn peek_layout(
         title,
         divider_y,
         body,
+        body_rect: Rectangle::new(
+            body,
+            Size::new(inner_width(text.width), shown_rows(text) as f32 * BODY_LINE),
+        ),
         progress: Rectangle::new(
             Point::new(trash.x - 4.0 - progress_width, title.y),
             Size::new(progress_width, TITLE_LINE),
@@ -411,6 +437,7 @@ pub fn draw_peek(
     paper_tint: f32,
     cursor: Option<Point>,
     width: f32,
+    scroll: f32,
 ) {
     let layout = peek_layout(bar, bounds, progress, text, width);
     let rect = layout.rect;
@@ -510,7 +537,8 @@ pub fn draw_peek(
                          line: f32,
                          line_height: LineHeight,
                          rows: usize,
-                         color| {
+                         color,
+                         clip: Rectangle| {
         // The title stays clear of the delete button.
         let width = if font == TITLE_FONT {
             title_width
@@ -535,7 +563,7 @@ pub fn draw_peek(
             },
             at,
             color,
-            rect,
+            clip,
         );
     };
 
@@ -550,6 +578,7 @@ pub fn draw_peek(
             LineHeight::Absolute(Pixels(TITLE_LINE)),
             title_rows(title, text),
             theme.ink(alpha),
+            rect,
         ),
         None => draw_text(
             "Title".into(),
@@ -560,10 +589,11 @@ pub fn draw_peek(
             LineHeight::Absolute(Pixels(TITLE_LINE)),
             1,
             theme.ink(0.35 * alpha),
+            rect,
         ),
     }
 
-    // Body: the first lines, or the placeholder.
+    // Body: the lines scrolled into the shown rows, or the placeholder.
     if text.lines.is_empty() && text.stack.is_empty() {
         draw_text(
             PLACEHOLDER.into(),
@@ -574,12 +604,22 @@ pub fn draw_peek(
             LineHeight::Relative(theme::BODY_LINE_HEIGHT),
             1,
             theme.ink(0.35 * alpha),
+            rect,
         );
     }
-    for (i, content) in text.lines.iter().cloned().enumerate() {
-        let at = Point::new(layout.body.x, layout.body.y + i as f32 * BODY_LINE);
+    let body_clip = rect.intersection(&layout.body_rect).unwrap_or_default();
+    let scroll = scroll.clamp(0.0, max_body_scroll(text));
+    let first = (scroll / BODY_LINE).floor() as usize;
+    for (i, content) in text
+        .lines
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(MAX_LINES + 1)
+    {
+        let at = Point::new(layout.body.x, layout.body.y + i as f32 * BODY_LINE - scroll);
         draw_text(
-            content,
+            content.clone(),
             at,
             BODY_FONT,
             BODY_SIZE,
@@ -587,6 +627,7 @@ pub fn draw_peek(
             LineHeight::Relative(theme::BODY_LINE_HEIGHT),
             1,
             theme.ink(0.8 * alpha),
+            body_clip,
         );
     }
 
@@ -603,6 +644,7 @@ pub fn draw_peek(
             LineHeight::Relative(theme::BODY_LINE_HEIGHT),
             1,
             theme.ink(faint * alpha),
+            rect,
         );
     }
     if let Some(more) = layout.stack_more {
@@ -615,6 +657,7 @@ pub fn draw_peek(
             LineHeight::Relative(theme::BODY_LINE_HEIGHT),
             1,
             theme.ink(0.35 * alpha),
+            rect,
         );
     }
     if let Some(unstack) = layout.unstack {
@@ -722,13 +765,43 @@ mod tests {
     }
 
     #[test]
-    fn shows_title_and_next_three_lines() {
+    fn shows_title_and_three_lines_and_keeps_the_rest_for_scrolling() {
         let t = peek_text(
             &note("Groceries", "milk\n\neggs\nbread\nbutter\njam"),
             PEEK_WIDTH,
         );
         assert_eq!(t.title.as_deref(), Some("Groceries"));
-        assert_eq!(t.lines, ["milk", "eggs", "bread"]);
+        assert_eq!(t.lines, ["milk", "eggs", "bread", "butter", "jam"]);
+        let three = peek_text(&note("Groceries", "milk\neggs\nbread"), PEEK_WIDTH);
+        assert_eq!(peek_height(&t), peek_height(&three));
+        assert_eq!(max_body_scroll(&t), 2.0 * BODY_LINE);
+        assert_eq!(max_body_scroll(&three), 0.0);
+    }
+
+    #[test]
+    fn body_rect_spans_the_shown_rows() {
+        let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
+        let long = peek_text(&note("T", "a\nb\nc\nd\ne"), PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &long, PEEK_WIDTH);
+        assert_eq!(l.body_rect.position(), l.body);
+        assert_eq!(l.body_rect.height, MAX_LINES as f32 * BODY_LINE);
+        assert!(l.rect.contains(Point::new(
+            l.body_rect.x,
+            l.body_rect.y + l.body_rect.height - 1.0
+        )));
+        let short = peek_text(&note("T", "a"), PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &short, PEEK_WIDTH);
+        assert_eq!(l.body_rect.height, BODY_LINE);
+    }
+
+    #[test]
+    fn scrolled_body_stays_within_its_lines() {
+        let t = peek_text(&note("T", "a\nb\nc\nd\ne"), PEEK_WIDTH);
+        assert_eq!(scroll_body(&t, 0.0, -30.0), 30.0);
+        assert_eq!(scroll_body(&t, 30.0, -1000.0), max_body_scroll(&t));
+        assert_eq!(scroll_body(&t, 30.0, 1000.0), 0.0);
+        let short = peek_text(&note("T", "a"), PEEK_WIDTH);
+        assert_eq!(scroll_body(&short, 0.0, -30.0), 0.0);
     }
 
     #[test]

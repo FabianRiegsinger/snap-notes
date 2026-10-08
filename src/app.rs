@@ -242,6 +242,8 @@ pub enum Message {
     /// A title in the stack peek's list.
     OpenStackMember(Uuid),
     StripScroll(f32),
+    /// The wheel on the open peek: its body's new scroll, in pixels.
+    PeekScroll(f32),
     Tick(Instant),
     SaveTick,
     /// Fires the reminders that have come due.
@@ -402,6 +404,9 @@ pub struct App {
     hover_bar: Option<(Uuid, Instant)>,
     /// Note whose bar is widened into a peek (kept while it collapses).
     peek_note: Option<Uuid>,
+    /// The note whose peek body was scrolled, and how far; every peek
+    /// starts at the top.
+    peek_scroll: Option<(Uuid, f32)>,
     peek: Morph,
     /// The settings panel is showing (kept while it folds back into the gear).
     settings_open: bool,
@@ -619,6 +624,7 @@ impl App {
             note_drag_pos: None,
             hover_bar: None,
             peek_note: None,
+            peek_scroll: None,
             peek,
             settings_open: false,
             settings_morph,
@@ -1260,6 +1266,7 @@ impl App {
                             >= self.settings.settings().hover.peek_delay_secs
                     {
                         self.peek_note = Some(id);
+                        self.peek_scroll = None;
                         self.peek.open();
                         self.animating = true;
                     }
@@ -1350,6 +1357,9 @@ impl App {
                 if let Some(index) = self.store.notes().iter().position(|n| n.id == id) {
                     return self.open_note(index);
                 }
+            }
+            Message::PeekScroll(scroll) => {
+                self.peek_scroll = self.peek_note.map(|id| (id, scroll));
             }
             Message::StripScroll(delta) => {
                 let max = self.strip_layout().max_scroll;
@@ -1618,6 +1628,7 @@ impl App {
             drag: &self.drag,
             scroll_offset: self.scroll_offset,
             peek: self.strip_peek(),
+            peek_scroll: self.peek_body_scroll(),
             bars: &self.settings.settings().bars,
             height_fraction: self.strip_fraction(),
             paper_tint: self.settings.settings().notes.paper_tint,
@@ -2646,6 +2657,14 @@ impl App {
             .map(|entry| (entry, self.peek.progress()))
     }
 
+    /// How far the open peek's body is scrolled: 0 for a note not scrolled
+    /// since it was last peeked.
+    fn peek_body_scroll(&self) -> f32 {
+        self.peek_scroll
+            .filter(|(id, _)| self.peek_note == Some(*id))
+            .map_or(0.0, |(_, scroll)| scroll)
+    }
+
     /// Whether `id`'s copy button still shows its check.
     fn copied_for(&self, id: Uuid) -> bool {
         self.copied_at.is_some_and(|(copied, _)| copied == id)
@@ -3413,6 +3432,19 @@ mod tests {
         let _ = app.update(Message::StripHover(Some(bar.center().y)));
         let _ = app.update(Message::PeekTick(Instant::now() + Duration::from_secs(1)));
         assert!(app.peek_note.is_some() && app.peek.is_opening());
+    }
+
+    #[test]
+    fn peek_scroll_lasts_until_the_peek_opens_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        assert_eq!(app.peek_body_scroll(), 0.0);
+        let _ = app.update(Message::PeekScroll(42.0));
+        assert_eq!(app.peek_body_scroll(), 42.0);
+        app.hide_peek();
+        assert_eq!(app.peek_body_scroll(), 0.0);
+        open_peek(&mut app);
+        assert_eq!(app.peek_body_scroll(), 0.0);
     }
 
     #[test]

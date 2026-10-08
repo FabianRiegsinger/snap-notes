@@ -13,7 +13,7 @@
 
 ### The bar strip
 - **Dock-style magnification:** move the cursor along the strip and nearby bars grow with smooth spring physics.
-- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, and click it to open the note. Its trash button deletes the note at once, see [Notes](#notes) for undo.
+- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, scroll over it to read the rest of a longer note, and click it to open the note. Its trash button deletes the note at once, see [Notes](#notes) for undo.
 - **Quick add:** click the `+` slot below the bars (the whole strip width counts), or press Cmd/Ctrl+N. Hovering `+` for 0.6 s shows "New note · Option-click: from clipboard" (Alt-click on Windows/Linux). If the clipboard is empty, a clipboard note shakes `+` and shows "Clipboard is empty".
 - **Search:** click the 🔍 slot under `+`, press Cmd/Ctrl+F or choose **Search…** in the tray menu. Hovering 🔍 shows "Search (Cmd+F)" (Ctrl+F elsewhere). See [Search](#search).
 - **Hints on Linux:** hover hints aren't shown there unless a note or panel is open (the window is wide then).

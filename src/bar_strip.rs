@@ -1,7 +1,10 @@
 use crate::animation::MagnificationState;
 use crate::app::{DragState, Message};
 use crate::note::Note;
-use crate::peek::{draw_peek, entry_peek_text, note_peek_width, peek_layout, PeekText};
+use crate::peek::{
+    draw_peek, entry_peek_text, max_body_scroll, note_peek_width, peek_layout, scroll_body,
+    PeekText,
+};
 use crate::settings::BarSettings;
 use crate::strip_model::{self, Entry};
 use crate::theme;
@@ -692,6 +695,8 @@ pub struct BarStrip<'a> {
     pub scroll_offset: f32,
     /// Bar being peeked and the peek's progress (0..=1).
     pub peek: Option<(usize, f32)>,
+    /// How far the peek's body is scrolled, in pixels.
+    pub peek_scroll: f32,
     pub bars: &'a BarSettings,
     /// Share of the widget height the bars may use (centered).
     pub height_fraction: f32,
@@ -767,6 +772,15 @@ impl<'a> BarStrip<'a> {
         peek_target(bar, bounds, &text, width)
             .contains(pos)
             .then_some(i)
+    }
+
+    /// The peek body's new scroll for a wheel `dy` at `pos`: only over an
+    /// open peek with more lines than it shows.
+    fn peek_wheel(&self, bounds: Rectangle, pos: Point, dy: f32) -> Option<f32> {
+        let i = self.peek_hit(bounds, pos)?;
+        let bar = *self.layout_in(bounds).bars.get(i)?;
+        let (_, _, text) = self.peek_parts(i, bar)?;
+        (max_body_scroll(&text) > 0.0).then(|| scroll_body(&text, self.peek_scroll, dy))
     }
 
     /// The hover update for a cursor at `pos`: magnify around it inside the
@@ -939,6 +953,7 @@ impl<'a> BarStrip<'a> {
                             self.paper_tint,
                             cursor.position(),
                             width,
+                            self.peek_scroll,
                         );
                     }
                     continue;
@@ -1400,14 +1415,24 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                     shell.publish(Message::DragEnd);
                 }
             }
-            Event::Mouse(mouse::Event::WheelScrolled { delta })
-                if !self.slid() && bounds.contains(cursor.position().unwrap_or_default()) =>
-            {
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) if !self.slid() => {
+                let Some(pos) = cursor.position() else {
+                    return;
+                };
                 let dy = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => *y * 30.0,
                     mouse::ScrollDelta::Pixels { y, .. } => *y,
                 };
-                shell.publish(Message::StripScroll(dy));
+                // A peek with more lines than it shows scrolls them, and
+                // never the strip behind it.
+                if let Some(scroll) = self.peek_wheel(bounds, pos, dy) {
+                    if scroll != self.peek_scroll {
+                        shell.publish(Message::PeekScroll(scroll));
+                    }
+                    shell.capture_event();
+                } else if bounds.contains(pos) {
+                    shell.publish(Message::StripScroll(dy));
+                }
             }
             _ => {}
         }
@@ -1872,6 +1897,7 @@ mod tests {
             toast: false,
             panel_open: false,
             x_offset: 0.0,
+            peek_scroll: 0.0,
         }
     }
 
@@ -2021,6 +2047,7 @@ mod tests {
             toast: true,
             panel_open: false,
             x_offset: 0.0,
+            peek_scroll: 0.0,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let toast = toast_rect(&strip.layout_in(bounds), bounds);
@@ -2084,6 +2111,7 @@ mod tests {
             toast: false,
             panel_open: false,
             x_offset: 0.0,
+            peek_scroll: 0.0,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -2145,6 +2173,7 @@ mod tests {
             toast: false,
             panel_open: false,
             x_offset: 0.0,
+            peek_scroll: 0.0,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -2200,6 +2229,7 @@ mod tests {
             toast: false,
             panel_open: false,
             x_offset: 0.0,
+            peek_scroll: 0.0,
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
@@ -2210,6 +2240,37 @@ mod tests {
         );
         let inside = Point::new(bar.x + bar.width - 100.0, bar.center().y);
         assert_eq!(strip.peek_hit(bounds, inside), Some(0));
+    }
+
+    #[test]
+    fn wheel_on_a_long_peek_scrolls_its_body() {
+        let mut long = Note::new(crate::note::PALETTE[0]);
+        long.content = "a\nb\nc\nd\ne\nf".into();
+        let notes = [long, Note::new(crate::note::PALETTE[1])];
+        let entries = crate::strip_model::entries(&notes);
+        let (magnification, drag, bars) = (MagnificationState::new(), None, BarSettings::default());
+        let mut strip = plain_strip(&notes, &entries, &magnification, &drag, &bars);
+        let bar = strip.layout_in(STRIP_BOUNDS).bars[0];
+        let on_peek = Point::new(bar.x - 100.0, bar.center().y);
+        assert_eq!(strip.peek_wheel(STRIP_BOUNDS, on_peek, -30.0), None);
+
+        strip.peek = Some((0, 1.0));
+        assert_eq!(strip.peek_wheel(STRIP_BOUNDS, on_peek, -30.0), Some(30.0));
+        strip.peek_scroll = 30.0;
+        assert_eq!(strip.peek_wheel(STRIP_BOUNDS, on_peek, 30.0), Some(0.0));
+        let (_, _, text) = strip.peek_parts(0, bar).unwrap();
+        assert_eq!(
+            strip.peek_wheel(STRIP_BOUNDS, on_peek, -10_000.0),
+            Some(max_body_scroll(&text))
+        );
+        let off_peek = Point::new(bar.x - 600.0, bar.center().y);
+        assert_eq!(strip.peek_wheel(STRIP_BOUNDS, off_peek, -30.0), None);
+
+        // A note that fits leaves the wheel to the strip.
+        strip.peek = Some((1, 1.0));
+        let short_bar = strip.layout_in(STRIP_BOUNDS).bars[1];
+        let on_short = Point::new(short_bar.x - 100.0, short_bar.center().y);
+        assert_eq!(strip.peek_wheel(STRIP_BOUNDS, on_short, -30.0), None);
     }
 
     #[test]
@@ -2241,6 +2302,7 @@ mod tests {
             toast: false,
             panel_open: false,
             x_offset: 0.0,
+            peek_scroll: 0.0,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -2283,6 +2345,7 @@ mod tests {
             toast: false,
             panel_open: false,
             x_offset: 0.0,
+            peek_scroll: 0.0,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
