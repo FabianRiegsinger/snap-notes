@@ -88,8 +88,6 @@ const EDITOR_PADDING_Y: f32 = EDITOR_PADDING_TOP + EDITOR_PADDING_BOTTOM;
 /// for it: the text sits 18 px in from the edges.
 const BODY_INSET: f32 = 8.0;
 const BODY_INSET_BOTTOM: f32 = 4.0;
-/// Width of a focus ring around the title and the editor.
-const FOCUS_RING: f32 = 1.5;
 /// Height of the grip along the top edge, under the adhesive band.
 const GRIP_HEIGHT: f32 = 16.0;
 
@@ -249,19 +247,6 @@ fn reminder_label(status: &reminder::Status, width: f32) -> Option<ReminderLabel
     })
 }
 
-/// The focus ring's border while `focused`, otherwise a plain rounded edge.
-fn focus_border(theme: theme::Theme, focused: bool, alpha: f32) -> Border {
-    let ring = theme.focus_ring();
-    Border {
-        color: Color {
-            a: ring.a * alpha,
-            ..ring
-        },
-        width: if focused { FOCUS_RING } else { 0.0 },
-        radius: RADIUS_CONTROL.into(),
-    }
-}
-
 /// Padding around the body text, the same in edit and rendered mode so the
 /// text doesn't jump when switching. With `BODY_INSET` it puts the text
 /// 18 px in from the note's edges.
@@ -417,13 +402,9 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             .size(TEXT_MD)
             .padding(Padding::new(2.0).left(4).right(4))
             .font(theme::TITLE_FONT)
-            .style(move |_theme: &Theme, status| text_input::Style {
+            .style(move |_theme: &Theme, _status| text_input::Style {
                 background: Color::TRANSPARENT.into(),
-                border: focus_border(
-                    theme,
-                    matches!(status, text_input::Status::Focused { .. }),
-                    a,
-                ),
+                border: Border::default(),
                 icon: theme.ink(a),
                 placeholder: theme.ink(0.35 * a),
                 value: theme.ink(a),

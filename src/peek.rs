@@ -258,6 +258,41 @@ pub fn scroll_body(text: &PeekText, scroll: f32, dy: f32) -> f32 {
     (scroll - dy).clamp(0.0, max_body_scroll(text))
 }
 
+/// Width of the body's scrollbar, centered in the peek's right padding.
+const SCROLLBAR_WIDTH: f32 = 4.0;
+/// The scrollbar's thumb never gets shorter than this.
+const MIN_THUMB: f32 = 12.0;
+
+/// The body's scrollbar track and thumb at `scroll`, when it has more lines
+/// than it shows.
+pub fn scrollbar(
+    text: &PeekText,
+    layout: &PeekLayout,
+    scroll: f32,
+) -> Option<(Rectangle, Rectangle)> {
+    let max = max_body_scroll(text);
+    if max <= 0.0 {
+        return None;
+    }
+    let body = layout.body_rect;
+    let track = Rectangle::new(
+        Point::new(
+            body.x + body.width + (PADDING_X - SCROLLBAR_WIDTH) / 2.0,
+            body.y,
+        ),
+        Size::new(SCROLLBAR_WIDTH, body.height),
+    );
+    let thumb_height = (track.height * body.height / (body.height + max))
+        .max(MIN_THUMB)
+        .min(track.height);
+    let travel = track.height - thumb_height;
+    let thumb = Rectangle::new(
+        Point::new(track.x, track.y + travel * (scroll / max).clamp(0.0, 1.0)),
+        Size::new(SCROLLBAR_WIDTH, thumb_height),
+    );
+    Some((track, thumb))
+}
+
 /// Height of the open peek: header, divider and body (at least one line,
 /// which shows a placeholder for an empty body).
 pub fn peek_height(text: &PeekText) -> f32 {
@@ -529,6 +564,23 @@ pub fn draw_peek(
             theme.ink(0.06 * alpha),
         );
     }
+    if let Some((track, thumb)) = scrollbar(text, &layout, scroll) {
+        for (bounds, ink) in [(track, 0.08), (thumb, 0.35)] {
+            renderer::Renderer::fill_quad(
+                renderer,
+                Quad {
+                    bounds,
+                    border: Border {
+                        radius: (SCROLLBAR_WIDTH / 2.0).into(),
+                        ..Default::default()
+                    },
+                    shadow: Shadow::default(),
+                    snap: true,
+                },
+                theme.ink(ink * alpha),
+            );
+        }
+    }
     let title_width = title_width(text);
     let mut draw_text = |content: String,
                          at: Point,
@@ -792,6 +844,27 @@ mod tests {
         let short = peek_text(&note("T", "a"), PEEK_WIDTH);
         let l = peek_layout(bar, screen(), 1.0, &short, PEEK_WIDTH);
         assert_eq!(l.body_rect.height, BODY_LINE);
+    }
+
+    #[test]
+    fn scrollbar_shows_only_for_more_lines_and_follows_the_scroll() {
+        let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
+        let short = peek_text(&note("T", "a\nb"), PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &short, PEEK_WIDTH);
+        assert!(scrollbar(&short, &l, 0.0).is_none());
+
+        let long = peek_text(&note("T", "a\nb\nc\nd\ne\nf"), PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &long, PEEK_WIDTH);
+        let (track, top) = scrollbar(&long, &l, 0.0).unwrap();
+        // In the right padding, beside the shown rows.
+        assert!(track.x >= l.body_rect.x + l.body_rect.width);
+        assert!(track.x + track.width <= l.rect.x + l.rect.width);
+        assert_eq!((track.y, track.height), (l.body_rect.y, l.body_rect.height));
+        // Three of six lines show: the thumb is half the track, at the top.
+        assert!((top.height - track.height / 2.0).abs() < 0.01);
+        assert_eq!(top.y, track.y);
+        let (_, bottom) = scrollbar(&long, &l, max_body_scroll(&long)).unwrap();
+        assert!((bottom.y + bottom.height - (track.y + track.height)).abs() < 0.01);
     }
 
     #[test]
