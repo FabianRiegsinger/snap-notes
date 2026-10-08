@@ -96,25 +96,72 @@ pub fn set_dock_policy(visible: bool) {
 #[cfg(not(target_os = "macos"))]
 pub fn set_dock_policy(_visible: bool) {}
 
-/// Shows or hides the window's taskbar button. A tool window has none; the
-/// window is hidden around the style change so the taskbar notices it.
+/// Shows or hides the window's taskbar button.
 #[cfg(windows)]
 pub fn set_dock_icon_visible(window: &dyn iced::window::Window, visible: bool) {
+    if let Some(hwnd) = hwnd(window) {
+        set_taskbar_button(hwnd, visible);
+    }
+}
+
+/// Whether the taskbar button is hidden. winit rewrites the extended style
+/// from its own flags whenever one changes (every click-through toggle), which
+/// would bring the button back, so [`keep_taskbar_button_hidden`] reapplies it.
+#[cfg(windows)]
+static TASKBAR_BUTTON_HIDDEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Keeps every extended style written to the window free of a taskbar button
+/// while [`TASKBAR_BUTTON_HIDDEN`] is set.
+#[cfg(windows)]
+unsafe extern "system" fn keep_taskbar_button_hidden(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+    _id: usize,
+    _data: usize,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::Shell::DefSubclassProc;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, STYLESTRUCT, WM_STYLECHANGING, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    };
+
+    if msg == WM_STYLECHANGING
+        && wparam as i32 == GWL_EXSTYLE
+        && TASKBAR_BUTTON_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        // SAFETY: for WM_STYLECHANGING, `lparam` points to the pending styles.
+        let style = unsafe { &mut *(lparam as *mut STYLESTRUCT) };
+        style.styleNew = (style.styleNew | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
+    }
+    // SAFETY: forwards the message unchanged to the next window procedure.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// A tool window without the app-window style has no taskbar button; the
+/// window is hidden around the style change so the taskbar notices it.
+#[cfg(windows)]
+fn set_taskbar_button(hwnd: windows_sys::Win32::Foundation::HWND, visible: bool) {
+    use windows_sys::Win32::UI::Shell::SetWindowSubclass;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
         SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
-        SW_SHOWNOACTIVATE, WS_EX_TOOLWINDOW,
+        SW_SHOWNOACTIVATE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
-    let Some(hwnd) = hwnd(window) else {
-        return;
-    };
+    TASKBAR_BUTTON_HIDDEN.store(!visible, std::sync::atomic::Ordering::Relaxed);
     // SAFETY: style queries and updates on a live window handle, on the
-    // thread that owns it.
+    // thread that owns it. Installing the subclass again only replaces it.
     unsafe {
+        SetWindowSubclass(hwnd, Some(keep_taskbar_button_hidden), 1, 0);
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let tool = WS_EX_TOOLWINDOW as isize;
-        let wanted = if visible { style & !tool } else { style | tool };
+        let (tool, app) = (WS_EX_TOOLWINDOW as isize, WS_EX_APPWINDOW as isize);
+        let wanted = if visible {
+            (style & !tool) | app
+        } else {
+            (style | tool) & !app
+        };
         if wanted == style {
             return;
         }
@@ -235,4 +282,62 @@ pub fn open_url(url: &str) {
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn open_url(url: &str) {
     spawn_and_reap(std::process::Command::new("xdg-open").arg(url));
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::set_taskbar_button;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, GetWindowLongW, SetWindowLongW, GWL_EXSTYLE,
+        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_POPUP,
+    };
+
+    fn ex_style(hwnd: windows_sys::Win32::Foundation::HWND) -> u32 {
+        // SAFETY: a style query on a live window handle.
+        unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 }
+    }
+
+    /// Writes the whole extended style the way winit does when one of its
+    /// window flags changes.
+    fn rewrite_like_winit(hwnd: windows_sys::Win32::Foundation::HWND) {
+        // SAFETY: a style update on a live window handle, on its thread.
+        unsafe { SetWindowLongW(hwnd, GWL_EXSTYLE, WS_EX_APPWINDOW as i32) };
+    }
+
+    #[test]
+    fn hidden_taskbar_button_survives_style_rewrites() {
+        let class: Vec<u16> = "STATIC".encode_utf16().chain([0]).collect();
+        // SAFETY: creates a plain popup of a system class, owned by this
+        // thread and destroyed below.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_APPWINDOW,
+                class.as_ptr(),
+                std::ptr::null(),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!hwnd.is_null());
+
+        set_taskbar_button(hwnd, false);
+        rewrite_like_winit(hwnd);
+        let style = ex_style(hwnd);
+        assert!(style & WS_EX_TOOLWINDOW != 0 && style & WS_EX_APPWINDOW == 0);
+
+        set_taskbar_button(hwnd, true);
+        rewrite_like_winit(hwnd);
+        let style = ex_style(hwnd);
+        assert!(style & WS_EX_TOOLWINDOW == 0 && style & WS_EX_APPWINDOW != 0);
+
+        // SAFETY: the window was created above on this thread.
+        unsafe { DestroyWindow(hwnd) };
+    }
 }
