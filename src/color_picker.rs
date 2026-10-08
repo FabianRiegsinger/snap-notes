@@ -53,7 +53,7 @@ pub fn color_picker<'a>(
         slider(MIN_VALUE..=1.0, value, move |v| {
             Message::ColorAdjusted(with_value(current, v))
         })
-        .step(0.01),
+        .step(0.01_f32),
     ]
     .spacing(space(1))
     .width(WIDTH);
