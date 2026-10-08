@@ -36,7 +36,7 @@
 - **Title and body:** each note has a title header and a scrolling body. The scrollbar only appears once the text overflows.
 - **Move it anywhere:** drag the grip at the top. The note reopens where you left it, and double-clicking the grip docks it again.
 - **Resize it:** drag any edge or corner. Each note remembers its own size.
-- **Color code it:** the swatch in the header opens a color bubble: six presets, a color wheel you can drag, and a hex field.
+- **Color code it:** the swatch in the header opens a color bubble: six presets, a color wheel you can drag (around for the hue, toward the rim for more vivid colors), a brightness slider, and a hex field.
 - **Delete and undo:** the trash button in the header deletes the note at once, with no confirmation. The toast "Note deleted · Undo" stays for 5 s, and clicking Undo restores the note. Cmd/Ctrl+Z also undoes it, but only while no note is open. Only the latest delete can be undone.
 - **Copy:** the copy button in the header copies the note's title and body. Its icon shows a ✓ for a moment afterwards.
 - **Images:** drop a png, jpg, gif or webp file (up to 20 MB) onto an open note, paste an image-only clipboard with Cmd/Ctrl+V, or use the image button in the toolbar.

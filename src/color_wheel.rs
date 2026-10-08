@@ -1,6 +1,7 @@
 //! An HSV color disk: the angle around the center sets the hue, the
 //! distance from it the saturation, and the value stays that of the current
-//! color. Pressing or dragging on it publishes the color under the cursor.
+//! color (the bubble's brightness slider sets it, see [`with_value`]).
+//! Pressing or dragging on it publishes the color under the cursor.
 
 use crate::note::NoteColor;
 
@@ -45,6 +46,17 @@ pub fn from_hsv(h: f32, s: f32, v: f32) -> NoteColor {
     };
     let m = v - c;
     NoteColor::new(r + m, g + m, b + m)
+}
+
+/// The lowest value [`with_value`] gives: black would lose the hue and
+/// saturation, and the slider could not bring them back.
+pub const MIN_VALUE: f32 = 0.1;
+
+/// `color` with its hue and saturation and value `value`, at least
+/// [`MIN_VALUE`].
+pub fn with_value(color: NoteColor, value: f32) -> NoteColor {
+    let (h, s, _) = to_hsv(color);
+    from_hsv(h, s, value.clamp(MIN_VALUE, 1.0))
 }
 
 /// The color at `point` on a disk of `radius` around `center`, at value
@@ -330,6 +342,26 @@ mod tests {
         assert_eq!(far, edge);
         let (_, s, _) = to_hsv(hsv_at(CENTER, RADIUS, Point::new(-300.0, -300.0), 0.8));
         assert!((s - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn with_value_keeps_hue_and_saturation() {
+        for color in PALETTE {
+            let (h, s, _) = to_hsv(color);
+            for v in [MIN_VALUE, 0.5, 1.0] {
+                let (h2, s2, v2) = to_hsv(with_value(color, v));
+                assert!((h2 - h).abs() < 0.01, "{} hue {h} -> {h2}", color.to_hex());
+                assert!((s2 - s).abs() < 1e-4, "{} sat {s} -> {s2}", color.to_hex());
+                assert!((v2 - v).abs() < 1e-4, "{} value {v2}", color.to_hex());
+            }
+        }
+    }
+
+    #[test]
+    fn with_value_stays_above_black() {
+        let red = NoteColor::new(1.0, 0.0, 0.0);
+        let (h, s, v) = to_hsv(with_value(red, 0.0));
+        assert!(h.abs() < 0.01 && (s - 1.0).abs() < 1e-4 && (v - MIN_VALUE).abs() < 1e-4);
     }
 
     #[test]
