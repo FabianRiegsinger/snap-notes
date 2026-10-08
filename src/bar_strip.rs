@@ -30,6 +30,8 @@ pub const HIDE_MARGIN: f32 = 32.0;
 /// How far right a fully hidden strip is drawn.
 pub const HIDE_SHIFT: f32 = STRIP_WIDTH + HIDE_MARGIN;
 const ADD_BUTTON_GAP: f32 = 20.0;
+/// Gap between the three Actions children when the slot is expanded.
+const ACTION_GAP: f32 = 4.0;
 /// The add button is shaped like a bar and magnifies with them, but its
 /// height grows less so it stays a compact "slot" rather than a tall note.
 const ADD_MAX_HEIGHT_SCALE: f32 = 1.4;
@@ -146,40 +148,60 @@ pub fn bar_rect_for(progress: f32, rect: Rectangle) -> Rectangle {
 
 pub struct StripLayout {
     pub bars: Vec<Rectangle>,
+    /// Collapsed Actions control, or the bounding box of the expanded row.
+    pub actions_button: Rectangle,
+    pub actions_hit_area: Rectangle,
+    /// Whether the three action children are shown side by side.
+    pub actions_expanded: bool,
     pub add_button: Rectangle,
-    /// Generous click target for the add button: the full strip width around it.
     pub add_hit_area: Rectangle,
-    /// Search slot below the add button, drawn and magnified like it.
     pub search_button: Rectangle,
     pub search_hit_area: Rectangle,
-    /// Settings slot below the search slot, drawn and magnified like it.
-    /// Only where there is no tray menu to open settings from.
-    pub settings_button: Option<Rectangle>,
-    pub settings_hit_area: Option<Rectangle>,
+    pub settings_button: Rectangle,
+    pub settings_hit_area: Rectangle,
     pub max_scroll: f32,
 }
 
 impl StripLayout {
-    /// Where the settings panel unfolds from: the gear slot, or the add
-    /// button where there is none.
+    /// Where the settings panel unfolds from.
     pub fn settings_anchor(&self) -> Rectangle {
-        self.settings_button.unwrap_or(self.add_button)
+        if self.actions_expanded {
+            self.settings_button
+        } else {
+            self.actions_button
+        }
+    }
+
+    /// Where the search panel unfolds from.
+    pub fn search_anchor(&self) -> Rectangle {
+        if self.actions_expanded {
+            self.search_button
+        } else {
+            self.actions_button
+        }
     }
 
     /// Bottom edge of the lowest hit area.
     pub fn hit_bottom(&self) -> f32 {
-        let area = self.settings_hit_area.unwrap_or(self.search_hit_area);
-        area.y + area.height
+        self.actions_hit_area.y + self.actions_hit_area.height
     }
 
     /// What a press at `pos` on one of the slots below the bars does.
     pub fn slot_message(&self, pos: Point) -> Option<Message> {
+        if !self.actions_expanded {
+            return self
+                .actions_hit_area
+                .contains(pos)
+                .then_some(Message::ToggleActions);
+        }
         if self.add_hit_area.contains(pos) {
             Some(Message::AddNote)
         } else if self.search_hit_area.contains(pos) {
             Some(Message::ToggleSearch)
-        } else if self.settings_hit_area.is_some_and(|hit| hit.contains(pos)) {
+        } else if self.settings_hit_area.contains(pos) {
             Some(Message::ToggleSettings)
+        } else if self.actions_hit_area.contains(pos) {
+            Some(Message::CloseActions)
         } else {
             None
         }
@@ -187,10 +209,15 @@ impl StripLayout {
 
     /// The slot with a tooltip under `pos`, if any.
     pub fn slot_at(&self, pos: Point) -> Option<Slot> {
+        if !self.actions_expanded {
+            return self.actions_hit_area.contains(pos).then_some(Slot::Actions);
+        }
         if self.add_hit_area.contains(pos) {
             Some(Slot::Add)
         } else if self.search_hit_area.contains(pos) {
             Some(Slot::Search)
+        } else if self.settings_hit_area.contains(pos) {
+            Some(Slot::Settings)
         } else {
             None
         }
@@ -209,12 +236,15 @@ impl StripLayout {
 /// A slot below the bars that explains itself after a hover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
+    Actions,
     Add,
     Search,
+    Settings,
 }
 
 /// How long the cursor rests on a slot before its tooltip shows.
 const TOOLTIP_DELAY: Duration = Duration::from_millis(600);
+const ACTIONS_TOOLTIP: &str = "Actions";
 const ADD_TOOLTIP: &str = if cfg!(target_os = "macos") {
     "New note · Option-click: from clipboard"
 } else {
@@ -224,6 +254,11 @@ const SEARCH_TOOLTIP: &str = if cfg!(target_os = "macos") {
     "Search (Cmd+F)"
 } else {
     "Search (Ctrl+F)"
+};
+const SETTINGS_TOOLTIP: &str = if cfg!(target_os = "macos") {
+    "Settings (Cmd+,)"
+} else {
+    "Settings (Ctrl+,)"
 };
 const CLIPBOARD_EMPTY: &str = "Clipboard is empty";
 /// The undo toast after a delete reads "Note deleted · Undo", the link
@@ -236,8 +271,10 @@ const TOAST_ACCENT: &str = "Undo";
 pub fn slot_tooltip(hover: Option<(Slot, Instant)>, now: Instant) -> Option<&'static str> {
     let (slot, since) = hover?;
     (now.saturating_duration_since(since) >= TOOLTIP_DELAY).then_some(match slot {
+        Slot::Actions => ACTIONS_TOOLTIP,
         Slot::Add => ADD_TOOLTIP,
         Slot::Search => SEARCH_TOOLTIP,
+        Slot::Settings => SETTINGS_TOOLTIP,
     })
 }
 
@@ -245,8 +282,10 @@ pub fn slot_tooltip(hover: Option<(Slot, Instant)>, now: Instant) -> Option<&'st
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HintAt {
     Bar(usize),
+    Actions,
     Add,
     Search,
+    Settings,
 }
 
 /// A hint chip: its label (with an accented tail) and what it explains.
@@ -257,11 +296,11 @@ struct Hint {
     at: HintAt,
 }
 
-/// The undo toast: a chip beside the `+` slot.
+/// The undo toast: a chip beside the Actions / `+` slot.
 const TOAST: Hint = Hint {
     text: TOAST_TEXT,
     accent: Some(TOAST_ACCENT),
-    at: HintAt::Add,
+    at: HintAt::Actions,
 };
 
 /// Whether a pressed bar has moved far enough to count as dragged.
@@ -546,13 +585,13 @@ fn draw_chip_text(
 /// Where the undo toast shows on `strip` in `bounds`: the whole chip is
 /// its hit area.
 pub fn toast_rect(strip: &StripLayout, bounds: Rectangle) -> Rectangle {
-    let anchor = strip.add_button;
+    let anchor = if strip.actions_expanded {
+        strip.add_button
+    } else {
+        strip.actions_button
+    };
     chip_rect(bounds, anchor, anchor.center_y(), TOAST.text, TOAST.accent)
 }
-
-/// The strip shows a settings slot except on macOS, whose menu bar icon is
-/// always in sight. Windows hides tray icons in the overflow by default.
-pub const SETTINGS_SLOT: bool = !cfg!(target_os = "macos");
 
 /// The vertically centered `fraction` of `bounds` the bars are laid out in.
 pub fn band(bounds: Rectangle, fraction: f32) -> Rectangle {
@@ -572,14 +611,14 @@ fn slot_size(bars: &BarSettings, scale: f32) -> Size {
     )
 }
 
-/// Lays out the bars plus the add, search and settings slots as one stack, centered
-/// vertically in `bounds`. Centering on the *current* (magnified) height keeps
-/// the hovered bar roughly in place while its neighbours grow. If the stack is
-/// taller than the bounds, it is top-aligned and scrolled by `scroll_offset`.
+/// Lays out the bars plus the Actions slot (collapsed or expanded into New /
+/// Search / Settings side by side), centered vertically in `bounds`.
+/// Centering on the *current* (magnified) height keeps the hovered bar
+/// roughly in place while its neighbours grow. If the stack is taller than
+/// the bounds, it is top-aligned and scrolled by `scroll_offset`.
 ///
-/// `scale(count)` is the add button's magnification, `scale(count + 1)` the
-/// search button's and `scale(count + 2)` the settings button's (if
-/// `settings_slot`).
+/// When collapsed, `scale(count)` magnifies Actions. When expanded,
+/// `scale(count)` / `count+1` / `count+2` magnify New / Search / Settings.
 ///
 /// `collapse` is a deleted bar's index and how far it has collapsed (0..=1):
 /// its height and one gap next to it shrink by that share.
@@ -589,7 +628,7 @@ pub fn compute_layout(
     bounds: Rectangle,
     scroll_offset: f32,
     bars_settings: &BarSettings,
-    settings_slot: bool,
+    actions_expanded: bool,
     collapse: Option<(usize, f32)>,
 ) -> StripLayout {
     let gap = bars_settings.gap;
@@ -612,16 +651,19 @@ pub fn compute_layout(
         .collect();
     let bars_height: f32 = heights.iter().sum::<f32>() + gaps.iter().sum::<f32>();
     let add_gap = if count > 0 { ADD_BUTTON_GAP } else { 0.0 };
+    let actions_size = slot_size(bars_settings, scale(count));
     let add_size = slot_size(bars_settings, scale(count));
     let search_size = slot_size(bars_settings, scale(count + 1));
     let gear_size = slot_size(bars_settings, scale(count + 2));
-    let gear_height = if settings_slot {
-        gap + gear_size.height
+    let row_height = if actions_expanded {
+        add_size
+            .height
+            .max(search_size.height)
+            .max(gear_size.height)
     } else {
-        0.0
+        actions_size.height
     };
-    let content_height =
-        bars_height + add_gap + add_size.height + gap + search_size.height + gear_height;
+    let content_height = bars_height + add_gap + row_height;
 
     let available = bounds.height - 2.0 * EDGE_PADDING;
     let (mut y, max_scroll) = if content_height <= available {
@@ -642,43 +684,83 @@ pub fn compute_layout(
         y += h + gaps.get(i).copied().unwrap_or(add_gap);
     }
 
-    let add_button = Rectangle::new(Point::new(right - add_size.width, y), add_size);
-    let add_top = y - add_gap / 2.0;
-    let search_y = y + add_size.height + gap;
-    // Neighbouring hit areas meet halfway between their slots.
-    let add_bottom = search_y - gap / 2.0;
-    let add_hit_area = Rectangle::new(
-        Point::new(bounds.x, add_top),
-        Size::new(bounds.width, add_bottom - add_top),
+    let row_top = y;
+    let actions_button = Rectangle::new(
+        Point::new(
+            right - actions_size.width,
+            row_top + (row_height - actions_size.height) / 2.0,
+        ),
+        actions_size,
     );
-    let search_button =
-        Rectangle::new(Point::new(right - search_size.width, search_y), search_size);
-    let gear_y = search_y + search_size.height + gap;
-    let search_bottom = if settings_slot {
-        gear_y - gap / 2.0
+    // Expanded: New, Search, Settings from right to left.
+    let add_button = Rectangle::new(
+        Point::new(
+            right - add_size.width,
+            row_top + (row_height - add_size.height) / 2.0,
+        ),
+        add_size,
+    );
+    let search_button = Rectangle::new(
+        Point::new(
+            add_button.x - ACTION_GAP - search_size.width,
+            row_top + (row_height - search_size.height) / 2.0,
+        ),
+        search_size,
+    );
+    let settings_button = Rectangle::new(
+        Point::new(
+            search_button.x - ACTION_GAP - gear_size.width,
+            row_top + (row_height - gear_size.height) / 2.0,
+        ),
+        gear_size,
+    );
+    let row_left = if actions_expanded {
+        settings_button.x
     } else {
-        search_y + search_size.height + EDGE_PADDING
+        actions_button.x
     };
-    let search_hit_area = Rectangle::new(
-        Point::new(bounds.x, add_bottom),
-        Size::new(bounds.width, search_bottom - add_bottom),
+    let actions_hit_area = Rectangle::new(
+        Point::new(bounds.x, row_top - add_gap / 2.0),
+        Size::new(bounds.width, row_height + add_gap / 2.0 + EDGE_PADDING),
     );
-    let (settings_button, settings_hit_area) = if settings_slot {
-        let button = Rectangle::new(Point::new(right - gear_size.width, gear_y), gear_size);
-        let hit = Rectangle::new(
-            Point::new(bounds.x, search_bottom),
-            Size::new(
-                bounds.width,
-                gear_y + gear_size.height + EDGE_PADDING - search_bottom,
-            ),
-        );
-        (Some(button), Some(hit))
+    let slot_hit = |button: Rectangle, left: f32, right_edge: f32| {
+        Rectangle::new(
+            Point::new(left, actions_hit_area.y),
+            Size::new(right_edge - left, actions_hit_area.height),
+        )
+        .intersection(&actions_hit_area)
+        .unwrap_or(button)
+    };
+    let (add_hit_area, search_hit_area, settings_hit_area) = if actions_expanded {
+        let mid_add_search = (search_button.x + search_button.width + add_button.x) / 2.0;
+        let mid_search_gear = (settings_button.x + settings_button.width + search_button.x) / 2.0;
+        (
+            slot_hit(add_button, mid_add_search, bounds.x + bounds.width),
+            slot_hit(search_button, mid_search_gear, mid_add_search),
+            slot_hit(settings_button, row_left.min(bounds.x), mid_search_gear),
+        )
     } else {
-        (None, None)
+        // Collapsed: children share the Actions geometry for panel anchors.
+        (actions_hit_area, actions_hit_area, actions_hit_area)
+    };
+    let (add_button, search_button, settings_button) = if actions_expanded {
+        (add_button, search_button, settings_button)
+    } else {
+        (actions_button, actions_button, actions_button)
     };
 
     StripLayout {
         bars,
+        actions_button: if actions_expanded {
+            Rectangle::new(
+                Point::new(row_left, row_top),
+                Size::new(right - row_left, row_height),
+            )
+        } else {
+            actions_button
+        },
+        actions_hit_area,
+        actions_expanded,
         add_button,
         add_hit_area,
         search_button,
@@ -732,6 +814,8 @@ pub struct BarStrip<'a> {
     /// A panel (search, settings or export) is open: the slots show no
     /// tooltips.
     pub panel_open: bool,
+    /// The Actions slot is expanded into New / Search / Settings.
+    pub actions_expanded: bool,
     /// How far right everything is drawn while auto-hide slides the strip
     /// away (0 = in place, `HIDE_SHIFT` = off screen). Above 0 the strip
     /// takes no clicks or hovers.
@@ -756,7 +840,7 @@ impl<'a> BarStrip<'a> {
             band(bounds, self.height_fraction),
             self.scroll_offset,
             self.bars,
-            SETTINGS_SLOT,
+            self.actions_expanded,
             self.collapse,
         )
     }
@@ -864,14 +948,16 @@ impl<'a> BarStrip<'a> {
             HintKind::Clipboard => Some(Hint {
                 text: CLIPBOARD_EMPTY,
                 accent: None,
-                at: HintAt::Add,
+                at: HintAt::Actions,
             }),
             HintKind::Toast => Some(TOAST),
             HintKind::Tooltip => {
                 let text = slot_tooltip(slot_hover, now)?;
                 let at = match slot_hover?.0 {
+                    Slot::Actions => HintAt::Actions,
                     Slot::Add => HintAt::Add,
                     Slot::Search => HintAt::Search,
+                    Slot::Settings => HintAt::Settings,
                 };
                 Some(Hint {
                     text,
@@ -1104,97 +1190,55 @@ impl<'a> BarStrip<'a> {
             }
         }
 
-        // Add, search and settings buttons: "empty slot" bars. At rest they are
-        // hollow outlines the size of a note bar; magnified they fill in and
-        // show their glyph.
+        // Actions slot: collapsed brand mark, or New / Search / Settings in a row.
         let idle = self.drag.is_none();
         let count = self.entries.len();
-        let add_reveal = Self::reveal(self.magnification.scale(count));
-        // After an empty clipboard the slot shakes; its hit area holds still.
-        let add = strip.add_button + Vector::new(self.add_shake, 0.0);
-        draw_slot(
-            renderer,
-            add,
-            idle && cursor.is_over(strip.add_hit_area),
-            add_reveal,
-            &self.theme,
-        );
-        if add_reveal > 0.0 {
-            let thickness = 2.0;
-            let len = (add.width.min(add.height) * 0.5).max(thickness);
-            let cx = add.x + add.width / 2.0;
-            let cy = add.y + add.height / 2.0;
-            for size in [Size::new(len, thickness), Size::new(thickness, len)] {
-                renderer::Renderer::fill_quad(
+        if strip.actions_expanded {
+            let add_reveal = Self::reveal(self.magnification.scale(count));
+            let add = strip.add_button + Vector::new(self.add_shake, 0.0);
+            draw_slot(
+                renderer,
+                add,
+                idle && cursor.is_over(strip.add_hit_area),
+                add_reveal,
+                &self.theme,
+            );
+            if add_reveal > 0.0 {
+                draw_plus(
                     renderer,
-                    renderer::Quad {
-                        bounds: Rectangle::new(
-                            Point::new(cx - size.width / 2.0, cy - size.height / 2.0),
-                            size,
-                        ),
-                        border: iced::Border {
-                            radius: 1.0.into(),
-                            ..Default::default()
-                        },
-                        shadow: Default::default(),
-                        snap: true,
-                    },
+                    add,
                     self.theme.card().scale_alpha(0.95 * add_reveal),
                 );
             }
-        }
 
-        let search = strip.search_button;
-        let search_reveal = Self::reveal(self.magnification.scale(count + 1));
-        draw_slot(
-            renderer,
-            search,
-            idle && cursor.is_over(strip.search_hit_area),
-            search_reveal,
-            &self.theme,
-        );
-        if search_reveal > 0.0 {
-            let glyph = search_glyph(search);
-            let color = self.theme.card().scale_alpha(0.95 * search_reveal);
-            renderer::Renderer::fill_quad(
+            let search = strip.search_button;
+            let search_reveal = Self::reveal(self.magnification.scale(count + 1));
+            draw_slot(
                 renderer,
-                renderer::Quad {
-                    bounds: glyph.ring,
-                    border: iced::Border {
-                        radius: (glyph.ring.width / 2.0).into(),
-                        width: glyph.stroke,
-                        color,
-                    },
-                    shadow: Default::default(),
-                    snap: true,
-                },
-                Color::TRANSPARENT,
+                search,
+                idle && cursor.is_over(strip.search_hit_area),
+                search_reveal,
+                &self.theme,
             );
-            renderer::Renderer::fill_quad(
-                renderer,
-                renderer::Quad {
-                    bounds: glyph.handle,
-                    border: iced::Border {
-                        radius: 1.0.into(),
-                        ..Default::default()
-                    },
-                    shadow: Default::default(),
-                    snap: true,
-                },
-                color,
-            );
-        }
+            if search_reveal > 0.0 {
+                draw_search(
+                    renderer,
+                    search,
+                    self.theme.card().scale_alpha(0.95 * search_reveal),
+                );
+            }
 
-        let gear_reveal = Self::reveal(self.magnification.scale(count + 2));
-        if let (Some(gear), Some(gear_hit)) = (strip.settings_button, strip.settings_hit_area) {
+            let gear = strip.settings_button;
+            let gear_reveal = Self::reveal(self.magnification.scale(count + 2));
             draw_slot(
                 renderer,
                 gear,
-                idle && cursor.is_over(gear_hit),
+                idle && cursor.is_over(strip.settings_hit_area),
                 gear_reveal,
                 &self.theme,
             );
             if gear_reveal > 0.0 {
+                let color = self.theme.card().scale_alpha(0.95 * gear_reveal);
                 for quad in settings_glyph(gear) {
                     renderer::Renderer::fill_quad(
                         renderer,
@@ -1207,7 +1251,35 @@ impl<'a> BarStrip<'a> {
                             shadow: Default::default(),
                             snap: true,
                         },
-                        self.theme.card().scale_alpha(0.95 * gear_reveal),
+                        color,
+                    );
+                }
+            }
+        } else {
+            let reveal = Self::reveal(self.magnification.scale(count));
+            let actions = strip.actions_button + Vector::new(self.add_shake, 0.0);
+            draw_slot(
+                renderer,
+                actions,
+                idle && cursor.is_over(strip.actions_hit_area),
+                reveal,
+                &self.theme,
+            );
+            if reveal > 0.0 {
+                let color = self.theme.card().scale_alpha(0.95 * reveal);
+                for quad in actions_glyph(actions) {
+                    renderer::Renderer::fill_quad(
+                        renderer,
+                        renderer::Quad {
+                            bounds: quad,
+                            border: iced::Border {
+                                radius: 1.0.into(),
+                                ..Default::default()
+                            },
+                            shadow: Default::default(),
+                            snap: true,
+                        },
+                        color,
                     );
                 }
             }
@@ -1481,9 +1553,95 @@ impl<'a> From<BarStrip<'a>> for Element<'a, Message> {
 fn hint_anchor(strip: &StripLayout, at: HintAt) -> Option<Rectangle> {
     match at {
         HintAt::Bar(i) => strip.bars.get(i).copied(),
+        HintAt::Actions => Some(strip.actions_button),
         HintAt::Add => Some(strip.add_button),
         HintAt::Search => Some(strip.search_button),
+        HintAt::Settings => Some(strip.settings_button),
     }
+}
+
+/// Brand mark inside the collapsed Actions slot: a sticky with a strip bar.
+fn actions_glyph(slot: Rectangle) -> Vec<Rectangle> {
+    let w = slot.width * 0.55;
+    let h = slot.height * 0.55;
+    let x = slot.x + (slot.width - w) / 2.0 - slot.width * 0.04;
+    let y = slot.y + (slot.height - h) / 2.0;
+    let band = (h * 0.18).max(1.5);
+    let bar_w = (slot.width * 0.12).max(1.5);
+    let stroke = (slot.width.min(slot.height) * 0.08).max(1.0);
+    vec![
+        // Sticky outline: top, bottom, left, right (before the bar).
+        Rectangle::new(Point::new(x, y), Size::new(w, stroke)),
+        Rectangle::new(Point::new(x, y + h - stroke), Size::new(w, stroke)),
+        Rectangle::new(Point::new(x, y), Size::new(stroke, h)),
+        Rectangle::new(Point::new(x + w - stroke, y), Size::new(stroke, h)),
+        // Adhesive band.
+        Rectangle::new(
+            Point::new(x + stroke, y + stroke),
+            Size::new(w - 2.0 * stroke, band),
+        ),
+        // Strip bar to the right of the sticky.
+        Rectangle::new(
+            Point::new(x + w + stroke * 0.5, y + h * 0.15),
+            Size::new(bar_w, h * 0.7),
+        ),
+    ]
+}
+
+fn draw_plus(renderer: &mut iced::Renderer, slot: Rectangle, color: Color) {
+    let thickness = 2.0;
+    let len = (slot.width.min(slot.height) * 0.5).max(thickness);
+    let cx = slot.x + slot.width / 2.0;
+    let cy = slot.y + slot.height / 2.0;
+    for size in [Size::new(len, thickness), Size::new(thickness, len)] {
+        renderer::Renderer::fill_quad(
+            renderer,
+            renderer::Quad {
+                bounds: Rectangle::new(
+                    Point::new(cx - size.width / 2.0, cy - size.height / 2.0),
+                    size,
+                ),
+                border: iced::Border {
+                    radius: 1.0.into(),
+                    ..Default::default()
+                },
+                shadow: Default::default(),
+                snap: true,
+            },
+            color,
+        );
+    }
+}
+
+fn draw_search(renderer: &mut iced::Renderer, slot: Rectangle, color: Color) {
+    let glyph = search_glyph(slot);
+    renderer::Renderer::fill_quad(
+        renderer,
+        renderer::Quad {
+            bounds: glyph.ring,
+            border: iced::Border {
+                radius: (glyph.ring.width / 2.0).into(),
+                width: glyph.stroke,
+                color,
+            },
+            shadow: Default::default(),
+            snap: true,
+        },
+        Color::TRANSPARENT,
+    );
+    renderer::Renderer::fill_quad(
+        renderer,
+        renderer::Quad {
+            bounds: glyph.handle,
+            border: iced::Border {
+                radius: 1.0.into(),
+                ..Default::default()
+            },
+            shadow: Default::default(),
+            snap: true,
+        },
+        color,
+    );
 }
 
 /// A "sliders" settings icon inside `slot`: three tracks, each with a knob
@@ -1584,19 +1742,32 @@ mod tests {
             bounds(height),
             scroll,
             &BarSettings::default(),
+            false,
+            None,
+        )
+    }
+
+    fn layout_expanded(
+        count: usize,
+        scale: impl Fn(usize) -> f32,
+        height: f32,
+        scroll: f32,
+    ) -> StripLayout {
+        compute_layout(
+            count,
+            scale,
+            bounds(height),
+            scroll,
+            &BarSettings::default(),
             true,
             None,
         )
     }
 
     fn stack_center(l: &StripLayout) -> f32 {
-        let top = l.bars.first().map_or(l.add_button.y, |b| b.y);
-        let bottom = l.settings_button.unwrap().y + l.settings_button.unwrap().height;
+        let top = l.bars.first().map_or(l.actions_button.y, |b| b.y);
+        let bottom = l.actions_button.y + l.actions_button.height;
         (top + bottom) / 2.0
-    }
-
-    fn center(r: &Rectangle) -> Point {
-        Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0)
     }
 
     #[test]
@@ -1670,16 +1841,13 @@ mod tests {
     #[test]
     fn collapsing_bar_shrinks_with_progress() {
         let d = BarSettings::default();
-        let with = |collapse| compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &d, true, collapse);
+        let with = |collapse| compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &d, false, collapse);
         let full = with(None);
         let half = with(Some((1, 0.5)));
         assert!((half.bars[1].height - d.height / 2.0).abs() < 0.01);
         let gone = with(Some((1, 1.0)));
         assert_eq!(gone.bars[1].height, 0.0);
-        let extent = |l: &StripLayout| {
-            let gear = l.settings_button.unwrap();
-            gear.y + gear.height - l.bars[0].y
-        };
+        let extent = |l: &StripLayout| l.actions_button.y + l.actions_button.height - l.bars[0].y;
         assert!((extent(&full) - extent(&gone) - (d.height + d.gap)).abs() < 0.01);
     }
 
@@ -1697,7 +1865,7 @@ mod tests {
             height: 50.0,
             gap: 20.0,
         };
-        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &bars, true, None);
+        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &bars, false, None);
         assert_eq!(l.bars[0].size(), Size::new(10.0, 50.0));
         let gap = l.bars[1].y - (l.bars[0].y + l.bars[0].height);
         assert!((gap - 20.0).abs() < 0.01);
@@ -1709,43 +1877,47 @@ mod tests {
         assert!(l.max_scroll > 0.0);
         assert!((l.bars[0].y - EDGE_PADDING).abs() < 0.01);
         let scrolled = layout(40, |_| 1.0, 400.0, 1.0e6);
-        let last = scrolled.settings_button.unwrap().y + scrolled.settings_button.unwrap().height;
+        let last = scrolled.actions_button.y + scrolled.actions_button.height;
         assert!((last - (400.0 - EDGE_PADDING)).abs() < 0.01);
     }
 
     #[test]
     fn bars_keep_margin_from_screen_edge() {
         let l = layout(3, |_| 5.0, 900.0, 0.0);
-        for bar in
-            l.bars
-                .iter()
-                .chain([&l.add_button, &l.search_button, &l.settings_button.unwrap()])
-        {
+        for bar in l.bars.iter().chain([&l.actions_button]) {
             assert!((STRIP_WIDTH - (bar.x + bar.width) - EDGE_MARGIN).abs() < 0.01);
         }
+        let open = layout_expanded(3, |_| 1.0, 900.0, 0.0);
+        assert!(open.add_button.x + open.add_button.width <= STRIP_WIDTH - EDGE_MARGIN + 0.01);
+        assert!(open.settings_button.x >= 0.0);
     }
 
     #[test]
-    fn add_button_is_bar_shaped_at_rest() {
+    fn actions_slot_is_bar_shaped_at_rest() {
         let l = layout(3, |_| 1.0, 900.0, 0.0);
-        assert_eq!(l.add_button.size(), l.bars[0].size());
+        assert_eq!(l.actions_button.size(), l.bars[0].size());
+        assert!(!l.actions_expanded);
     }
 
     #[test]
-    fn magnified_add_button_widens_but_stays_compact() {
+    fn magnified_actions_slot_widens_but_stays_compact() {
         let d = BarSettings::default();
         let l = layout(3, |i| if i == 3 { 5.0 } else { 1.0 }, 900.0, 0.0);
-        assert!((l.add_button.width - d.width * 5.0).abs() < 0.01);
-        assert!((l.add_button.height - d.height * ADD_MAX_HEIGHT_SCALE).abs() < 0.01);
+        assert!((l.actions_button.width - d.width * 5.0).abs() < 0.01);
+        assert!((l.actions_button.height - d.height * ADD_MAX_HEIGHT_SCALE).abs() < 0.01);
     }
 
     #[test]
-    fn add_hit_area_spans_strip_width() {
+    fn actions_hit_area_spans_strip_width() {
         let l = layout(3, |_| 1.0, 900.0, 0.0);
-        assert_eq!(l.add_hit_area.width, STRIP_WIDTH);
+        assert_eq!(l.actions_hit_area.width, STRIP_WIDTH);
         assert!(l
-            .add_hit_area
-            .contains(Point::new(2.0, l.add_button.y + 2.0)));
+            .actions_hit_area
+            .contains(Point::new(2.0, l.actions_button.y + 2.0)));
+        assert!(matches!(
+            l.slot_message(l.actions_button.center()),
+            Some(Message::ToggleActions)
+        ));
     }
 
     #[test]
@@ -1903,6 +2075,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
         }
@@ -2053,6 +2226,7 @@ mod tests {
             clipboard_hint: false,
             toast: true,
             panel_open: false,
+            actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
         };
@@ -2117,6 +2291,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
         };
@@ -2179,6 +2354,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
         };
@@ -2235,6 +2411,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
         };
@@ -2308,6 +2485,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
         };
@@ -2351,6 +2529,7 @@ mod tests {
             clipboard_hint: false,
             toast: false,
             panel_open: false,
+            actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
         };
@@ -2385,46 +2564,47 @@ mod tests {
     }
 
     #[test]
-    fn no_settings_slot_where_the_tray_opens_settings() {
-        for count in [0, 3] {
-            let l = compute_layout(
-                count,
-                |_| 1.0,
-                bounds(900.0),
-                0.0,
-                &BarSettings::default(),
-                false,
-                None,
-            );
-            assert!(l.settings_button.is_none() && l.settings_hit_area.is_none());
-            let top = l.bars.first().map_or(l.add_button.y, |b| b.y);
-            let bottom = l.search_button.y + l.search_button.height;
-            assert!(((top + bottom) / 2.0 - 450.0).abs() < 0.01, "count {count}");
-            assert!(l.add_hit_area.contains(l.add_button.center()));
-            assert!(l.search_hit_area.contains(l.search_button.center()));
-            assert_eq!(l.hit_bottom(), bottom + EDGE_PADDING);
-            assert_eq!(l.settings_anchor(), l.add_button);
+    fn expanded_actions_sit_side_by_side() {
+        for count in [0, 1, 5] {
+            let l = layout_expanded(count, |_| 1.0, 900.0, 0.0);
+            assert!(l.actions_expanded);
+            assert!((l.add_button.y - l.search_button.y).abs() < 0.01);
+            assert!((l.search_button.y - l.settings_button.y).abs() < 0.01);
+            assert!(l.settings_button.x + l.settings_button.width <= l.search_button.x);
+            assert!(l.search_button.x + l.search_button.width <= l.add_button.x);
+            assert!(matches!(
+                l.slot_message(l.add_button.center()),
+                Some(Message::AddNote)
+            ));
+            assert!(matches!(
+                l.slot_message(l.search_button.center()),
+                Some(Message::ToggleSearch)
+            ));
+            assert!(matches!(
+                l.slot_message(l.settings_button.center()),
+                Some(Message::ToggleSettings)
+            ));
+            assert_eq!(l.settings_anchor(), l.settings_button);
+            assert_eq!(l.search_anchor(), l.search_button);
         }
     }
 
     #[test]
-    fn gear_slot_below_add_button_for_any_count() {
-        for count in [0, 1, 5] {
-            let l = layout(count, |_| 1.0, 900.0, 0.0);
-            let gear = center(&l.settings_button.unwrap());
-            assert!(l.settings_button.unwrap().y >= l.search_button.y + l.search_button.height);
-            assert!(l.settings_hit_area.unwrap().contains(gear), "count {count}");
-            assert!(!l.add_hit_area.contains(gear), "count {count}");
-            assert!(!l.search_hit_area.contains(gear), "count {count}");
-            assert!(l.add_hit_area.contains(center(&l.add_button)));
-        }
+    fn collapsed_actions_anchor_panels() {
+        let l = layout(2, |_| 1.0, 900.0, 0.0);
+        assert_eq!(l.settings_anchor(), l.actions_button);
+        assert_eq!(l.search_anchor(), l.actions_button);
+        assert!(matches!(
+            l.slot_message(l.actions_button.center()),
+            Some(Message::ToggleActions)
+        ));
     }
 
     #[test]
     fn magnified_gear_uses_its_own_scale() {
         let d = BarSettings::default();
-        let l = layout(2, |i| if i == 4 { 4.0 } else { 1.0 }, 900.0, 0.0);
-        assert!((l.settings_button.unwrap().width - d.width * 4.0).abs() < 0.01);
+        let l = layout_expanded(2, |i| if i == 4 { 4.0 } else { 1.0 }, 900.0, 0.0);
+        assert!((l.settings_button.width - d.width * 4.0).abs() < 0.01);
         assert_eq!(l.add_button.size(), l.bars[0].size());
         assert_eq!(l.search_button.size(), l.bars[0].size());
     }
@@ -2435,44 +2615,8 @@ mod tests {
     }
 
     #[test]
-    fn search_slot_hit_test() {
-        for settings_slot in [false, true] {
-            for count in [0, 3] {
-                let l = compute_layout(
-                    count,
-                    |_| 1.0,
-                    bounds(900.0),
-                    0.0,
-                    &BarSettings::default(),
-                    settings_slot,
-                    None,
-                );
-                let search = l.search_button;
-                assert!(search.y >= l.add_button.y + l.add_button.height);
-                if let Some(gear) = l.settings_button {
-                    assert!(gear.y >= search.y + search.height);
-                }
-                assert!(matches!(
-                    l.slot_message(search.center()),
-                    Some(Message::ToggleSearch)
-                ));
-                // Full strip width, like the add slot.
-                assert!(matches!(
-                    l.slot_message(Point::new(1.0, search.center().y)),
-                    Some(Message::ToggleSearch)
-                ));
-                assert!(matches!(
-                    l.slot_message(l.add_button.center()),
-                    Some(Message::AddNote)
-                ));
-                assert!(!l.add_hit_area.contains(search.center()));
-            }
-        }
-    }
-
-    #[test]
     fn alt_click_on_add_makes_clipboard_note() {
-        let l = layout(2, |_| 1.0, 900.0, 0.0);
+        let l = layout_expanded(2, |_| 1.0, 900.0, 0.0);
         let alt = iced::keyboard::Modifiers::ALT;
         let none = iced::keyboard::Modifiers::empty();
         let add = l.add_button.center();
@@ -2489,7 +2633,7 @@ mod tests {
 
     #[test]
     fn alt_resets_when_the_cursor_leaves_or_focus_goes() {
-        let l = layout(2, |_| 1.0, 900.0, 0.0);
+        let l = layout_expanded(2, |_| 1.0, 900.0, 0.0);
         let add = l.add_button.center();
         let alt = Event::Keyboard(keyboard::Event::ModifiersChanged(keyboard::Modifiers::ALT));
         for reset in [
@@ -2513,7 +2657,7 @@ mod tests {
     #[test]
     fn magnified_search_slot_uses_its_own_scale() {
         let d = BarSettings::default();
-        let l = layout(2, |i| if i == 3 { 4.0 } else { 1.0 }, 900.0, 0.0);
+        let l = layout_expanded(2, |i| if i == 3 { 4.0 } else { 1.0 }, 900.0, 0.0);
         assert!((l.search_button.width - d.width * 4.0).abs() < 0.01);
         assert_eq!(l.add_button.size(), l.bars[0].size());
     }
@@ -2544,20 +2688,20 @@ mod tests {
         strip.toast = true;
         let layout = strip.layout_in(STRIP_BOUNDS);
         let bar = layout.bars[0].center();
-        let add = layout.add_hit_area.center();
+        let actions = layout.actions_hit_area.center();
         let toast = toast_rect(&layout, STRIP_BOUNDS).center();
         let none = keyboard::Modifiers::default();
         assert!(matches!(
             strip.left_press(STRIP_BOUNDS, bar, none),
             Some(Some(Message::DragStart(0, _)))
         ));
-        assert!(strip.left_press(STRIP_BOUNDS, add, none).is_some());
+        assert!(strip.left_press(STRIP_BOUNDS, actions, none).is_some());
         assert!(strip.left_press(STRIP_BOUNDS, toast, none).is_some());
 
         // Sliding away (or back), nothing takes a click or a hover.
         for x_offset in [0.5, HIDE_SHIFT] {
             strip.x_offset = x_offset;
-            for pos in [bar, add, toast] {
+            for pos in [bar, actions, toast] {
                 assert!(strip.left_press(STRIP_BOUNDS, pos, none).is_none());
                 assert!(strip.hover_message(STRIP_BOUNDS, pos).is_none());
             }
@@ -2570,7 +2714,7 @@ mod tests {
             .bars
             .iter()
             .map(|bar| bar_rect_for(1.0, *bar))
-            .chain([layout.add_button, layout.search_button]);
+            .chain([layout.actions_button]);
         for rect in rects {
             assert!(rect.x + HIDE_SHIFT >= right + 24.0, "{rect:?}");
         }

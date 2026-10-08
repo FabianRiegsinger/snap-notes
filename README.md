@@ -14,7 +14,7 @@
 ### The bar strip
 - **Dock-style magnification:** move the cursor along the strip and nearby bars grow with smooth spring physics.
 - **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, scroll over it to read the rest of a longer note, and click it to open the note. Its trash button deletes the note at once, see [Notes](#notes) for undo.
-- **Quick add:** click the `+` slot below the bars (the whole strip width counts), or press Cmd/Ctrl+N. Hovering `+` for 0.6 s shows "New note · Option-click: from clipboard" (Alt-click on Windows/Linux). If the clipboard is empty, a clipboard note shakes `+` and shows "Clipboard is empty".
+- **Actions:** one slot below the bars opens into **New (+)**, **Search** and **Settings** side by side. Click Actions again, Esc, or pick an action to collapse. Alt/Option-click on **+** still makes a note from the clipboard (empty clipboard shakes the slot and shows "Clipboard is empty"). Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+, still work without opening Actions.
 - **Search:** click the 🔍 slot under `+`, press Cmd/Ctrl+F or choose **Search…** in the tray menu. Hovering 🔍 shows "Search (Cmd+F)" (Ctrl+F elsewhere). See [Search](#search).
 - **Hints on Linux:** hover hints aren't shown there unless a note or panel is open (the window is wide then).
 - **Reorder:** drag a bar up or down to move the note.
@@ -106,7 +106,7 @@ Notes are written in Markdown plus a few color and size tags. An open note shows
 - **Older palettes:** the palette now holds six colors. If you had customized it, `coral`, `peach`, `amber`, `mint`, `sky`, `lavender` and `==highlight==` keep your colors; the other 14 names go back to their fixed colors.
 
 ### Settings
-Open them from the menu bar/tray icon, the ⚙ slot under 🔍 in the strip (Windows and Linux) or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group except Data has a Reset button. There is no theme setting: dark mode follows the system.
+Open them from the menu bar/tray icon, the Settings control in the strip's Actions slot, or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group except Data has a Reset button. There is no theme setting: dark mode follows the system.
 
 The groups are split across two tabs, **Application** and **Styling**. Settings always opens on Application.
 
@@ -146,7 +146,7 @@ The Cmd/Ctrl shortcuts also work while you type in a note's title or body or in 
 | Bar strip, peek, notes, settings | ✓ | ✓ | ✓ |
 | Click-through around the strip | ✓ | ✓ | The window shrinks to the strip instead |
 | Menu bar / tray icon | ✓ | ✓ | – |
-| Settings slot in the strip | – | ✓ | ✓ |
+| Actions slot in the strip (New / Search / Settings) | ✓ | ✓ | ✓ |
 | Hide Dock icon / taskbar button | ✓ | ✓ | – |
 | Single instance | – | ✓ | – |
 

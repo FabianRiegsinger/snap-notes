@@ -1,8 +1,7 @@
 use crate::animation::{ease_out_cubic, morph_frame, MagnificationState, Morph, MorphFrame};
 use crate::autohide::{self, AutoHide};
 use crate::bar_strip::{
-    band, compute_layout, peek_target, stack_target, BarStrip, StripLayout, HIDE_SHIFT,
-    SETTINGS_SLOT, STRIP_WIDTH,
+    band, compute_layout, peek_target, stack_target, BarStrip, StripLayout, HIDE_SHIFT, STRIP_WIDTH,
 };
 use crate::export::{self, ExportFormat};
 use crate::export_panel::{export_panel, ExportJob, ExportState, ExportStatus, ExportView};
@@ -114,6 +113,9 @@ pub enum Message {
     StripHover(Option<f32>),
     BarClicked(usize),
     AddNote,
+    /// Expands or collapses the strip's Actions slot.
+    ToggleActions,
+    CloseActions,
     ToggleSettings,
     CloseSettings,
     /// Cmd/Ctrl+F, the strip's search slot or the tray item.
@@ -417,6 +419,8 @@ pub struct App {
     /// Gear center when the panel opened; the panel stays centered on it.
     settings_anchor_y: f32,
     settings_tab: SettingsTab,
+    /// The strip Actions slot shows New / Search / Settings side by side.
+    actions_open: bool,
     palette_slot: Option<usize>,
     /// The search panel is showing (kept while it folds back into its slot).
     search_open: bool,
@@ -634,6 +638,7 @@ impl App {
             settings_morph,
             settings_anchor_y: 0.0,
             settings_tab: SettingsTab::default(),
+            actions_open: false,
             palette_slot: None,
             search_open: false,
             search_morph,
@@ -707,7 +712,14 @@ impl App {
                     return self.open_note(index);
                 }
             }
+            Message::ToggleActions => {
+                self.actions_open = !self.actions_open;
+            }
+            Message::CloseActions => {
+                self.actions_open = false;
+            }
             Message::ToggleSettings => {
+                self.actions_open = false;
                 if self.settings_open && self.settings_morph.is_opening() {
                     return self.update(Message::CloseSettings);
                 }
@@ -838,6 +850,7 @@ impl App {
                 }
             }
             Message::AddNote => {
+                self.actions_open = false;
                 self.force_reveal = true;
                 return self.create_note(None, String::new());
             }
@@ -1214,7 +1227,10 @@ impl App {
                 self.last_cursor = None;
             }
             Message::FileHoverEnded => self.file_hover = false,
-            Message::ClipboardNote => return self.clipboard_note(read_clipboard()),
+            Message::ClipboardNote => {
+                self.actions_open = false;
+                return self.clipboard_note(read_clipboard());
+            }
             Message::ImagePicked(id, Some(path))
                 if self.active_note == Some(id) && self.morph.is_opening() =>
             {
@@ -1284,6 +1300,7 @@ impl App {
             }
             Message::DragStart(index, _) if self.is_collapsing(index) => {}
             Message::DragStart(index, origin_y) => {
+                self.actions_open = false;
                 self.hide_peek();
                 // Origin is the press position, so a click without movement
                 // opens the note even when pressed far from the bar's center.
@@ -1509,6 +1526,9 @@ impl App {
                     _ => {}
                 }
                 match key.as_ref() {
+                    keyboard::Key::Named(Named::Escape) if self.actions_open => {
+                        self.actions_open = false
+                    }
                     keyboard::Key::Named(Named::Escape) if self.color_picker_open => {
                         self.color_picker_open = false
                     }
@@ -1655,6 +1675,7 @@ impl App {
             clipboard_hint: self.clipboard_empty_at.is_some(),
             toast: self.toast_visible(),
             panel_open: self.panel_open(),
+            actions_expanded: self.actions_open,
             x_offset: self.strip_x_offset(),
         })
         .width(Fill)
@@ -2828,7 +2849,7 @@ impl App {
         if !self.search_open {
             return None;
         }
-        let source = self.strip_layout().search_button;
+        let source = self.strip_layout().search_anchor();
         Some(self.panel_frame(source, self.search_anchor_y, &self.search_morph))
     }
 
@@ -2863,6 +2884,7 @@ impl App {
     /// Opens the search panel, or closes it while it is showing. It closes
     /// the note and the settings, and starts with an empty query.
     fn toggle_search(&mut self) -> Task<Message> {
+        self.actions_open = false;
         self.force_reveal = true;
         if self.search_open && self.search_morph.is_opening() {
             self.close_search();
@@ -2874,7 +2896,7 @@ impl App {
         self.hide_peek();
         // Still folding away: unfold again from where it is, query kept.
         if !self.search_open {
-            let slot = self.strip_layout().search_button;
+            let slot = self.strip_layout().search_anchor();
             self.search_anchor_y = slot.y + slot.height / 2.0;
             self.search_open = true;
             self.search_query.clear();
@@ -3157,7 +3179,7 @@ impl App {
             band(bounds, self.strip_fraction()),
             self.scroll_offset,
             &self.settings.settings().bars,
-            SETTINGS_SLOT,
+            self.actions_open,
             self.collapse(),
         )
     }
@@ -3282,18 +3304,19 @@ impl App {
         )
     }
 
-    /// Bar centers plus the add, search and settings buttons', which
-    /// magnify along with them.
+    /// Bar centers plus the Actions slot(s), which magnify along with them.
     fn magnification_centers(&self) -> Vec<f32> {
         let strip = self.strip_layout();
-        strip
-            .bars
-            .iter()
-            .copied()
-            .chain([strip.add_button, strip.search_button])
-            .chain(strip.settings_button)
-            .map(|r| r.y + r.height / 2.0)
-            .collect()
+        let mut centers: Vec<f32> = strip.bars.iter().map(|r| r.y + r.height / 2.0).collect();
+        if strip.actions_expanded {
+            centers.extend(
+                [strip.add_button, strip.search_button, strip.settings_button]
+                    .map(|r| r.y + r.height / 2.0),
+            );
+        } else {
+            centers.push(strip.actions_button.y + strip.actions_button.height / 2.0);
+        }
+        centers
     }
 
     /// The strip's entries, one per bar: the cached ones while the store
@@ -5291,6 +5314,21 @@ mod tests {
         let _ = app.update(Message::ToggleSettings);
         assert!(app.settings_morph.is_opening());
         assert_eq!(app.settings_anchor_y, 123.0);
+    }
+
+    #[test]
+    fn actions_slot_expands_and_collapses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        assert!(!app.actions_open);
+        let _ = app.update(Message::ToggleActions);
+        assert!(app.actions_open);
+        assert!(app.strip_layout().actions_expanded);
+        let _ = app.update(Message::ToggleSearch);
+        assert!(!app.actions_open);
+        let _ = app.update(Message::ToggleActions);
+        let _ = app.update(Message::CloseActions);
+        assert!(!app.actions_open);
     }
 
     #[test]

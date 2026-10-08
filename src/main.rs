@@ -5,6 +5,7 @@ mod animation;
 mod app;
 mod autohide;
 mod bar_strip;
+mod brand;
 mod color_bubble;
 mod color_picker;
 mod color_wheel;
@@ -51,15 +52,20 @@ fn main() -> iced::Result {
     for font in icons::FONTS {
         app = app.font(font);
     }
+    let icon = window::icon::from_rgba(brand::icon_rgba(32), 32, 32).expect("brand icon");
     app.default_font(icons::BODY_FONT)
         .subscription(App::subscription)
         .title("Snap Notes")
-        .transparent(true)
-        .decorations(false)
-        .level(window::Level::AlwaysOnTop)
-        .window_size((settings::Settings::default().open_width(), 600.0))
-        .position(window::Position::SpecificWith(dock_right))
-        .resizable(false)
+        .window(window::Settings {
+            size: Size::new(settings::Settings::default().open_width(), 600.0),
+            position: window::Position::SpecificWith(dock_right),
+            transparent: true,
+            decorations: false,
+            resizable: false,
+            level: window::Level::AlwaysOnTop,
+            icon: Some(icon),
+            ..window::Settings::default()
+        })
         .theme(theme)
         .style(style)
         .run()
