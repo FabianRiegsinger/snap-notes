@@ -432,7 +432,8 @@ mod tests {
 
     #[test]
     fn dock_toggle_locked_without_tray() {
-        let s = Settings::default();
+        let mut s = Settings::default();
+        s.app.show_dock_icon = true;
         assert!(!toggle_enabled(&s, SettingToggle::DockIcon, false));
         assert!(toggle_enabled(&s, SettingToggle::MenuBarIcon, false));
         assert!(toggle_enabled(&s, SettingToggle::DockIcon, true));
@@ -440,8 +441,8 @@ mod tests {
 
     #[test]
     fn last_icon_toggle_disabled() {
-        let mut s = Settings::default();
-        s.toggle(SettingToggle::DockIcon);
+        let s = Settings::default();
+        assert!(!s.app.show_dock_icon);
         assert!(!toggle_enabled(&s, SettingToggle::MenuBarIcon, true));
         assert!(toggle_enabled(&s, SettingToggle::DockIcon, true));
     }

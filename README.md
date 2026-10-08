@@ -24,7 +24,7 @@
 - **File drops:** drop a file on `+` or on empty space to create a note, or on a bar to append to that note (the top note of a stack). A `.txt` or `.md` file up to 1 MB adds its text, and a new note gets the file name as its title. An image file is added as an image, and any other file as its path. Dropping onto an open note inserts an image, as before.
 - **From the clipboard:** **New Note from Clipboard** in the tray menu, or Alt/Option-click on `+`, makes a note whose body is the clipboard's text or image.
 - **Scroll:** with more notes than fit on screen, scroll the strip with the mouse wheel.
-- **Auto-hide:** off by default, switch it on in Settings → Window. The strip then slides off the right edge 0.8 s after the cursor leaves the strip, its peek or the undo toast. To bring it back, hold the cursor against the right screen edge where the strip sits for about 0.15 s. The setting is saved, but the strip is always shown when the app starts.
+- **Auto-hide:** on by default, switch it off in Settings → Window. The strip then slides off the right edge 0.8 s after the cursor leaves the strip, its peek or the undo toast. To bring it back, hold the cursor against the right screen edge where the strip sits for about 0.15 s. The setting is saved, but the strip is always shown when the app starts.
   - **Stays shown:** while a search, settings or export panel is open, during a bar or file drag, while the undo toast or the "Clipboard is empty" hint shows, and after a reminder fires. A fired reminder slides the strip in and it stays until you open that note.
   - **Open notes:** an open note does not keep the strip shown. The strip can slide away while the note stays open and usable.
   - **Other ways back:** the global hotkey, the tray's **New Note**, **New Note from Clipboard**, **Search…**, **Settings…** and **Export…**, and Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+,.
@@ -115,7 +115,7 @@ Open them from the menu bar/tray icon, the ⚙ slot under 🔍 in the strip (Win
 | Hover | Magnification, how far it spreads, and the peek delay (0–3 s) |
 | Notes | Default size, paper tint (lighter/darker than the bar), and how faint the header controls are until you hover |
 | Motion | Animation speed (0.25–3×) |
-| Window | How much of the screen height the strip may use, and **Auto-hide** (off by default, see [The bar strip](#the-bar-strip)) |
+| Window | How much of the screen height the strip may use, and **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)) |
 | Palette | Replace any of the 6 note colors from 60 presets. Notes using the old color follow along. |
 | Data | **Export…** your notes to one file (see [Export](#export)) |
 

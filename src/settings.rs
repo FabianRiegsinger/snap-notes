@@ -24,9 +24,9 @@ pub struct BarSettings {
 impl Default for BarSettings {
     fn default() -> Self {
         Self {
-            width: 6.0,
-            height: 30.0,
-            gap: 12.0,
+            width: 10.0,
+            height: 42.0,
+            gap: 16.0,
         }
     }
 }
@@ -41,9 +41,9 @@ pub struct HoverSettings {
 impl Default for HoverSettings {
     fn default() -> Self {
         Self {
-            magnification: 4.0,
+            magnification: 1.0,
             spread: 60.0,
-            peek_delay_secs: 1.0,
+            peek_delay_secs: 0.2,
         }
     }
 }
@@ -64,8 +64,8 @@ impl Default for NoteSettings {
     fn default() -> Self {
         Self {
             size: 500.0,
-            paper_tint: -0.12,
-            idle_control_alpha: 0.3,
+            paper_tint: 0.0,
+            idle_control_alpha: 0.7,
         }
     }
 }
@@ -94,7 +94,7 @@ impl Default for WindowSettings {
     fn default() -> Self {
         Self {
             height_fraction: 0.9,
-            auto_hide: false,
+            auto_hide: true,
         }
     }
 }
@@ -113,7 +113,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             show_menu_bar_icon: true,
-            show_dock_icon: true,
+            show_dock_icon: false,
             global_hotkey: true,
         }
     }
@@ -664,21 +664,24 @@ mod tests {
     #[test]
     fn defaults_match_current_constants() {
         let s = Settings::default();
-        assert_eq!((s.bars.width, s.bars.height, s.bars.gap), (6.0, 30.0, 12.0));
+        assert_eq!(
+            (s.bars.width, s.bars.height, s.bars.gap),
+            (10.0, 42.0, 16.0)
+        );
         assert_eq!(
             (
                 s.hover.magnification,
                 s.hover.spread,
                 s.hover.peek_delay_secs
             ),
-            (4.0, 60.0, 1.0)
+            (1.0, 60.0, 0.2)
         );
         assert_eq!(
             (s.notes.size, s.notes.paper_tint, s.notes.idle_control_alpha),
-            (500.0, -0.12, 0.3)
+            (500.0, 0.0, 0.7)
         );
         assert_eq!(s.motion.speed, 1.0);
-        assert_eq!(s.window.height_fraction, 0.9);
+        assert_eq!((s.window.height_fraction, s.window.auto_hide), (0.9, true));
         assert_eq!(s.palette, DEFAULT_PALETTE.to_vec());
     }
 
@@ -912,10 +915,18 @@ mod tests {
         assert!(s.reset_palette().is_empty());
     }
 
+    /// Defaults with both the menu bar/tray icon and the Dock icon/taskbar
+    /// button shown.
+    fn both_icons_shown() -> Settings {
+        let mut s = Settings::default();
+        s.app.show_dock_icon = true;
+        s
+    }
+
     #[test]
-    fn app_defaults_show_both() {
+    fn app_defaults_show_only_the_menu_bar_icon() {
         let s = Settings::default();
-        assert!(s.app.show_menu_bar_icon && s.app.show_dock_icon);
+        assert!(s.app.show_menu_bar_icon && !s.app.show_dock_icon && s.app.global_hotkey);
     }
 
     #[test]
@@ -927,8 +938,8 @@ mod tests {
 
     #[test]
     fn app_settings_ignore_non_bool() {
-        let s = Settings::from_json(r#"{"app":{"show_dock_icon":"no"}}"#);
-        assert!(s.app.show_dock_icon);
+        let s = Settings::from_json(r#"{"app":{"show_dock_icon":"yes"}}"#);
+        assert!(!s.app.show_dock_icon);
     }
 
     #[test]
@@ -941,7 +952,7 @@ mod tests {
 
     #[test]
     fn toggle_refuses_to_hide_last_icon() {
-        let mut s = Settings::default();
+        let mut s = both_icons_shown();
         assert!(s.toggle(SettingToggle::DockIcon));
         assert!(!s.is_on(SettingToggle::DockIcon));
         assert!(!s.can_toggle(SettingToggle::MenuBarIcon));
@@ -953,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_app_group_shows_both() {
+    fn reset_app_group_restores_defaults() {
         let mut s = Settings::default();
         s.toggle(SettingToggle::DockIcon);
         s.reset(SettingsGroup::App);
@@ -962,7 +973,7 @@ mod tests {
 
     #[test]
     fn json_roundtrip_keeps_app_settings() {
-        let mut s = Settings::default();
+        let mut s = both_icons_shown();
         s.toggle(SettingToggle::MenuBarIcon);
         let back = Settings::from_json(&serde_json::to_string(&s).unwrap());
         assert_eq!(back, s);

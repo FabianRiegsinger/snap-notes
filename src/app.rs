@@ -5585,7 +5585,10 @@ mod tests {
     fn tray_failure_shows_dock_without_saving_it() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_in(&dir);
-        app.settings.settings_mut().toggle(SettingToggle::DockIcon);
+        assert!(
+            !app.settings.settings().app.show_dock_icon,
+            "hidden by default"
+        );
         app.settings.did_save();
         let _ = app.update(Message::TrayReady(false));
         assert!(app.dock_icon_shown());
@@ -6349,7 +6352,9 @@ mod tests {
 
     /// `app` with auto-hide switched on (as the toggle does, without a step).
     fn with_auto_hide(mut app: App) -> App {
-        app.settings.settings_mut().toggle(SettingToggle::AutoHide);
+        if !app.settings.settings().is_on(SettingToggle::AutoHide) {
+            app.settings.settings_mut().toggle(SettingToggle::AutoHide);
+        }
         app
     }
 
@@ -6388,28 +6393,32 @@ mod tests {
 
     #[test]
     fn auto_hide_setting_persists_and_starts_shown() {
-        assert!(!Settings::default().window.auto_hide);
+        assert!(Settings::default().window.auto_hide);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let mut store = SettingsStore::load(path.clone());
-        assert!(!store.settings().is_on(SettingToggle::AutoHide));
+        assert!(store.settings().is_on(SettingToggle::AutoHide));
         assert!(store.settings_mut().toggle(SettingToggle::AutoHide));
-        assert!(store.settings().window.auto_hide);
+        assert!(!store.settings().window.auto_hide);
         store.save().unwrap();
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(json["window"]["auto_hide"], serde_json::Value::Bool(true));
+        assert_eq!(json["window"]["auto_hide"], serde_json::Value::Bool(false));
 
+        let mut reloaded = SettingsStore::load(path.clone());
+        assert!(!reloaded.settings().window.auto_hide);
+        assert!(reloaded.settings_mut().toggle(SettingToggle::AutoHide));
+        reloaded.save().unwrap();
         let reloaded = SettingsStore::load(path);
         assert!(reloaded.settings().window.auto_hide);
         let app = App::new(NoteStore::load(dir.path().join("notes.json")), reloaded);
         assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Shown);
         assert_eq!(app.strip_x_offset(), 0.0);
 
-        let mut s = Settings::from_json(r#"{"window": {"auto_hide": true}}"#);
-        assert!(s.window.auto_hide);
-        s.reset(SettingsGroup::Window);
+        let mut s = Settings::from_json(r#"{"window": {"auto_hide": false}}"#);
         assert!(!s.window.auto_hide);
+        s.reset(SettingsGroup::Window);
+        assert!(s.window.auto_hide);
     }
 
     #[test]
