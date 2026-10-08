@@ -87,14 +87,19 @@ fn pulse_halo(rect: Rectangle, pulse: f32) -> Rectangle {
     rect.expand(PULSE_REACH * pulse.clamp(0.0, 1.0))
 }
 
-/// The two 1 px "card edge" lines left of a stack's bar, each further out
-/// and shorter than the last.
+/// Width of each "card edge" line left of a stack's bar.
+const STACK_EDGE_WIDTH: f32 = 2.0;
+/// Horizontal step from one stack edge to the next.
+const STACK_EDGE_STEP: f32 = 4.0;
+
+/// The two "card edge" lines left of a stack's bar, each further out and
+/// shorter than the last.
 fn stack_edges(rect: Rectangle) -> [Rectangle; 2] {
     [1, 2].map(|n| {
         let inset = 3.0 * n as f32;
         Rectangle::new(
-            Point::new(rect.x - 3.0 * n as f32, rect.y + inset),
-            Size::new(1.0, (rect.height - 2.0 * inset).max(0.0)),
+            Point::new(rect.x - STACK_EDGE_STEP * n as f32, rect.y + inset),
+            Size::new(STACK_EDGE_WIDTH, (rect.height - 2.0 * inset).max(0.0)),
         )
     })
 }
@@ -1088,11 +1093,11 @@ impl<'a> BarStrip<'a> {
                             renderer,
                             renderer::Quad {
                                 bounds: edge,
-                                border: Default::default(),
+                                border: iced::border::rounded(STACK_EDGE_WIDTH / 2.0),
                                 shadow: Default::default(),
                                 snap: true,
                             },
-                            self.theme.ink(0.35 * dim),
+                            self.theme.ink(0.55 * dim),
                         );
                     }
                 }
@@ -1633,7 +1638,9 @@ mod tests {
     fn stack_edges_sit_left_of_the_bar() {
         let r = Rectangle::new(Point::new(40.0, 100.0), Size::new(8.0, 40.0));
         let [a, b] = stack_edges(r);
-        assert!(a.x + a.width <= r.x && b.x + b.width <= a.x);
+        // Separate lines with a visible gap between them and the bar.
+        assert!(a.x + a.width < r.x && b.x + b.width < a.x);
+        assert!(a.width >= 2.0 && b.width >= 2.0);
         assert!(b.height < a.height && a.height < r.height);
     }
 
