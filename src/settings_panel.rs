@@ -12,7 +12,7 @@ use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM
 use iced::widget::{button, column, container, row, scrollable, slider, text, toggler, Space};
 use iced::{border, Color, Element, Fill, Length, Padding, Shadow, Size, Theme};
 
-pub const PANEL_WIDTH: f32 = 360.0;
+pub const PANEL_WIDTH: f32 = 400.0;
 pub const PANEL_MAX_HEIGHT: f32 = 600.0;
 /// The adhesive band across the card's top, as tall as the note's.
 const BAND_HEIGHT: f32 = 16.0;
@@ -332,7 +332,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
 
         let mut body = column![]
             .spacing(space(4))
-            .padding(Padding::ZERO.right(space(3)));
+            .padding(Padding::ZERO.right(space(5)));
         #[cfg(not(any(windows, target_os = "macos")))]
         let _ = (tray_ok, dock_forced, hotkey_error);
         for group in SettingsGroup::ALL.into_iter().filter(|g| g.tab() == tab) {
