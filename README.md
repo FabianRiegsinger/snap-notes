@@ -4,7 +4,9 @@
 
 Snap Notes turns sticky notes into slim colored bars along the edge of your screen. Hover to make them grow like the macOS Dock, rest on one to peek inside, click to unfold a full note. Everywhere else, your clicks go straight to the apps behind it.
 
-![Snap Notes: the bar strip on the screen edge, a hover peek and an open note](docs/assets/overview.svg)
+<p align="center">
+  <img src="docs/assets/overview.svg" alt="Snap Notes: the bar strip on the screen edge, a hover peek and an open note">
+</p>
 
 ## Why you'll love it
 
