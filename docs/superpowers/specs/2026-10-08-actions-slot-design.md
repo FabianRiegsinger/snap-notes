@@ -7,8 +7,8 @@ Replace the three strip slots (New, Search, Settings) with one **Actions** contr
 ## Strip interaction
 
 - One Actions slot under the bars on every platform (including macOS).
-- **Collapsed:** hollow slot with the brand mark; tooltip “Actions”.
-- **Expanded:** horizontal row of New (+) / Search / Settings, right-aligned, short gap between them; same hollow/magnify language as today.
+- **Collapsed:** soft glass pill with the brand mark; tooltip “Actions”.
+- **Expanded:** horizontal row of New (+) / Search / Settings, right-aligned, short gap between them; soft glass pills (frosted fill, hairline border, ~6px radius, ~70% icon ink; brighter on hover, 1px sink when pressed).
 - Hover Actions → expand. Leave the row → collapse. Click does not toggle expand.
 - Click an action while expanded → run it. Alt/Option on + still means clipboard note.
 - Keyboard shortcuts and tray menu items still open each action directly.

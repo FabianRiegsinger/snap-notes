@@ -12,13 +12,17 @@ use crate::settings::{
 };
 use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM, TEXT_XS};
 
-use iced::widget::{button, column, container, row, scrollable, slider, text, toggler, Space};
-use iced::{border, Color, Element, Fill, Length, Padding, Shadow, Size, Theme};
+use iced::widget::{
+    button, column, container, mouse_area, row, scrollable, slider, text, toggler, Space,
+};
+use iced::{border, mouse, Color, Element, Fill, Length, Padding, Shadow, Size, Theme};
 
 pub const PANEL_WIDTH: f32 = 400.0;
 pub const PANEL_MAX_HEIGHT: f32 = 600.0;
 /// The adhesive band across the card's top, as tall as the note's.
 const BAND_HEIGHT: f32 = 16.0;
+/// Drag grip height inside the settings card (matches the note grip).
+const GRIP_HEIGHT: f32 = 16.0;
 
 pub struct SettingsView<'a> {
     pub theme: theme::Theme,
@@ -36,6 +40,8 @@ pub struct SettingsView<'a> {
     pub dock_forced: bool,
     /// Why the global hotkey couldn't be registered, if it couldn't.
     pub hotkey_error: Option<&'a str>,
+    /// The panel is being dragged from its grip.
+    pub dragging: bool,
 }
 
 /// A quiet text or icon button: an ink wash while hovered or pressed.
@@ -414,10 +420,33 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         tray_ok,
         dock_forced,
         hotkey_error,
+        dragging,
     } = v;
     let inner: Element<'_, Message> = if a < 0.01 {
         Space::new().width(Fill).height(Fill).into()
     } else {
+        let pill = container(Space::new().width(36).height(4)).style(move |_theme: &Theme| {
+            container::Style {
+                background: Some(theme.ink(0.3 * a).into()),
+                border: border::rounded(2),
+                ..Default::default()
+            }
+        });
+        let grip = mouse_area(
+            container(pill)
+                .width(Fill)
+                .height(GRIP_HEIGHT)
+                .align_x(iced::Alignment::Center)
+                .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::SettingsDragStart)
+        .on_double_click(Message::SettingsResetPosition)
+        .interaction(if dragging {
+            mouse::Interaction::Grabbing
+        } else {
+            mouse::Interaction::Grab
+        });
+
         let header = row![
             text("Settings")
                 .size(TEXT_MD)
@@ -471,12 +500,13 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         }
 
         column![
+            grip,
             header,
             tab_bar(tab, theme, a),
             scrollable(body).height(Fill)
         ]
         .spacing(space(3))
-        .padding(Padding::new(space(4)).right(space(1)))
+        .padding(Padding::new(space(4)).top(space(1)).right(space(1)))
         .into()
     };
     paper_card(inner, size, theme, t)

@@ -46,6 +46,10 @@ const SLOT_ALONG_SCALE: f32 = 0.5;
 const ADD_PLUS_SCALE: f32 = 3.0;
 const EDGE_PADDING: f32 = 16.0;
 const CORNER_RADIUS: f32 = theme::RADIUS_BAR;
+/// Corner radius for soft glass action pills (Settings / Search / Add).
+const GLASS_SLOT_RADIUS: f32 = 6.0;
+/// Icon ink strength inside glass action pills.
+const GLASS_ICON_INK: f32 = 0.7;
 /// The open note's bar is this much wider than a docked one.
 const OPEN_BAR_SCALE: f32 = 1.5;
 /// Opacity factor for bars of notes that don't match the search.
@@ -190,12 +194,11 @@ fn start_cap(rect: Rectangle, depth: f32, edge: Edge) -> Rectangle {
 }
 
 /// Factor on a bar's alpha: a checklist bar is faint under its progress
-/// fill, and an all-done one dims entirely.
+/// fill (including when every task is done and the fill covers the bar).
 fn progress_alpha(progress: Option<(usize, usize)>) -> f32 {
     match progress {
-        Some((done, total)) if total > 0 && done >= total => 0.5,
-        Some(_) => 0.45,
-        None => 1.0,
+        Some((_, total)) if total > 0 => 0.45,
+        _ => 1.0,
     }
 }
 
@@ -816,8 +819,12 @@ fn slot_size(bars: &BarSettings, scale: f32) -> Size {
     )
 }
 
+/// Extra room past the expanded pills so the cursor can aim for Settings
+/// without leaving the strip widget / interactive column.
+pub const ACTIONS_HOVER_PAD: f32 = 8.0;
+
 /// How far from the screen edge the expanded Actions row reaches (margin +
-/// three chips + gaps), at least [`STRIP_WIDTH`] so the strip never shrinks.
+/// three chips + gaps + hover pad), at least [`STRIP_WIDTH`].
 pub fn actions_row_extent(
     bars: &BarSettings,
     bar_count: usize,
@@ -826,7 +833,8 @@ pub fn actions_row_extent(
     let add = slot_size(bars, scale(bar_count));
     let search = slot_size(bars, scale(bar_count + 1));
     let gear = slot_size(bars, scale(bar_count + 2));
-    (EDGE_MARGIN + add.width + ACTION_GAP + search.width + ACTION_GAP + gear.width).max(STRIP_WIDTH)
+    (EDGE_MARGIN + add.width + ACTION_GAP + search.width + ACTION_GAP + gear.width + ACTIONS_HOVER_PAD)
+        .max(STRIP_WIDTH)
 }
 
 /// Lays out the bars plus the Actions slot (collapsed or expanded into New /
@@ -939,9 +947,9 @@ pub fn compute_layout(
         actions_button.away + actions_button.thickness
     };
     // Expanded chips can reach past the strip band once they magnify; the
-    // hit area must cover the whole row or hover collapses before Settings.
+    // hit area must cover the whole row (plus pad) or hover collapses.
     let hit_thickness = if actions_expanded {
-        row_far.max(span.thickness)
+        (row_far + ACTIONS_HOVER_PAD).max(span.thickness)
     } else {
         span.thickness
     };
@@ -1474,8 +1482,8 @@ impl<'a> BarStrip<'a> {
                     self.theme.bar_gradient(note.color, alpha),
                 );
                 // Open tasks leave the bar faint; done ones fill it from its
-                // end along the edge. An all-done bar just dims.
-                if let Some((done, total)) = progress.filter(|(d, t)| d < t) {
+                // end along the edge. All done → fill covers the whole bar.
+                if let Some((done, total)) = progress.filter(|(d, t)| *t > 0 && *d > 0) {
                     let fill = progress_fill(rect, done, total, edge);
                     let fill_length = along_span(fill, edge).1;
                     if fill_length > 0.0 {
@@ -1545,10 +1553,15 @@ impl<'a> BarStrip<'a> {
         // Actions slot: collapsed brand mark, or New / Search / Settings in a row.
         let idle = self.drag.is_none();
         let count = self.entries.len();
+        let pressed = tree.state.downcast_ref::<StripState>().pressed_slot;
+        let icon = |reveal: f32| self.theme.ink(GLASS_ICON_INK * reveal);
         if strip.actions_expanded {
             let add_reveal = Self::reveal(self.magnification.scale(count));
             // The shake is a horizontal "no" on every edge.
-            let add = strip.add_button + Vector::new(self.add_shake, 0.0);
+            let add = sink_slot(
+                strip.add_button + Vector::new(self.add_shake, 0.0),
+                pressed == Some(Slot::Add),
+            );
             draw_slot(
                 renderer,
                 add,
@@ -1557,15 +1570,11 @@ impl<'a> BarStrip<'a> {
                 &self.theme,
             );
             if add_reveal > 0.0 {
-                draw_plus(
-                    renderer,
-                    add,
-                    self.theme.card().scale_alpha(0.95 * add_reveal),
-                );
+                draw_plus(renderer, add, icon(add_reveal));
             }
 
-            let search = strip.search_button;
             let search_reveal = Self::reveal(self.magnification.scale(count + 1));
+            let search = sink_slot(strip.search_button, pressed == Some(Slot::Search));
             draw_slot(
                 renderer,
                 search,
@@ -1574,15 +1583,11 @@ impl<'a> BarStrip<'a> {
                 &self.theme,
             );
             if search_reveal > 0.0 {
-                draw_search(
-                    renderer,
-                    search,
-                    self.theme.card().scale_alpha(0.95 * search_reveal),
-                );
+                draw_search(renderer, search, icon(search_reveal));
             }
 
-            let gear = strip.settings_button;
             let gear_reveal = Self::reveal(self.magnification.scale(count + 2));
+            let gear = sink_slot(strip.settings_button, pressed == Some(Slot::Settings));
             draw_slot(
                 renderer,
                 gear,
@@ -1591,7 +1596,7 @@ impl<'a> BarStrip<'a> {
                 &self.theme,
             );
             if gear_reveal > 0.0 {
-                let color = self.theme.card().scale_alpha(0.95 * gear_reveal);
+                let color = icon(gear_reveal);
                 for quad in settings_glyph(gear) {
                     renderer::Renderer::fill_quad(
                         renderer,
@@ -1610,7 +1615,10 @@ impl<'a> BarStrip<'a> {
             }
         } else {
             let reveal = Self::reveal(self.magnification.scale(count));
-            let actions = strip.actions_button + Vector::new(self.add_shake, 0.0);
+            let actions = sink_slot(
+                strip.actions_button + Vector::new(self.add_shake, 0.0),
+                pressed == Some(Slot::Actions),
+            );
             draw_slot(
                 renderer,
                 actions,
@@ -1619,7 +1627,7 @@ impl<'a> BarStrip<'a> {
                 &self.theme,
             );
             if reveal > 0.0 {
-                let color = self.theme.card().scale_alpha(0.95 * reveal);
+                let color = icon(reveal);
                 for quad in actions_glyph(actions) {
                     renderer::Renderer::fill_quad(
                         renderer,
@@ -1878,6 +1886,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 }
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                tree.state.downcast_mut::<StripState>().pressed_slot = None;
                 if self.drag.is_some() {
                     shell.publish(Message::DragEnd);
                 }
@@ -2102,8 +2111,20 @@ pub fn peek_target(
     peek_layout(bar, bounds, 1.0, text, width, edge).rect
 }
 
-/// Draws an add/settings slot: a hollow outline that fills in as `reveal`
-/// grows, darker while hovered.
+/// Nudges a glass pill 1 px down while pressed.
+fn sink_slot(rect: Rectangle, pressed: bool) -> Rectangle {
+    if pressed {
+        Rectangle {
+            y: rect.y + 1.0,
+            ..rect
+        }
+    } else {
+        rect
+    }
+}
+
+/// Soft glass action pill: frosted fill, hairline border, brighter on hover.
+/// `reveal` (0..=1) fades the whole pill in with magnification.
 fn draw_slot(
     renderer: &mut iced::Renderer,
     rect: Rectangle,
@@ -2111,15 +2132,20 @@ fn draw_slot(
     reveal: f32,
     theme: &theme::Theme,
 ) {
-    let fill_alpha = if hovered { 0.8 } else { 0.1 + 0.4 * reveal };
+    let reveal = reveal.clamp(0.0, 1.0);
+    if reveal <= 0.0 {
+        return;
+    }
+    let fill_alpha = (if hovered { 0.22 } else { 0.12 }) * reveal;
+    let border_alpha = (if hovered { 0.22 } else { 0.12 }) * reveal;
     renderer::Renderer::fill_quad(
         renderer,
         renderer::Quad {
             bounds: rect,
             border: iced::Border {
-                radius: CORNER_RADIUS.into(),
-                width: 1.5 * (1.0 - reveal),
-                color: theme.ink(0.4),
+                radius: GLASS_SLOT_RADIUS.into(),
+                width: 1.0,
+                color: theme.ink(border_alpha),
             },
             shadow: Default::default(),
             snap: true,
@@ -2213,10 +2239,16 @@ mod tests {
     }
 
     #[test]
-    fn all_done_bar_dims() {
-        assert_eq!(progress_alpha(Some((3, 3))), 0.5);
+    fn checklist_bar_stays_faint_under_fill() {
+        assert_eq!(progress_alpha(Some((3, 3))), 0.45);
         assert_eq!(progress_alpha(Some((1, 3))), 0.45);
         assert_eq!(progress_alpha(None), 1.0);
+        assert_eq!(progress_fill(
+            Rectangle::new(Point::ORIGIN, Size::new(10.0, 40.0)),
+            5,
+            5,
+            Edge::Right,
+        ).height, 40.0);
     }
 
     #[test]
@@ -3089,6 +3121,16 @@ mod tests {
     }
 
     #[test]
+    fn sink_slot_drops_one_pixel_when_pressed() {
+        let r = Rectangle::new(Point::new(10.0, 20.0), Size::new(24.0, 16.0));
+        assert_eq!(sink_slot(r, false), r);
+        assert_eq!(
+            sink_slot(r, true),
+            Rectangle::new(Point::new(10.0, 21.0), Size::new(24.0, 16.0))
+        );
+    }
+
+    #[test]
     fn expanded_actions_hit_area_covers_settings() {
         // Regression: Search/Settings sit further into the screen than the
         // strip band once slots magnify. The hover hit area must cover them,
@@ -3353,7 +3395,7 @@ mod tests {
             close(*bar, want);
         }
         close(expanded.actions_button, (961.25, 608.3, 92.75, 29.4));
-        close(expanded.actions_hit_area, (961.25, 598.3, 102.75, 55.4));
+        close(expanded.actions_hit_area, (953.25, 598.3, 110.75, 55.4));
         close(expanded.add_button, (1030.0, 608.3, 24.0, 29.4));
         close(expanded.add_hit_area, (1028.0, 598.3, 36.0, 55.400024));
         close(expanded.search_button, (982.5, 608.3, 43.5, 29.4));

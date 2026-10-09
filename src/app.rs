@@ -246,6 +246,10 @@ pub enum Message {
     NoteHovered(bool),
     NoteDragStart,
     NoteResetPosition,
+    /// Drag the settings panel from its top grip.
+    SettingsDragStart,
+    /// Double-click the settings grip: snap back beside the strip.
+    SettingsResetPosition,
     /// A press on the open note's border starts resizing it.
     ResizeStart(Edges),
     ClosePanel,
@@ -517,6 +521,12 @@ pub struct App {
     settings_morph: Morph,
     /// Gear center when the panel opened; the panel stays centered on it.
     settings_anchor_y: f32,
+    /// Top-left of the settings panel after a drag (cleared on reset).
+    settings_pos: Option<Point>,
+    /// Grab offset (cursor minus panel top-left) while dragging settings.
+    settings_drag: Option<Vector>,
+    /// Live top-left while dragging settings.
+    settings_drag_pos: Option<Point>,
     settings_tab: SettingsTab,
     /// The strip Actions slot shows New / Search / Settings side by side.
     actions_open: bool,
@@ -746,6 +756,9 @@ impl App {
             settings_open: false,
             settings_morph,
             settings_anchor_y: 0.0,
+            settings_pos: None,
+            settings_drag: None,
+            settings_drag_pos: None,
             settings_tab: SettingsTab::default(),
             actions_open: false,
             palette_slot: None,
@@ -831,6 +844,8 @@ impl App {
                 }
             }
             Message::ActionsHovered(open) => {
+                // Keep Actions collapsed while a panel covers that column.
+                let open = open && !self.panel_open();
                 let was = self.actions_open;
                 self.actions_open = open;
                 if was != open && !SUPPORTS_PASSTHROUGH {
@@ -842,6 +857,7 @@ impl App {
                     return self.update(Message::CloseSettings);
                 }
                 self.force_reveal = true;
+                self.actions_open = false;
                 let close_note = self.update(Message::ClosePanel);
                 self.close_search();
                 self.close_export();
@@ -861,6 +877,8 @@ impl App {
             Message::CloseSettings => {
                 if self.settings_open {
                     self.settings_morph.close();
+                    self.settings_drag = None;
+                    self.settings_drag_pos = None;
                     self.animating = true;
                 }
             }
@@ -991,6 +1009,18 @@ impl App {
                     self.note_drag = Some(cursor - top_left);
                     self.note_drag_pos = Some(top_left);
                 }
+            }
+            Message::SettingsDragStart => {
+                if let (Some(cursor), Some(frame)) = (self.last_cursor, self.settings_frame()) {
+                    let top_left = frame.rect.position();
+                    self.settings_drag = Some(cursor - top_left);
+                    self.settings_drag_pos = Some(top_left);
+                }
+            }
+            Message::SettingsResetPosition => {
+                self.settings_pos = None;
+                self.settings_drag = None;
+                self.settings_drag_pos = None;
             }
             Message::ResizeStart(edges) => {
                 if let (Some(grab), Some(_)) = (self.last_cursor, self.active_note) {
@@ -1796,12 +1826,15 @@ impl App {
                 if let Some(offset) = self.note_drag {
                     self.note_drag_pos = Some(position - offset);
                 }
+                if let Some(offset) = self.settings_drag {
+                    self.settings_drag_pos = Some(position - offset);
+                }
                 let room = self.note_room();
                 if let Some(resize) = &mut self.note_resize {
                     resize.rect = resized(resize.start, resize.edges, position - resize.grab, room);
                 }
                 // Leaving the open peek (not toward the strip) closes it.
-                let in_strip = self.near_edge(position, STRIP_WIDTH);
+                let in_strip = self.near_edge(position, self.strip_depth());
                 if self.cursor_y.is_some() && !in_strip && !self.cursor_on_peek() {
                     self.cursor_y = None;
                     self.animating = true;
@@ -1818,6 +1851,9 @@ impl App {
                 self.mouse_down = down;
                 if !down && self.note_drag.is_some() {
                     self.finish_note_drag();
+                }
+                if !down && self.settings_drag.is_some() {
+                    self.finish_settings_drag();
                 }
                 if !down {
                     self.finish_note_resize();
@@ -1970,6 +2006,7 @@ impl App {
                     tray_ok: self.tray_ok,
                     dock_forced: self.tray_failed,
                     hotkey_error: self.hotkey_error.as_deref(),
+                    dragging: self.settings_drag.is_some(),
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
             }
@@ -2917,10 +2954,24 @@ impl App {
         (start..=end).contains(&along)
     }
 
+    /// How far into the window the strip (and expanded Actions row) reaches.
+    fn strip_depth(&self) -> f32 {
+        if self.actions_open {
+            crate::bar_strip::actions_row_extent(
+                &self.settings.settings().bars,
+                self.entries().len(),
+                |i| self.magnification.scale(i),
+            )
+        } else {
+            STRIP_WIDTH
+        }
+    }
+
     /// Whether `position` is over the strip's column (its row on Top)
-    /// within its band.
+    /// within its band. While Actions is expanded this includes the pills
+    /// that stick further into the screen than [`STRIP_WIDTH`].
     fn over_strip(&self, position: Point) -> bool {
-        self.near_edge(position, STRIP_WIDTH) && self.in_band(self.along(position))
+        self.near_edge(position, self.strip_depth()) && self.in_band(self.along(position))
     }
 
     /// Whether `position` is in the edge zone: the window's outermost
@@ -3151,6 +3202,13 @@ impl App {
         }
     }
 
+    fn finish_settings_drag(&mut self) {
+        let rect = self.settings_target_rect();
+        self.settings_drag = None;
+        self.settings_drag_pos = None;
+        self.settings_pos = Some(rect.position());
+    }
+
     /// Tracks which bar the cursor rests on. Leaving it collapses the peek;
     /// moving to another bar while a peek is showing peeks it right away.
     fn update_hover(&mut self) {
@@ -3260,7 +3318,35 @@ impl App {
             return None;
         }
         let source = self.strip_layout().settings_anchor();
-        Some(self.panel_frame(source, self.settings_anchor_y, &self.settings_morph))
+        let target = self.settings_target_rect();
+        Some(morph_frame(
+            self.slid(source),
+            target,
+            self.settings_morph.progress(),
+        ))
+    }
+
+    /// Where the settings panel sits: a dragged position, or beside the strip.
+    fn settings_target_rect(&self) -> Rectangle {
+        let room = match self.edge() {
+            Edge::Right | Edge::Left => self.window_size.height - 2.0 * NOTE_MARGIN,
+            Edge::Top => self.window_size.height - STRIP_WIDTH - NOTE_GAP - NOTE_MARGIN,
+        };
+        let height = room.min(PANEL_MAX_HEIGHT);
+        let size = Size::new(PANEL_WIDTH, height);
+        let top_left = self.settings_drag_pos.or(self.settings_pos);
+        if let Some(top_left) = top_left {
+            let max_x = (self.window_size.width - size.width - NOTE_MARGIN).max(NOTE_MARGIN);
+            let max_y = (self.window_size.height - size.height - NOTE_MARGIN).max(NOTE_MARGIN);
+            return Rectangle::new(
+                Point::new(
+                    top_left.x.clamp(NOTE_MARGIN, max_x),
+                    top_left.y.clamp(NOTE_MARGIN, max_y),
+                ),
+                size,
+            );
+        }
+        self.beside_strip(size, self.settings_anchor_y)
     }
 
     /// The search panel's current frame, morphing out of the search slot.
@@ -3294,7 +3380,19 @@ impl App {
         morph_frame(self.slid(source), target, morph.progress())
     }
 
-    /// A box of `size` on the strip's away side, `NOTE_GAP` from the strip,
+    /// Distance from the screen edge to a panel: clears the strip band and
+    /// an expanded Actions row so Settings/Search don't cover those pills.
+    fn panel_away(&self) -> f32 {
+        crate::bar_strip::actions_row_extent(
+            &self.settings.settings().bars,
+            self.entries().len(),
+            |_| 1.0,
+        )
+        .max(STRIP_WIDTH)
+            + NOTE_GAP
+    }
+
+    /// A box of `size` on the strip's away side, clear of the Actions row,
     /// centered along the edge on `anchor` where it fits within the
     /// margins, else in the middle.
     fn beside_strip(&self, size: Size, anchor: f32) -> Rectangle {
@@ -3311,7 +3409,7 @@ impl App {
         edge.rect_to_window(
             LocalRect {
                 along: center - length / 2.0,
-                away: STRIP_WIDTH + NOTE_GAP,
+                away: self.panel_away(),
                 length,
                 thickness: edge.thickness(size),
             },
@@ -5840,6 +5938,53 @@ mod tests {
     }
 
     #[test]
+    fn settings_panel_can_be_dragged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.window_size = Size::new(1400.0, 900.0);
+        let _ = app.update(Message::ToggleSettings);
+        settle(&mut app);
+        let start = app.settings_frame().unwrap().rect.position();
+        app.last_cursor = Some(Point::new(start.x + 20.0, start.y + 8.0));
+        let _ = app.update(Message::SettingsDragStart);
+        assert!(app.settings_drag.is_some());
+        let _ = app.update(Message::CursorMoved(Point::new(start.x + 120.0, start.y + 80.0)));
+        app.mouse_down = false;
+        let _ = app.update(Message::MouseButton(false));
+        let after = app.settings_frame().unwrap().rect.position();
+        assert!((after.x - start.x).abs() > 50.0 || (after.y - start.y).abs() > 50.0);
+        assert_eq!(app.settings_pos, Some(after));
+        let _ = app.update(Message::SettingsResetPosition);
+        settle(&mut app);
+        assert!(app.settings_pos.is_none());
+        let reset = app.settings_frame().unwrap().rect.position();
+        assert!((reset.x - start.x).abs() < 1.0 && (reset.y - start.y).abs() < 1.0);
+    }
+
+    #[test]
+    fn expanded_settings_stays_interactive() {
+        // Regression: when the expanded row sticks past STRIP_WIDTH,
+        // passthrough must still treat Settings as interactive or the
+        // window ignores the cursor and the row collapses before a click.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.window_size = Size::new(1400.0, 900.0);
+        app.settings.settings_mut().bars.width = 18.0;
+        app.store.add_note(&crate::note::PALETTE);
+        let _ = app.update(Message::ActionsHovered(true));
+        let settings = app.strip_layout().settings_button.center();
+        assert!(
+            !app.near_edge(settings, STRIP_WIDTH),
+            "precondition: Settings is past the strip band ({settings:?})"
+        );
+        assert!(
+            app.is_interactive(settings),
+            "Settings at {settings:?} must stay interactive while Actions is open"
+        );
+        assert!(app.over_strip(settings));
+    }
+
+    #[test]
     fn settings_reopen_on_the_application_tab() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_in(&dir);
@@ -7818,10 +7963,17 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let (app, _) = app_with_notes(&dir, &[("a", "x")]);
             let mut app = on_edge(app, edge);
-            let strip = app.strip_bounds();
+            let clear = crate::bar_strip::actions_row_extent(
+                &app.settings.settings().bars,
+                app.entries().len(),
+                |_| 1.0,
+            )
+            .max(STRIP_WIDTH)
+                + NOTE_GAP;
             let away = |rect: Rectangle| match edge {
-                Edge::Left => rect.x >= strip.x + strip.width + NOTE_GAP,
-                _ => rect.y >= strip.y + strip.height + NOTE_GAP,
+                Edge::Left => rect.x + 0.1 >= clear,
+                Edge::Top => rect.y + 0.1 >= clear,
+                Edge::Right => true,
             };
             let inside = |app: &App, rect: Rectangle| {
                 rect.x >= 0.0
