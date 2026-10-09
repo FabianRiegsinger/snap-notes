@@ -287,6 +287,9 @@ mod tests {
             (top.y, top.x, top.width, top.height),
             (0.0, 50.0, 200.0, 40.0)
         );
+        // Away from the edge: on Right, x = W - away - thickness.
+        let off = LocalRect { away: 10.0, ..r };
+        assert_eq!(Edge::Right.rect_to_window(off, WINDOW).x, 750.0);
     }
 
     fn screen() -> Rectangle {
@@ -304,6 +307,7 @@ mod tests {
         let anchor = Rectangle::new(Point::new(60.0, 100.0), Size::new(40.0, 60.0));
         let r = Edge::Left.place_away(anchor, content, 8.0, screen());
         assert_eq!(r.x, 108.0);
+        assert_eq!(r.y + r.height / 2.0, 130.0);
 
         let anchor = Rectangle::new(Point::new(100.0, 30.0), Size::new(60.0, 40.0));
         let r = Edge::Top.place_away(anchor, content, 8.0, screen());

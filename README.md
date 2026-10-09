@@ -14,13 +14,13 @@
 ### The bar strip
 - **Dock-style magnification:** move the cursor along the strip and nearby bars grow with smooth spring physics.
 - **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, scroll over it to read the rest of a longer note, and click it to open the note. Its trash button deletes the note at once, see [Notes](#notes) for undo.
-- **Actions:** hover the slot below the bars to unfold **New (+)**, **Search** and **Settings** side by side; move away to fold it back. Alt/Option-click on **+** still makes a note from the clipboard (empty clipboard shakes the slot and shows "Clipboard is empty"). Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+, still work without hovering Actions.
-- **Search:** click the 🔍 slot under `+`, press Cmd/Ctrl+F or choose **Search…** in the tray menu. Hovering 🔍 shows "Search (Cmd+F)" (Ctrl+F elsewhere). See [Search](#search).
+- **Actions:** hover the slot after the bars (on Top: to their right) to unfold **New (+)**, **Search** and **Settings** side by side; move away to fold it back. Alt/Option-click on **+** still makes a note from the clipboard (empty clipboard shakes the slot and shows "Clipboard is empty"). Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+, still work without hovering Actions.
+- **Search:** click the 🔍 slot after `+` (on Top: to its right), press Cmd/Ctrl+F or choose **Search…** in the tray menu. Hovering 🔍 shows "Search (Cmd+F)" (Ctrl+F elsewhere). See [Search](#search).
 - **Hints on Linux:** hover hints aren't shown there unless a note or panel is open (the window is wide then).
-- **Reorder:** drag a bar up or down to move the note.
+- **Reorder:** drag a bar along the strip to move the note.
 - **Stacks:** drag a bar onto the middle of another bar to stack it. While you hover there, the bar shows "Stack". Dropping between bars still reorders. A stack's bar has card-edge lines. Its peek lists its notes (at most 8, then "+N more"), and clicking a title opens that note. **Unstack** in the peek splits the stack, and deleting the top note promotes the next one.
 - **Pinned notes:** the pin button in a note's header keeps it at the top of the strip, marked by a darker notch on its bar. The button has a filled background while pinned, and its tooltip reads "Pin to top" or "Unpin". Dragging stays within the pinned group, and pinning a stack pins all of it.
-- **Checklist progress:** a bar fills from the bottom by the share of done tasks, and is drawn faded once all are done. The peek shows done/total, summed over a stack.
+- **Checklist progress:** a bar fills from its far end (on Top: from the right) by the share of done tasks, and is drawn faded once all are done. The peek shows done/total, summed over a stack.
 - **File drops:** drop a file on `+` or on empty space to create a note, or on a bar to append to that note (the top note of a stack). A `.txt` or `.md` file up to 1 MB adds its text, and a new note gets the file name as its title. An image file is added as an image, and any other file as its path. Dropping onto an open note inserts an image, as before.
 - **From the clipboard:** **New Note from Clipboard** in the tray menu, or Alt/Option-click on `+`, makes a note whose body is the clipboard's text or image.
 - **Screen edge:** the strip sits on the right edge by default. In Settings → Window → **Screen edge** choose **Right**, **Left** or **Top**; the change applies right away. On Left everything mirrors Right: the peek, notes, panels and hints open to the right of the strip. On Top the bars sit side by side along the top edge and grow downward, and everything opens below the strip. On macOS the strip then sits below the menu bar. Notes you dragged keep their place.
@@ -68,7 +68,7 @@ Put a tag in a note's title:
 - **Details:** a focus ring on the title, a faint "…" in empty notes and slimmer scrollbars.
 
 ### Search
-- **Open it:** Cmd/Ctrl+F, the 🔍 slot under `+` in the strip, or **Search…** in the tray menu. Esc closes the panel.
+- **Open it:** Cmd/Ctrl+F, the 🔍 slot after `+` in the strip, or **Search…** in the tray menu. Esc closes the panel.
 - **As you type:** results update with every keystroke. Matching ignores case and covers titles and bodies.
 - **Results:** each one shows the title and a snippet with the match in bold. Click one to open that note with the match selected, or press Enter to open the first one.
 - **Dimmed bars:** while you type, the bars of notes that don't match dim.

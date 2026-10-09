@@ -3240,6 +3240,21 @@ mod tests {
     }
 
     #[test]
+    fn left_bars_hug_the_left_edge() {
+        let notes = three_notes();
+        let entries = crate::strip_model::entries(&notes);
+        let (magnification, bars) = (MagnificationState::new(), BarSettings::default());
+        let none = None;
+        let mut strip = plain_strip(&notes, &entries, &magnification, &none, &bars);
+        strip.edge = Edge::Left;
+        let layout = strip.layout_in(edge_bounds(Edge::Left));
+        assert_eq!(layout.bars.len(), 3);
+        for bar in &layout.bars {
+            assert!((bar.x - EDGE_MARGIN).abs() < 1e-3, "{bar:?}");
+        }
+    }
+
+    #[test]
     fn top_drag_reorders_by_x() {
         let notes = three_notes();
         let entries = crate::strip_model::entries(&notes);

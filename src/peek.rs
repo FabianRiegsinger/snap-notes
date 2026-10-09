@@ -1,6 +1,7 @@
-//! Hover peek: after resting on a bar, the bar itself widens to the left
-//! into a small preview of the note: paper, title on top, a divider, and the
-//! first lines of the body below, laid out like the open note.
+//! Hover peek: after resting on a bar, the bar itself widens away from the
+//! screen edge into a small preview of the note: paper, title on top, a
+//! divider, and the first lines of the body below, laid out like the open
+//! note.
 
 use crate::animation::{ease_out_cubic, lerp};
 use crate::edge::Edge;
