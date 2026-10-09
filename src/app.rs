@@ -1316,7 +1316,12 @@ impl App {
                     let moved = (drag.current_y - drag.origin_y).abs() > 5.0;
                     let onto = moved
                         .then(|| {
-                            stack_target(&self.strip_layout().bars, drag.bar_index, drag.current_y)
+                            stack_target(
+                                &self.strip_layout().bars,
+                                drag.bar_index,
+                                drag.current_y,
+                                Edge::Right,
+                            )
                         })
                         .flatten();
                     if let Some(target) = onto {
@@ -1670,6 +1675,7 @@ impl App {
             panel_open: self.panel_open(),
             actions_expanded: self.actions_open,
             x_offset: self.strip_x_offset(),
+            edge: Edge::Right,
         })
         .width(Fill)
         .height(Fill)
@@ -2813,12 +2819,18 @@ impl App {
         let entries = self.entries();
         let entry = entries.get(entry)?;
         let notes = self.store.notes();
-        let width = note_peek_width(&notes[entry.top], self.settings.settings().notes.size, bar);
+        let width = note_peek_width(
+            &notes[entry.top],
+            self.settings.settings().notes.size,
+            bar,
+            Edge::Right,
+        );
         Some(peek_target(
             bar,
             strip,
             &entry_peek_text(notes, entry, width),
             width,
+            Edge::Right,
         ))
     }
 
@@ -3168,11 +3180,12 @@ impl App {
         compute_layout(
             self.entries().len(),
             |i| self.magnification.scale(i),
-            band(bounds, self.strip_fraction()),
+            band(bounds, self.strip_fraction(), Edge::Right),
             self.scroll_offset,
             &self.settings.settings().bars,
             self.actions_open,
             self.collapse(),
+            Edge::Right,
         )
     }
 

@@ -6,9 +6,6 @@
 //! from the screen edge into the screen. For Right this is today's layout:
 //! along = y, away = window width - x.
 
-// Removed by Task 2/3, once the strip layout uses this module.
-#![allow(dead_code)]
-
 use iced::{Point, Rectangle, Size};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -159,8 +156,26 @@ impl Edge {
         )
     }
 
+    /// `bounds` limited along the edge only: content clamped into it may
+    /// reach any distance away from the edge (out of a thin strip).
+    pub fn along_only(self, bounds: Rectangle) -> Rectangle {
+        const FAR: f32 = 1.0e7;
+        match self {
+            Edge::Right | Edge::Left => Rectangle::new(
+                Point::new(-FAR, bounds.y),
+                Size::new(2.0 * FAR, bounds.height),
+            ),
+            Edge::Top => Rectangle::new(
+                Point::new(bounds.x, -FAR),
+                Size::new(bounds.width, 2.0 * FAR),
+            ),
+        }
+    }
+
     /// Where a `window` docks on a `monitor`: flush to the edge and centred
     /// along it. Top sits `top_inset` below the monitor's top.
+    // Used once the window docks to the edge (Task 3).
+    #[allow(dead_code)]
     pub fn dock_origin(self, window: Size, monitor: Size, top_inset: f32) -> Point {
         match self {
             Edge::Right => Point::new(
@@ -299,6 +314,29 @@ mod tests {
         // Too big for the bounds: pinned to the bounds' start.
         let r = Edge::Left.place_away(corner, Size::new(900.0, 700.0), 8.0, screen());
         assert_eq!((r.x, r.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn along_only_clamps_along_the_edge_only() {
+        let strip = Rectangle::new(Point::new(736.0, 50.0), Size::new(64.0, 500.0));
+        let anchor = Rectangle::new(Point::new(750.0, 540.0), Size::new(40.0, 20.0));
+        let r = Edge::Right.place_away(
+            anchor,
+            Size::new(200.0, 100.0),
+            8.0,
+            Edge::Right.along_only(strip),
+        );
+        assert_eq!(r.x, 542.0, "left of the strip, not clamped into it");
+        assert_eq!(r.y + r.height, 550.0);
+        let strip = Rectangle::new(Point::new(0.0, 0.0), Size::new(800.0, 64.0));
+        let anchor = Rectangle::new(Point::new(780.0, 10.0), Size::new(20.0, 40.0));
+        let r = Edge::Top.place_away(
+            anchor,
+            Size::new(200.0, 100.0),
+            8.0,
+            Edge::Top.along_only(strip),
+        );
+        assert_eq!((r.x + r.width, r.y), (800.0, 58.0));
     }
 
     #[test]

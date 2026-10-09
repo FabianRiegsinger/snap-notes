@@ -3,6 +3,7 @@
 //! first lines of the body below, laid out like the open note.
 
 use crate::animation::{ease_out_cubic, lerp};
+use crate::edge::Edge;
 use crate::icons::{Icon, ICON_FONT};
 use crate::note::Note;
 use crate::note_panel::{morph_paper, PLACEHOLDER};
@@ -118,9 +119,15 @@ pub fn fit_peek_width(width: f32, bar: Rectangle) -> f32 {
         .max(MIN_PEEK_WIDTH)
 }
 
-/// The width the peek of `note` on `bar` is drawn and hit-tested with.
-pub fn note_peek_width(note: &Note, default: f32, bar: Rectangle) -> f32 {
-    fit_peek_width(peek_width(note, default), bar)
+/// The width the peek of `note` on `bar` is drawn and hit-tested with. On
+/// Right it stops short of the window's left edge (see `fit_peek_width`);
+/// elsewhere the room is the window's to provide.
+pub fn note_peek_width(note: &Note, default: f32, bar: Rectangle, edge: Edge) -> f32 {
+    let width = peek_width(note, default);
+    match edge {
+        Edge::Right => fit_peek_width(width, bar),
+        Edge::Left | Edge::Top => width.max(MIN_PEEK_WIDTH),
+    }
 }
 
 fn inner_width(width: f32) -> f32 {
@@ -305,28 +312,40 @@ pub fn peek_height(text: &PeekText) -> f32 {
     PADDING_TOP + title_height(text) + DIVIDER_GAP + 1.0 + BODY_GAP + body + PADDING_BOTTOM
 }
 
-/// The peek grown from `bar` by `progress`: it widens to the left and
-/// grows to fit its text, centered on the bar and kept inside `bounds` (a
-/// peek taller than `bounds` is cut to fit).
+/// The peek grown from `bar` by `progress`: it grows away from the screen
+/// `edge` out of the bar's edge side and to fit its text, centred on the
+/// bar along the edge and kept inside `bounds` along it (a peek longer than
+/// `bounds` along the edge is cut to fit).
 pub fn peek_layout(
     bar: Rectangle,
     bounds: Rectangle,
     progress: f32,
     text: &PeekText,
     width: f32,
+    edge: Edge,
 ) -> PeekLayout {
     let full_width = width.max(bar.width);
-    let full_height = peek_height(text).max(bar.height).min(bounds.height);
+    let full_height = peek_height(text).max(bar.height);
+    let (full_width, full_height) = match edge {
+        Edge::Right | Edge::Left => (full_width, full_height.min(bounds.height)),
+        Edge::Top => (full_width.min(bounds.width), full_height),
+    };
+    // The bar's side on the screen edge, which the peek grows away from.
+    let base = match edge {
+        Edge::Right => Rectangle::new(
+            Point::new(bar.x + bar.width, bar.y),
+            Size::new(0.0, bar.height),
+        ),
+        Edge::Left => Rectangle::new(bar.position(), Size::new(0.0, bar.height)),
+        Edge::Top => Rectangle::new(bar.position(), Size::new(bar.width, 0.0)),
+    };
+    let clamp = edge.along_only(bounds);
     let rect_at = |t: f32| {
-        let width = lerp(bar.width, full_width, t);
-        let height = lerp(bar.height, full_height, t);
-        let center = bar.y + bar.height / 2.0;
-        let max_y = (bounds.y + bounds.height - height).max(bounds.y);
-        let y = (center - height / 2.0).clamp(bounds.y, max_y);
-        Rectangle::new(
-            Point::new(bar.x + bar.width - width, y),
-            Size::new(width, height),
-        )
+        let size = Size::new(
+            lerp(bar.width, full_width, t),
+            lerp(bar.height, full_height, t),
+        );
+        edge.place_away(base, size, 0.0, clamp)
     };
     let full = rect_at(1.0);
     let title = Point::new(full.x + PADDING_X, full.y + PADDING_TOP);
@@ -473,8 +492,9 @@ pub fn draw_peek(
     cursor: Option<Point>,
     width: f32,
     scroll: f32,
+    edge: Edge,
 ) {
-    let layout = peek_layout(bar, bounds, progress, text, width);
+    let layout = peek_layout(bar, bounds, progress, text, width, edge);
     let rect = layout.rect;
     let t = ease_out_cubic(progress);
     // Gradient quads draw no shadow, so each shadow sits on its own solid
@@ -804,7 +824,7 @@ mod tests {
         assert_eq!(text.progress, Some((1, 3)));
         assert_eq!(progress_label((1, 3)), "1/3");
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
-        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
         // Right of the title, left of the trash, and the title stops short of it.
         assert!(l.progress.x + l.progress.width <= l.trash.x);
         assert!(l.title.x + title_width(&text) <= l.progress.x);
@@ -834,7 +854,7 @@ mod tests {
     fn body_rect_spans_the_shown_rows() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
         let long = peek_text(&note("T", "a\nb\nc\nd\ne"), PEEK_WIDTH);
-        let l = peek_layout(bar, screen(), 1.0, &long, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &long, PEEK_WIDTH, Edge::Right);
         assert_eq!(l.body_rect.position(), l.body);
         assert_eq!(l.body_rect.height, MAX_LINES as f32 * BODY_LINE);
         assert!(l.rect.contains(Point::new(
@@ -842,7 +862,7 @@ mod tests {
             l.body_rect.y + l.body_rect.height - 1.0
         )));
         let short = peek_text(&note("T", "a"), PEEK_WIDTH);
-        let l = peek_layout(bar, screen(), 1.0, &short, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &short, PEEK_WIDTH, Edge::Right);
         assert_eq!(l.body_rect.height, BODY_LINE);
     }
 
@@ -850,11 +870,11 @@ mod tests {
     fn scrollbar_shows_only_for_more_lines_and_follows_the_scroll() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
         let short = peek_text(&note("T", "a\nb"), PEEK_WIDTH);
-        let l = peek_layout(bar, screen(), 1.0, &short, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &short, PEEK_WIDTH, Edge::Right);
         assert!(scrollbar(&short, &l, 0.0).is_none());
 
         let long = peek_text(&note("T", "a\nb\nc\nd\ne\nf"), PEEK_WIDTH);
-        let l = peek_layout(bar, screen(), 1.0, &long, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &long, PEEK_WIDTH, Edge::Right);
         let (track, top) = scrollbar(&long, &l, 0.0).unwrap();
         // In the right padding, beside the shown rows.
         assert!(track.x >= l.body_rect.x + l.body_rect.width);
@@ -920,14 +940,17 @@ mod tests {
     fn peek_starts_as_the_bar() {
         let bar = Rectangle::new(Point::new(960.0, 300.0), Size::new(30.0, 150.0));
         let text = peek_text(&note("T", "a\nb"), PEEK_WIDTH);
-        assert_eq!(peek_layout(bar, screen(), 0.0, &text, PEEK_WIDTH).rect, bar);
+        assert_eq!(
+            peek_layout(bar, screen(), 0.0, &text, PEEK_WIDTH, Edge::Right).rect,
+            bar
+        );
     }
 
     #[test]
     fn open_peek_widens_leftward_and_fits_content() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
         let text = peek_text(&note("Groceries", "milk\neggs\nbread"), PEEK_WIDTH);
-        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
         assert!((l.rect.width - PEEK_WIDTH).abs() < 0.01);
         assert!((l.rect.x + l.rect.width - 990.0).abs() < 0.01);
         assert!((l.rect.height - peek_height(&text)).abs() < 0.01);
@@ -939,7 +962,7 @@ mod tests {
     fn header_sits_on_top_and_body_below() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 200.0));
         let text = peek_text(&note("Groceries", "milk\neggs"), PEEK_WIDTH);
-        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
         assert!((l.title.y - (l.rect.y + PADDING_TOP)).abs() < 0.01);
         assert!(l.divider_y >= l.title.y + TITLE_LINE);
         assert!(l.body.y > l.divider_y);
@@ -957,7 +980,7 @@ mod tests {
     fn trash_sits_in_the_header_beside_the_title() {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
         let text = peek_text(&note(&"word ".repeat(30), "milk"), PEEK_WIDTH);
-        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
         assert!(inside(l.rect, l.trash));
         assert!(l.trash.y + l.trash.height <= l.divider_y);
         assert!(l.title.x + title_width(&text) <= l.trash.x);
@@ -970,7 +993,7 @@ mod tests {
         let text = peek_text(&n, PEEK_WIDTH);
         assert_eq!(text.reminder.as_deref(), Some("Tue 15:00"));
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
-        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
         // Title, then the bell and time, then the progress and the trash.
         assert!(l.title.x + title_width(&text) <= l.reminder.x);
         assert!(l.reminder.x + l.reminder.width <= l.progress.x);
@@ -998,7 +1021,7 @@ mod tests {
         // The header counts the whole stack's tasks, like its bar.
         assert_eq!(text.progress, Some((1, 2)));
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
-        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
         assert_eq!(l.stack_rows.len(), 3);
         for (i, row) in l.stack_rows.iter().enumerate() {
             assert!(inside(l.rect, *row));
@@ -1056,14 +1079,14 @@ mod tests {
             screen(),
             Rectangle::new(Point::ORIGIN, Size::new(1000.0, 150.0)),
         ] {
-            let l = peek_layout(bar, bounds, 1.0, &text, PEEK_WIDTH);
+            let l = peek_layout(bar, bounds, 1.0, &text, PEEK_WIDTH, Edge::Right);
             assert_eq!(l.stack_rows.len(), MAX_STACK_ROWS);
             assert!(l.stack_more.is_some());
             assert!(inside(bounds, l.rect));
             let unstack = l.unstack.unwrap();
             assert!(inside(l.rect, unstack) && inside(bounds, unstack));
         }
-        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
         let more = l.stack_more.unwrap();
         assert_eq!(more.y, l.stack_rows[MAX_STACK_ROWS - 1].y + BODY_LINE);
         assert!(l.unstack.unwrap().y >= more.y + more.height);
@@ -1080,7 +1103,7 @@ mod tests {
         assert!(text.stack.is_empty());
         assert_eq!(text.lines, ["milk"]);
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
-        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
         assert!(l.stack_rows.is_empty() && l.unstack.is_none());
     }
 
@@ -1088,7 +1111,7 @@ mod tests {
     fn peek_stays_on_screen() {
         let bar = Rectangle::new(Point::new(960.0, 0.0), Size::new(30.0, 30.0));
         let text = peek_text(&note("T", "a\nb\nc"), PEEK_WIDTH);
-        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH);
+        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
         assert!(l.rect.y >= 0.0);
     }
 
@@ -1105,7 +1128,7 @@ mod tests {
         let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
         let width = 480.0;
         let text = peek_text(&note("Groceries", "milk"), width);
-        let l = peek_layout(bar, screen(), 1.0, &text, width);
+        let l = peek_layout(bar, screen(), 1.0, &text, width, Edge::Right);
         assert!((l.rect.width - width).abs() < 0.01);
         assert!((l.rect.x + l.rect.width - 990.0).abs() < 0.01);
         assert!(l.rect.contains(l.trash.position()));
@@ -1138,8 +1161,50 @@ mod tests {
         let bar = Rectangle::new(Point::new(40.0, 400.0), Size::new(14.0, 40.0));
         let width = fit_peek_width(500.0, bar);
         let text = peek_text(&note(&"a".repeat(20), "milk"), width);
-        let l = peek_layout(bar, screen(), 1.0, &text, width);
+        let l = peek_layout(bar, screen(), 1.0, &text, width, Edge::Right);
         assert_eq!(l.rect.width, 260.0);
         assert!(peek_height(&text) < 200.0);
+    }
+
+    #[test]
+    fn peek_sits_away_from_edge() {
+        let text = peek_text(&note("T", "a\nb"), PEEK_WIDTH);
+        let left = Rectangle::new(Point::new(10.0, 400.0), Size::new(30.0, 40.0));
+        let l = peek_layout(left, screen(), 1.0, &text, PEEK_WIDTH, Edge::Left);
+        assert_eq!(l.rect.x, left.x);
+        assert!(l.rect.x + l.rect.width > left.x + left.width + 100.0);
+        assert!((l.rect.center_y() - left.center_y()).abs() < 0.01);
+        assert_eq!(
+            peek_layout(left, screen(), 0.0, &text, PEEK_WIDTH, Edge::Left).rect,
+            left
+        );
+
+        let top = Rectangle::new(Point::new(400.0, 10.0), Size::new(40.0, 30.0));
+        let strip = Rectangle::new(Point::ORIGIN, Size::new(1000.0, 64.0));
+        let l = peek_layout(top, strip, 1.0, &text, PEEK_WIDTH, Edge::Top);
+        assert_eq!(l.rect.y, top.y);
+        // Its length grows downward, uncut by the thin strip; its width is
+        // the note's.
+        assert_eq!(l.rect.height, peek_height(&text));
+        assert_eq!(l.rect.width, PEEK_WIDTH);
+        assert!((l.rect.center_x() - top.center_x()).abs() < 0.01);
+        assert_eq!(
+            peek_layout(top, strip, 0.0, &text, PEEK_WIDTH, Edge::Top).rect,
+            top
+        );
+    }
+
+    #[test]
+    fn top_peek_clamps_at_window_end() {
+        let text = peek_text(&note("T", "a\nb"), PEEK_WIDTH);
+        let strip = Rectangle::new(Point::ORIGIN, Size::new(1000.0, 64.0));
+        let last = Rectangle::new(Point::new(960.0, 10.0), Size::new(40.0, 30.0));
+        let l = peek_layout(last, strip, 1.0, &text, PEEK_WIDTH, Edge::Top);
+        assert!(l.rect.x >= strip.x && l.rect.x + l.rect.width <= strip.x + strip.width);
+        assert_eq!(l.rect.x + l.rect.width, 1000.0);
+        assert!(l.rect.contains(l.trash.position()));
+        let first = Rectangle::new(Point::new(0.0, 10.0), Size::new(40.0, 30.0));
+        let l = peek_layout(first, strip, 1.0, &text, PEEK_WIDTH, Edge::Top);
+        assert_eq!(l.rect.x, 0.0);
     }
 }

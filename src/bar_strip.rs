@@ -1,5 +1,6 @@
 use crate::animation::MagnificationState;
 use crate::app::{DragState, Message};
+use crate::edge::{Edge, LocalRect};
 use crate::note::Note;
 use crate::peek::{
     draw_peek, entry_peek_text, max_body_scroll, note_peek_width, peek_layout, scroll_body,
@@ -44,18 +45,136 @@ const OPEN_BAR_SCALE: f32 = 1.5;
 /// Opacity factor for bars of notes that don't match the search.
 const DIM_ALPHA: f32 = 0.3;
 
-/// The bottom `done` of `total` share of `rect`, the checklist progress.
-pub fn progress_fill(rect: Rectangle, done: usize, total: usize) -> Rectangle {
+/// The strip's edge-local frame inside its widget `bounds`. `along` is the
+/// window's own coordinate along the edge (y, or x on Top), so it is the
+/// same in the frame and in window coordinates; `away` is measured from the
+/// side of `bounds` on the screen edge.
+#[derive(Debug, Clone, Copy)]
+struct Frame {
+    edge: Edge,
+    bounds: Rectangle,
+}
+
+impl Frame {
+    /// The "window" `Edge` maps in: from the origin to the bounds' far
+    /// corner, so the along axis keeps its window values.
+    fn window(&self) -> Size {
+        Size::new(
+            self.bounds.x + self.bounds.width,
+            self.bounds.y + self.bounds.height,
+        )
+    }
+
+    /// Moves Left's and Top's away axis (which starts at the origin) to the
+    /// bounds' screen-edge side.
+    fn shift(&self) -> Vector {
+        match self.edge {
+            Edge::Right => Vector::ZERO,
+            Edge::Left => Vector::new(self.bounds.x, 0.0),
+            Edge::Top => Vector::new(0.0, self.bounds.y),
+        }
+    }
+
+    /// `r` in window coordinates.
+    fn rect(&self, r: LocalRect) -> Rectangle {
+        self.edge.rect_to_window(r, self.window()) + self.shift()
+    }
+
+    /// The window rect `r` in the frame.
+    #[cfg(test)]
+    fn local(&self, r: Rectangle) -> LocalRect {
+        self.edge.rect_to_local(r - self.shift(), self.window())
+    }
+
+    /// The bounds themselves: where they start along the edge, their
+    /// length and their thickness away from it.
+    fn span(&self) -> LocalRect {
+        let b = self.bounds;
+        match self.edge {
+            Edge::Right | Edge::Left => LocalRect {
+                along: b.y,
+                away: 0.0,
+                length: b.height,
+                thickness: b.width,
+            },
+            Edge::Top => LocalRect {
+                along: b.x,
+                away: 0.0,
+                length: b.width,
+                thickness: b.height,
+            },
+        }
+    }
+}
+
+/// Where `r` starts along `edge` and how long it is along it.
+fn along_span(r: Rectangle, edge: Edge) -> (f32, f32) {
+    match edge {
+        Edge::Right | Edge::Left => (r.y, r.height),
+        Edge::Top => (r.x, r.width),
+    }
+}
+
+/// The middle of `r` along `edge`.
+fn along_center(r: Rectangle, edge: Edge) -> f32 {
+    match edge {
+        Edge::Right | Edge::Left => r.center_y(),
+        Edge::Top => r.center_x(),
+    }
+}
+
+/// The translation that draws the strip `offset` toward its screen `edge`,
+/// as auto-hide slides it away.
+pub fn hide_translation(edge: Edge, offset: f32) -> Vector {
+    match edge {
+        Edge::Right => Vector::new(offset, 0.0),
+        Edge::Left => Vector::new(-offset, 0.0),
+        Edge::Top => Vector::new(0.0, -offset),
+    }
+}
+
+/// The `done` of `total` share of `rect` at its end along `edge` (the
+/// bottom on Right and Left, the right end on Top), the checklist progress.
+pub fn progress_fill(rect: Rectangle, done: usize, total: usize, edge: Edge) -> Rectangle {
     let share = if total == 0 {
         0.0
     } else {
         (done as f32 / total as f32).clamp(0.0, 1.0)
     };
-    let height = rect.height * share;
-    Rectangle {
-        y: rect.y + rect.height - height,
-        height,
-        ..rect
+    match edge {
+        Edge::Right | Edge::Left => {
+            let height = rect.height * share;
+            Rectangle {
+                y: rect.y + rect.height - height,
+                height,
+                ..rect
+            }
+        }
+        Edge::Top => {
+            let width = rect.width * share;
+            Rectangle {
+                x: rect.x + rect.width - width,
+                width,
+                ..rect
+            }
+        }
+    }
+}
+
+/// A `depth` deep cap across `rect` at its start along `edge` (its top on
+/// Right and Left, its left end on Top), inset by the corner radius: the
+/// highlight and the pinned notch.
+fn start_cap(rect: Rectangle, depth: f32, edge: Edge) -> Rectangle {
+    let corner = CORNER_RADIUS;
+    match edge {
+        Edge::Right | Edge::Left => Rectangle::new(
+            Point::new(rect.x + corner, rect.y),
+            Size::new((rect.width - 2.0 * corner).max(0.0), rect.height.min(depth)),
+        ),
+        Edge::Top => Rectangle::new(
+            Point::new(rect.x, rect.y + corner),
+            Size::new(rect.width.min(depth), (rect.height - 2.0 * corner).max(0.0)),
+        ),
     }
 }
 
@@ -89,24 +208,40 @@ fn pulse_halo(rect: Rectangle, pulse: f32) -> Rectangle {
     rect.expand(PULSE_REACH * pulse.clamp(0.0, 1.0))
 }
 
-/// Width of each "card edge" line left of a stack's bar.
+/// Thickness of each "card edge" line beside a stack's bar.
 const STACK_EDGE_WIDTH: f32 = 2.0;
-/// Horizontal step from one stack edge to the next.
+/// Step away from the screen edge from one stack edge to the next.
 const STACK_EDGE_STEP: f32 = 4.0;
 
-/// The two "card edge" lines left of a stack's bar, each further out and
-/// shorter than the last.
-fn stack_edges(rect: Rectangle) -> [Rectangle; 2] {
+/// The two "card edge" lines on a stack's bar's away side (left of a Right
+/// bar, right of a Left one, below a Top one), each further out and shorter
+/// than the last.
+fn stack_edges(rect: Rectangle, edge: Edge) -> [Rectangle; 2] {
     [1, 2].map(|n| {
         let inset = 3.0 * n as f32;
-        Rectangle::new(
-            Point::new(rect.x - STACK_EDGE_STEP * n as f32, rect.y + inset),
-            Size::new(STACK_EDGE_WIDTH, (rect.height - 2.0 * inset).max(0.0)),
-        )
+        let out = STACK_EDGE_STEP * n as f32;
+        match edge {
+            Edge::Right => Rectangle::new(
+                Point::new(rect.x - out, rect.y + inset),
+                Size::new(STACK_EDGE_WIDTH, (rect.height - 2.0 * inset).max(0.0)),
+            ),
+            Edge::Left => Rectangle::new(
+                Point::new(rect.x + rect.width + out - STACK_EDGE_WIDTH, rect.y + inset),
+                Size::new(STACK_EDGE_WIDTH, (rect.height - 2.0 * inset).max(0.0)),
+            ),
+            Edge::Top => Rectangle::new(
+                Point::new(
+                    rect.x + inset,
+                    rect.y + rect.height + out - STACK_EDGE_WIDTH,
+                ),
+                Size::new((rect.width - 2.0 * inset).max(0.0), STACK_EDGE_WIDTH),
+            ),
+        }
     })
 }
 
-/// Where a dragged bar would land when dropped at a height over `bar`.
+/// Where a dragged bar would land when dropped at a point along the edge
+/// over `bar`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropZone {
     Before,
@@ -115,37 +250,54 @@ pub enum DropZone {
     After,
 }
 
-/// The zone of `bar` a drag released at `y` falls in; above or below the
-/// bar counts as its edge.
-pub fn drop_zone(bar: Rectangle, y: f32) -> DropZone {
-    let quarter = bar.height / 4.0;
-    if y < bar.y + quarter {
+/// The zone of `bar` a drag released at `along` (the cursor's coordinate
+/// along `edge`) falls in; before or after the bar counts as its end.
+pub fn drop_zone(bar: Rectangle, along: f32, edge: Edge) -> DropZone {
+    let (start, length) = along_span(bar, edge);
+    let quarter = length / 4.0;
+    if along < start + quarter {
         DropZone::Before
-    } else if y > bar.y + bar.height - quarter {
+    } else if along > start + length - quarter {
         DropZone::After
     } else {
         DropZone::Onto
     }
 }
 
-/// The bar a drag of bar `dragged` released at `y` stacks onto, if any.
-pub fn stack_target(bars: &[Rectangle], dragged: usize, y: f32) -> Option<usize> {
+/// The bar a drag of bar `dragged` released at `along` (the cursor's
+/// coordinate along `edge`) stacks onto, if any.
+pub fn stack_target(bars: &[Rectangle], dragged: usize, along: f32, edge: Edge) -> Option<usize> {
     bars.iter()
         .enumerate()
-        .position(|(i, bar)| i != dragged && drop_zone(*bar, y) == DropZone::Onto)
+        .position(|(i, bar)| i != dragged && drop_zone(*bar, along, edge) == DropZone::Onto)
 }
 
-/// The bar's rectangle: the open note's bar grows to the left from its right
-/// edge as the note unfolds (`progress` 0 is docked, 1 fully open).
-pub fn bar_rect_for(progress: f32, rect: Rectangle) -> Rectangle {
-    let width = rect.width * (1.0 + (OPEN_BAR_SCALE - 1.0) * progress);
-    Rectangle {
-        x: rect.x + rect.width - width,
-        width,
-        ..rect
+/// The bar's rectangle: the open note's bar grows away from the screen
+/// `edge`, keeping its side on it, as the note unfolds (`progress` 0 is
+/// docked, 1 fully open).
+pub fn bar_rect_for(progress: f32, rect: Rectangle, edge: Edge) -> Rectangle {
+    let grow = 1.0 + (OPEN_BAR_SCALE - 1.0) * progress;
+    match edge {
+        Edge::Right => {
+            let width = rect.width * grow;
+            Rectangle {
+                x: rect.x + rect.width - width,
+                width,
+                ..rect
+            }
+        }
+        Edge::Left => Rectangle {
+            width: rect.width * grow,
+            ..rect
+        },
+        Edge::Top => Rectangle {
+            height: rect.height * grow,
+            ..rect
+        },
     }
 }
 
+/// The strip's bars and slots, in window coordinates, laid out along `edge`.
 pub struct StripLayout {
     pub bars: Vec<Rectangle>,
     /// Collapsed Actions control, or the bounding box of the expanded row.
@@ -160,6 +312,7 @@ pub struct StripLayout {
     pub settings_button: Rectangle,
     pub settings_hit_area: Rectangle,
     pub max_scroll: f32,
+    pub edge: Edge,
 }
 
 impl StripLayout {
@@ -181,9 +334,11 @@ impl StripLayout {
         }
     }
 
-    /// Bottom edge of the lowest hit area.
+    /// Where the last hit area ends along the edge: its bottom on Right
+    /// and Left, its right end on Top.
     pub fn hit_bottom(&self) -> f32 {
-        self.actions_hit_area.y + self.actions_hit_area.height
+        let (start, length) = along_span(self.actions_hit_area, self.edge);
+        start + length
     }
 
     /// Whether `pos` is over the Actions control (collapsed slot or expanded row).
@@ -235,7 +390,7 @@ impl StripLayout {
     }
 }
 
-/// A slot below the bars that explains itself after a hover.
+/// A slot after the bars that explains itself after a hover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     Actions,
@@ -305,7 +460,8 @@ const TOAST: Hint = Hint {
     at: HintAt::Actions,
 };
 
-/// Whether a pressed bar has moved far enough to count as dragged.
+/// Whether a pressed bar has moved far enough to count as dragged. A
+/// drag's `origin_y` and `current_y` are coordinates along the edge.
 fn drag_moved(drag: &DragState) -> bool {
     (drag.current_y - drag.origin_y).abs() > 5.0
 }
@@ -351,9 +507,9 @@ pub fn hint_kind(
 
 /// The hint while a bar is dragged: "Stack" beside the bar a drop would
 /// stack onto.
-fn drag_hint(bars: &[Rectangle], drag: Option<&DragState>) -> Option<Hint> {
+fn drag_hint(bars: &[Rectangle], drag: Option<&DragState>, edge: Edge) -> Option<Hint> {
     let drag = drag.filter(|d| drag_moved(d))?;
-    stack_target(bars, drag.bar_index, drag.current_y).map(|onto| Hint {
+    stack_target(bars, drag.bar_index, drag.current_y, edge).map(|onto| Hint {
         text: "Stack",
         accent: None,
         at: HintAt::Bar(onto),
@@ -465,41 +621,50 @@ fn chip_paragraph(text: &str, accent: Option<&str>, accent_color: Color) -> Chip
     })
 }
 
-/// A chip around a label of size `label`: left of `anchor`, where the
-/// peek grows, and vertically centred on `y`, kept inside `bounds` like
-/// the peek.
-fn chip_frame(bounds: Rectangle, anchor: Rectangle, y: f32, label: Size) -> Rectangle {
+/// A chip around a label of size `label`: on the away side of `anchor`
+/// from the screen `edge`, where the peek grows, and centred along the edge
+/// on `along`, kept inside `bounds` along the edge like the peek.
+fn chip_frame(
+    bounds: Rectangle,
+    anchor: Rectangle,
+    along: f32,
+    label: Size,
+    edge: Edge,
+) -> Rectangle {
     let size = Size::new(
         label.width + 2.0 * CHIP_PADDING.width,
         label.height + 2.0 * CHIP_PADDING.height,
     );
-    let max_y = (bounds.y + bounds.height - size.height).max(bounds.y);
-    Rectangle::new(
-        Point::new(
-            anchor.x - CHIP_GAP - size.width,
-            (y - size.height / 2.0).clamp(bounds.y, max_y),
-        ),
-        size,
-    )
+    // The anchor's away extent, centred on `along`.
+    let anchor = match edge {
+        Edge::Right | Edge::Left => {
+            Rectangle::new(Point::new(anchor.x, along), Size::new(anchor.width, 0.0))
+        }
+        Edge::Top => Rectangle::new(Point::new(along, anchor.y), Size::new(0.0, anchor.height)),
+    };
+    edge.place_away(anchor, size, CHIP_GAP, edge.along_only(bounds))
 }
 
-/// Where the chip labelled `text` (and `accent`) beside `anchor` at `y`
-/// is drawn in `bounds`, for hit-testing without a renderer.
+/// Where the chip labelled `text` (and `accent`) beside `anchor`, centred
+/// on `along` (a coordinate along `edge`), is drawn in `bounds`, for
+/// hit-testing without a renderer.
 pub fn chip_rect(
     bounds: Rectangle,
     anchor: Rectangle,
-    y: f32,
+    along: f32,
     text: &str,
     accent: Option<&str>,
+    edge: Edge,
 ) -> Rectangle {
     let label = chip_paragraph(text, accent, Color::TRANSPARENT).min_bounds();
-    chip_frame(bounds, anchor, y, label)
+    chip_frame(bounds, anchor, along, label, edge)
 }
 
-/// Draws a hint chip beside `anchor` (a bar or slot) in `bounds`,
-/// vertically centred on it: a small card like the peek's paper with
-/// `text` at 0.75 ink and `accent` after it at full ink, all at `alpha`.
-/// Returns its rect.
+/// Draws a hint chip beside `anchor` (a bar or slot) in `bounds`, on its
+/// away side from the screen `edge` and centred on it along the edge: a
+/// small card like the peek's paper with `text` at 0.75 ink and `accent`
+/// after it at full ink, all at `alpha`. Returns its rect.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_chip(
     renderer: &mut iced::Renderer,
     theme: &theme::Theme,
@@ -508,9 +673,16 @@ pub fn draw_chip(
     text: &str,
     accent: Option<&str>,
     alpha: f32,
+    edge: Edge,
 ) -> Rectangle {
     let paragraph = chip_paragraph(text, accent, theme.ink(alpha));
-    let rect = chip_frame(bounds, anchor, anchor.center_y(), paragraph.min_bounds());
+    let rect = chip_frame(
+        bounds,
+        anchor,
+        along_center(anchor, edge),
+        paragraph.min_bounds(),
+        edge,
+    );
     if alpha <= 0.0 {
         return rect;
     }
@@ -585,27 +757,47 @@ fn draw_chip_text(
 }
 
 /// Where the undo toast shows on `strip` in `bounds`: the whole chip is
-/// its hit area.
+/// its hit area. It sits on the away side of its slot, from `strip.edge`.
 pub fn toast_rect(strip: &StripLayout, bounds: Rectangle) -> Rectangle {
     let anchor = if strip.actions_expanded {
         strip.add_button
     } else {
         strip.actions_button
     };
-    chip_rect(bounds, anchor, anchor.center_y(), TOAST.text, TOAST.accent)
-}
-
-/// The vertically centered `fraction` of `bounds` the bars are laid out in.
-pub fn band(bounds: Rectangle, fraction: f32) -> Rectangle {
-    let height = bounds.height * fraction;
-    Rectangle::new(
-        Point::new(bounds.x, bounds.y + (bounds.height - height) / 2.0),
-        Size::new(bounds.width, height),
+    chip_rect(
+        bounds,
+        anchor,
+        along_center(anchor, strip.edge),
+        TOAST.text,
+        TOAST.accent,
+        strip.edge,
     )
 }
 
-/// Size of a slot (add, search or settings button) at magnification `scale`: it
-/// widens like a bar but its height grows less, so it stays compact.
+/// The `fraction` of `bounds` the bars are laid out in: centred along the
+/// `edge`, spanning the full extent away from it.
+pub fn band(bounds: Rectangle, fraction: f32, edge: Edge) -> Rectangle {
+    match edge {
+        Edge::Right | Edge::Left => {
+            let height = bounds.height * fraction;
+            Rectangle::new(
+                Point::new(bounds.x, bounds.y + (bounds.height - height) / 2.0),
+                Size::new(bounds.width, height),
+            )
+        }
+        Edge::Top => {
+            let width = bounds.width * fraction;
+            Rectangle::new(
+                Point::new(bounds.x + (bounds.width - width) / 2.0, bounds.y),
+                Size::new(width, bounds.height),
+            )
+        }
+    }
+}
+
+/// Size of a slot (add, search or settings button) at magnification `scale`,
+/// as Right lays it out (width away from the edge, height along it): it
+/// widens like a bar but its length grows less, so it stays compact.
 fn slot_size(bars: &BarSettings, scale: f32) -> Size {
     Size::new(
         bars.width * scale,
@@ -614,16 +806,21 @@ fn slot_size(bars: &BarSettings, scale: f32) -> Size {
 }
 
 /// Lays out the bars plus the Actions slot (collapsed or expanded into New /
-/// Search / Settings side by side), centered vertically in `bounds`.
-/// Centering on the *current* (magnified) height keeps the hovered bar
-/// roughly in place while its neighbours grow. If the stack is taller than
-/// the bounds, it is top-aligned and scrolled by `scroll_offset`.
+/// Search / Settings side by side away from the edge), centred along the
+/// `edge` in `bounds`. Centering on the *current* (magnified) length keeps
+/// the hovered bar roughly in place while its neighbours grow. If the stack
+/// is longer than the bounds, it starts at their start and is scrolled by
+/// `scroll_offset`.
+///
+/// The geometry is worked out in the edge-local frame (see `Frame`) and the
+/// rects come out in window coordinates.
 ///
 /// When collapsed, `scale(count)` magnifies Actions. When expanded,
 /// `scale(count)` / `count+1` / `count+2` magnify New / Search / Settings.
 ///
 /// `collapse` is a deleted bar's index and how far it has collapsed (0..=1):
-/// its height and one gap next to it shrink by that share.
+/// its length and one gap next to it shrink by that share.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_layout(
     count: usize,
     scale: impl Fn(usize) -> f32,
@@ -632,16 +829,19 @@ pub fn compute_layout(
     bars_settings: &BarSettings,
     actions_expanded: bool,
     collapse: Option<(usize, f32)>,
+    edge: Edge,
 ) -> StripLayout {
+    let frame = Frame { edge, bounds };
+    let span = frame.span();
     let gap = bars_settings.gap;
     let shrink = |i: usize| match collapse {
         Some((c, t)) if c == i => 1.0 - t.clamp(0.0, 1.0),
         _ => 1.0,
     };
-    let heights: Vec<f32> = (0..count)
+    let lengths: Vec<f32> = (0..count)
         .map(|i| bars_settings.height * scale(i) * shrink(i))
         .collect();
-    // Gap `i` sits below bar `i`; the last bar collapses into the gap above.
+    // Gap `i` follows bar `i`; the last bar collapses into the gap before it.
     let gaps: Vec<f32> = (0..count.saturating_sub(1))
         .map(|i| {
             let owner = match collapse {
@@ -651,13 +851,13 @@ pub fn compute_layout(
             gap * shrink(owner)
         })
         .collect();
-    let bars_height: f32 = heights.iter().sum::<f32>() + gaps.iter().sum::<f32>();
+    let bars_length: f32 = lengths.iter().sum::<f32>() + gaps.iter().sum::<f32>();
     let add_gap = if count > 0 { ADD_BUTTON_GAP } else { 0.0 };
     let actions_size = slot_size(bars_settings, scale(count));
     let add_size = slot_size(bars_settings, scale(count));
     let search_size = slot_size(bars_settings, scale(count + 1));
     let gear_size = slot_size(bars_settings, scale(count + 2));
-    let row_height = if actions_expanded {
+    let row_length = if actions_expanded {
         add_size
             .height
             .max(search_size.height)
@@ -665,81 +865,85 @@ pub fn compute_layout(
     } else {
         actions_size.height
     };
-    let content_height = bars_height + add_gap + row_height;
+    let content_length = bars_length + add_gap + row_length;
 
-    let available = bounds.height - 2.0 * EDGE_PADDING;
-    let (mut y, max_scroll) = if content_height <= available {
-        (bounds.y + (bounds.height - content_height) / 2.0, 0.0)
+    let available = span.length - 2.0 * EDGE_PADDING;
+    let (mut along, max_scroll) = if content_length <= available {
+        (span.along + (span.length - content_length) / 2.0, 0.0)
     } else {
-        let max_scroll = content_height - available;
+        let max_scroll = content_length - available;
         (
-            bounds.y + EDGE_PADDING - scroll_offset.clamp(0.0, max_scroll),
+            span.along + EDGE_PADDING - scroll_offset.clamp(0.0, max_scroll),
             max_scroll,
         )
     };
 
-    let right = bounds.x + bounds.width - EDGE_MARGIN;
     let mut bars = Vec::with_capacity(count);
-    for (i, h) in heights.iter().enumerate() {
-        let w = bars_settings.width * scale(i);
-        bars.push(Rectangle::new(Point::new(right - w, y), Size::new(w, *h)));
-        y += h + gaps.get(i).copied().unwrap_or(add_gap);
+    for (i, length) in lengths.iter().enumerate() {
+        bars.push(frame.rect(LocalRect {
+            along,
+            away: EDGE_MARGIN,
+            length: *length,
+            thickness: bars_settings.width * scale(i),
+        }));
+        along += length + gaps.get(i).copied().unwrap_or(add_gap);
     }
 
-    let row_top = y;
-    let actions_button = Rectangle::new(
-        Point::new(
-            right - actions_size.width,
-            row_top + (row_height - actions_size.height) / 2.0,
-        ),
-        actions_size,
-    );
-    // Expanded: New, Search, Settings from right to left.
-    let add_button = Rectangle::new(
-        Point::new(
-            right - add_size.width,
-            row_top + (row_height - add_size.height) / 2.0,
-        ),
-        add_size,
-    );
-    let search_button = Rectangle::new(
-        Point::new(
-            add_button.x - ACTION_GAP - search_size.width,
-            row_top + (row_height - search_size.height) / 2.0,
-        ),
-        search_size,
-    );
-    let settings_button = Rectangle::new(
-        Point::new(
-            search_button.x - ACTION_GAP - gear_size.width,
-            row_top + (row_height - gear_size.height) / 2.0,
-        ),
-        gear_size,
-    );
-    let row_left = if actions_expanded {
-        settings_button.x
-    } else {
-        actions_button.x
+    let row_start = along;
+    // A slot of `size` (Right's width and height) `away` from the edge,
+    // centred in the row.
+    let slot = |size: Size, away: f32| LocalRect {
+        along: row_start + (row_length - size.height) / 2.0,
+        away,
+        length: size.height,
+        thickness: size.width,
     };
-    let actions_hit_area = Rectangle::new(
-        Point::new(bounds.x, row_top - add_gap / 2.0),
-        Size::new(bounds.width, row_height + add_gap / 2.0 + EDGE_PADDING),
+    let actions_button = slot(actions_size, EDGE_MARGIN);
+    // Expanded: New, Search, Settings going away from the edge.
+    let add_button = slot(add_size, EDGE_MARGIN);
+    let search_button = slot(
+        search_size,
+        add_button.away + add_button.thickness + ACTION_GAP,
     );
-    let slot_hit = |button: Rectangle, left: f32, right_edge: f32| {
-        Rectangle::new(
-            Point::new(left, actions_hit_area.y),
-            Size::new(right_edge - left, actions_hit_area.height),
-        )
-        .intersection(&actions_hit_area)
-        .unwrap_or(button)
+    let settings_button = slot(
+        gear_size,
+        search_button.away + search_button.thickness + ACTION_GAP,
+    );
+    let row_far = if actions_expanded {
+        settings_button.away + settings_button.thickness
+    } else {
+        actions_button.away + actions_button.thickness
+    };
+    let hit = LocalRect {
+        along: row_start - add_gap / 2.0,
+        away: 0.0,
+        length: row_length + add_gap / 2.0 + EDGE_PADDING,
+        thickness: span.thickness,
+    };
+    let actions_hit_area = frame.rect(hit);
+    // The share of the hit area from `near` to `far` away from the edge.
+    let slot_hit = |button: LocalRect, near: f32, far: f32| {
+        frame
+            .rect(LocalRect {
+                away: near,
+                thickness: far - near,
+                ..hit
+            })
+            .intersection(&actions_hit_area)
+            .unwrap_or(frame.rect(button))
     };
     let (add_hit_area, search_hit_area, settings_hit_area) = if actions_expanded {
-        let mid_add_search = (search_button.x + search_button.width + add_button.x) / 2.0;
-        let mid_search_gear = (settings_button.x + settings_button.width + search_button.x) / 2.0;
+        let mid_add_search = (add_button.away + add_button.thickness + search_button.away) / 2.0;
+        let mid_search_gear =
+            (search_button.away + search_button.thickness + settings_button.away) / 2.0;
         (
-            slot_hit(add_button, mid_add_search, bounds.x + bounds.width),
-            slot_hit(search_button, mid_search_gear, mid_add_search),
-            slot_hit(settings_button, row_left.min(bounds.x), mid_search_gear),
+            slot_hit(add_button, 0.0, mid_add_search),
+            slot_hit(search_button, mid_add_search, mid_search_gear),
+            slot_hit(
+                settings_button,
+                mid_search_gear,
+                row_far.max(span.thickness),
+            ),
         )
     } else {
         // Collapsed: children share the Actions geometry for panel anchors.
@@ -753,23 +957,26 @@ pub fn compute_layout(
 
     StripLayout {
         bars,
-        actions_button: if actions_expanded {
-            Rectangle::new(
-                Point::new(row_left, row_top),
-                Size::new(right - row_left, row_height),
-            )
+        actions_button: frame.rect(if actions_expanded {
+            LocalRect {
+                along: row_start,
+                away: EDGE_MARGIN,
+                length: row_length,
+                thickness: row_far - EDGE_MARGIN,
+            }
         } else {
             actions_button
-        },
+        }),
         actions_hit_area,
         actions_expanded,
-        add_button,
+        add_button: frame.rect(add_button),
         add_hit_area,
-        search_button,
+        search_button: frame.rect(search_button),
         search_hit_area,
-        settings_button,
+        settings_button: frame.rect(settings_button),
         settings_hit_area,
         max_scroll,
+        edge,
     }
 }
 
@@ -818,10 +1025,13 @@ pub struct BarStrip<'a> {
     pub panel_open: bool,
     /// The Actions slot is expanded into New / Search / Settings.
     pub actions_expanded: bool,
-    /// How far right everything is drawn while auto-hide slides the strip
-    /// away (0 = in place, `HIDE_SHIFT` = off screen). Above 0 the strip
-    /// takes no clicks or hovers.
+    /// How far toward its screen edge everything is drawn while auto-hide
+    /// slides the strip away (0 = in place, `HIDE_SHIFT` = off screen), an
+    /// away offset that `hide_translation` turns into a direction. Above 0
+    /// the strip takes no clicks or hovers.
     pub x_offset: f32,
+    /// The screen edge the strip docks to.
+    pub edge: Edge,
 }
 
 impl<'a> BarStrip<'a> {
@@ -839,18 +1049,24 @@ impl<'a> BarStrip<'a> {
         compute_layout(
             self.entries.len(),
             |i| self.magnification.scale(i),
-            band(bounds, self.height_fraction),
+            band(bounds, self.height_fraction, self.edge),
             self.scroll_offset,
             self.bars,
             self.actions_expanded,
             self.collapse,
+            self.edge,
         )
+    }
+
+    /// The cursor at `pos`'s coordinate along the edge.
+    fn along(&self, bounds: Rectangle, pos: Point) -> f32 {
+        self.edge.to_local(pos, bounds.size()).along
     }
 
     /// The note bar `i` (at `bar`) peeks, and the peek's width and text.
     fn peek_parts(&self, i: usize, bar: Rectangle) -> Option<(&'a Note, f32, PeekText)> {
         let note = self.note(i)?;
-        let width = note_peek_width(note, self.default_note_width, bar);
+        let width = note_peek_width(note, self.default_note_width, bar, self.edge);
         let text = entry_peek_text(self.notes, self.entries.get(i)?, width);
         Some((note, width, text))
     }
@@ -860,7 +1076,7 @@ impl<'a> BarStrip<'a> {
         let (i, _) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
         let (_, width, text) = self.peek_parts(i, bar)?;
-        peek_target(bar, bounds, &text, width)
+        peek_target(bar, bounds, &text, width, self.edge)
             .contains(pos)
             .then_some(i)
     }
@@ -881,7 +1097,7 @@ impl<'a> BarStrip<'a> {
         if self.slid() || self.peek_hit(bounds, pos).is_some() {
             None
         } else if bounds.contains(pos) {
-            Some(Message::StripHover(Some(pos.y)))
+            Some(Message::StripHover(Some(self.along(bounds, pos))))
         } else {
             Some(Message::StripHover(None))
         }
@@ -908,7 +1124,7 @@ impl<'a> BarStrip<'a> {
         }
         let strip = self.layout_in(bounds);
         if let Some(i) = strip.bars.iter().position(|bar| bar.contains(pos)) {
-            return Some(Some(Message::DragStart(i, pos.y)));
+            return Some(Some(Message::DragStart(i, self.along(bounds, pos))));
         }
         strip.press_message(pos, modifiers).map(Some)
     }
@@ -921,7 +1137,7 @@ impl<'a> BarStrip<'a> {
         let (_, progress) = self.peek?;
         let bar = *self.layout_in(bounds).bars.get(i)?;
         let (_, width, text) = self.peek_parts(i, bar)?;
-        let parts = peek_layout(bar, bounds, 1.0, &text, width);
+        let parts = peek_layout(bar, bounds, 1.0, &text, width, self.edge);
         let row = parts.stack_rows.iter().position(|r| r.contains(pos));
         let open = progress >= 0.99;
         Some(if open && parts.trash.contains(pos) {
@@ -946,7 +1162,7 @@ impl<'a> BarStrip<'a> {
     ) -> Option<Hint> {
         match self.hint_kind() {
             HintKind::None => None,
-            HintKind::Stack => drag_hint(&strip.bars, self.drag.as_ref()),
+            HintKind::Stack => drag_hint(&strip.bars, self.drag.as_ref(), self.edge),
             HintKind::Clipboard => Some(Hint {
                 text: CLIPBOARD_EMPTY,
                 accent: None,
@@ -1010,11 +1226,43 @@ impl<'a> BarStrip<'a> {
 
     /// The gap the dragged bar drops into, kept within its pin group.
     fn insertion_index(&self, drag: &DragState, bars: &[Rectangle]) -> usize {
-        let centers: Vec<f32> = bars.iter().map(|bar| bar.y + bar.height / 2.0).collect();
+        let centers: Vec<f32> = bars
+            .iter()
+            .map(|bar| along_center(*bar, self.edge))
+            .collect();
         let pinned: Vec<bool> = (0..bars.len())
             .map(|i| self.note(i).is_some_and(|note| note.pinned))
             .collect();
         strip_model::insertion_slot(&centers, drag.current_y, &pinned, drag.bar_index)
+    }
+
+    /// What a wheel `delta` at `pos` does: the message to publish, and
+    /// whether the strip captures the event. A peek with more lines than it
+    /// shows scrolls its body by the vertical delta, and never the strip
+    /// behind it; otherwise the strip scrolls along its edge. On Top both
+    /// wheel axes scroll along it.
+    fn wheel(
+        &self,
+        bounds: Rectangle,
+        pos: Point,
+        delta: mouse::ScrollDelta,
+    ) -> (Option<Message>, bool) {
+        let (dx, dy) = match delta {
+            mouse::ScrollDelta::Lines { x, y } => (x * 30.0, y * 30.0),
+            mouse::ScrollDelta::Pixels { x, y } => (x, y),
+        };
+        if let Some(scroll) = self.peek_wheel(bounds, pos, dy) {
+            let message = (scroll != self.peek_scroll).then_some(Message::PeekScroll(scroll));
+            (message, true)
+        } else if bounds.contains(pos) {
+            let along = match self.edge {
+                Edge::Right | Edge::Left => dy,
+                Edge::Top => dx + dy,
+            };
+            (Some(Message::StripScroll(along)), false)
+        } else {
+            (None, false)
+        }
     }
 
     /// Draws the strip in place, with `cursor` for its hover looks.
@@ -1026,6 +1274,8 @@ impl<'a> BarStrip<'a> {
         cursor: mouse::Cursor,
     ) {
         let strip = self.layout_in(bounds);
+        let edge = self.edge;
+        let frame = Frame { edge, bounds };
         let bars = &strip.bars;
         let dragging_index = self.drag.as_ref().map(|d| d.bar_index);
         let drag_active = self.drag.as_ref().is_some_and(drag_moved);
@@ -1047,6 +1297,7 @@ impl<'a> BarStrip<'a> {
                             cursor.position(),
                             width,
                             self.peek_scroll,
+                            edge,
                         );
                     }
                     continue;
@@ -1069,7 +1320,7 @@ impl<'a> BarStrip<'a> {
                 let fill_alpha = alpha;
                 let alpha = alpha * progress_alpha(progress);
                 let open = self.open.filter(|(o, _)| *o == i);
-                let rect = bar_rect_for(open.map_or(0.0, |(_, p)| p), *bar_rect);
+                let rect = bar_rect_for(open.map_or(0.0, |(_, p)| p), *bar_rect, edge);
                 let corner = CORNER_RADIUS;
                 let pulse = self.pulse.get(i).copied().unwrap_or(0.0);
                 if pulse > 0.0 {
@@ -1118,18 +1369,19 @@ impl<'a> BarStrip<'a> {
                     },
                     self.theme.bar_gradient(note.color, alpha),
                 );
-                // Open tasks leave the bar faint; done ones fill it from the
-                // bottom. An all-done bar just dims.
+                // Open tasks leave the bar faint; done ones fill it from its
+                // end along the edge. An all-done bar just dims.
                 if let Some((done, total)) = progress.filter(|(d, t)| d < t) {
-                    let fill = progress_fill(rect, done, total);
-                    if fill.height > 0.0 {
+                    let fill = progress_fill(rect, done, total, edge);
+                    let fill_length = along_span(fill, edge).1;
+                    if fill_length > 0.0 {
                         let [r, g, b, _] = note.color.rgba;
                         renderer::Renderer::fill_quad(
                             renderer,
                             renderer::Quad {
                                 bounds: fill,
                                 border: iced::Border {
-                                    radius: corner.min(fill.height / 2.0).into(),
+                                    radius: corner.min(fill_length / 2.0).into(),
                                     ..Default::default()
                                 },
                                 shadow: Default::default(),
@@ -1142,14 +1394,8 @@ impl<'a> BarStrip<'a> {
                 renderer::Renderer::fill_quad(
                     renderer,
                     renderer::Quad {
-                        bounds: Rectangle::new(
-                            Point::new(rect.x + corner, rect.y),
-                            Size::new(
-                                (rect.width - 2.0 * corner).max(0.0),
-                                // A collapsing bar takes its highlight with it.
-                                rect.height.min(1.0),
-                            ),
-                        ),
+                        // A collapsing bar takes its highlight with it.
+                        bounds: start_cap(rect, 1.0, edge),
                         border: Default::default(),
                         shadow: Default::default(),
                         snap: true,
@@ -1161,13 +1407,7 @@ impl<'a> BarStrip<'a> {
                     renderer::Renderer::fill_quad(
                         renderer,
                         renderer::Quad {
-                            bounds: Rectangle::new(
-                                Point::new(rect.x + corner, rect.y),
-                                Size::new(
-                                    (rect.width - 2.0 * corner).max(0.0),
-                                    rect.height.min(NOTCH_HEIGHT),
-                                ),
-                            ),
+                            bounds: start_cap(rect, NOTCH_HEIGHT, edge),
                             border: Default::default(),
                             shadow: Default::default(),
                             snap: true,
@@ -1176,11 +1416,11 @@ impl<'a> BarStrip<'a> {
                     );
                 }
                 if self.entries.get(i).is_some_and(|e| !e.members.is_empty()) {
-                    for edge in stack_edges(rect) {
+                    for line in stack_edges(rect, edge) {
                         renderer::Renderer::fill_quad(
                             renderer,
                             renderer::Quad {
-                                bounds: edge,
+                                bounds: line,
                                 border: iced::border::rounded(STACK_EDGE_WIDTH / 2.0),
                                 shadow: Default::default(),
                                 snap: true,
@@ -1197,6 +1437,7 @@ impl<'a> BarStrip<'a> {
         let count = self.entries.len();
         if strip.actions_expanded {
             let add_reveal = Self::reveal(self.magnification.scale(count));
+            // The shake is a horizontal "no" on every edge.
             let add = strip.add_button + Vector::new(self.add_shake, 0.0);
             draw_slot(
                 renderer,
@@ -1290,15 +1531,20 @@ impl<'a> BarStrip<'a> {
         if let Some(drag) = &self.drag {
             if drag_active {
                 if let Some(note) = self.note(drag.bar_index) {
+                    // The ghost follows the cursor along the edge, flush
+                    // with the screen edge.
                     let scale = self.magnification.scale(drag.bar_index);
-                    let w = self.bars.width * scale;
-                    let h = self.bars.height * scale;
-                    let x = bounds.x + bounds.width - w;
-                    let ghost_y = drag.current_y - h / 2.0;
+                    let length = self.bars.height * scale;
+                    let ghost = frame.rect(LocalRect {
+                        along: drag.current_y - length / 2.0,
+                        away: 0.0,
+                        length,
+                        thickness: self.bars.width * scale,
+                    });
                     renderer::Renderer::fill_quad(
                         renderer,
                         renderer::Quad {
-                            bounds: Rectangle::new(Point::new(x, ghost_y), Size::new(w, h)),
+                            bounds: ghost,
                             border: iced::Border {
                                 radius: CORNER_RADIUS.into(),
                                 ..Default::default()
@@ -1315,7 +1561,7 @@ impl<'a> BarStrip<'a> {
                     );
 
                     // Over a bar's middle the drop stacks: that bar is ringed.
-                    if let Some(onto) = stack_target(bars, drag.bar_index, drag.current_y) {
+                    if let Some(onto) = stack_target(bars, drag.bar_index, drag.current_y, edge) {
                         renderer::Renderer::fill_quad(
                             renderer,
                             renderer::Quad {
@@ -1332,19 +1578,23 @@ impl<'a> BarStrip<'a> {
                         );
                     } else {
                         let target = self.insertion_index(drag, bars);
-                        let indicator_y = if target < bars.len() {
-                            bars[target].y - self.bars.gap / 2.0
+                        let indicator = if target < bars.len() {
+                            along_span(bars[target], edge).0 - self.bars.gap / 2.0
                         } else {
-                            bars.last()
-                                .map_or(bounds.y, |b| b.y + b.height + self.bars.gap / 2.0)
+                            bars.last().map_or(frame.span().along, |b| {
+                                let (start, length) = along_span(*b, edge);
+                                start + length + self.bars.gap / 2.0
+                            })
                         };
                         renderer::Renderer::fill_quad(
                             renderer,
                             renderer::Quad {
-                                bounds: Rectangle::new(
-                                    Point::new(bounds.x + bounds.width - 20.0, indicator_y - 1.0),
-                                    Size::new(20.0, 2.0),
-                                ),
+                                bounds: frame.rect(LocalRect {
+                                    along: indicator - 1.0,
+                                    away: 0.0,
+                                    length: 2.0,
+                                    thickness: 20.0,
+                                }),
                                 border: Default::default(),
                                 shadow: Default::default(),
                                 snap: true,
@@ -1368,6 +1618,7 @@ impl<'a> BarStrip<'a> {
                     hint.text,
                     hint.accent,
                     alpha,
+                    edge,
                 );
             }
         }
@@ -1384,7 +1635,10 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
     }
 
     fn size(&self) -> Size<Length> {
-        Size::new(Length::Fixed(STRIP_WIDTH), Length::Fill)
+        match self.edge {
+            Edge::Right | Edge::Left => Size::new(Length::Fixed(STRIP_WIDTH), Length::Fill),
+            Edge::Top => Size::new(Length::Fill, Length::Fixed(STRIP_WIDTH)),
+        }
     }
 
     fn layout(
@@ -1393,10 +1647,16 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         _renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let limits = limits
-            .width(Length::Fixed(STRIP_WIDTH))
-            .height(Length::Fill);
-        let size = limits.resolve(STRIP_WIDTH, f32::INFINITY, Size::new(STRIP_WIDTH, 0.0));
+        let size = match self.edge {
+            Edge::Right | Edge::Left => limits
+                .width(Length::Fixed(STRIP_WIDTH))
+                .height(Length::Fill)
+                .resolve(STRIP_WIDTH, f32::INFINITY, Size::new(STRIP_WIDTH, 0.0)),
+            Edge::Top => limits
+                .width(Length::Fill)
+                .height(Length::Fixed(STRIP_WIDTH))
+                .resolve(f32::INFINITY, STRIP_WIDTH, Size::new(0.0, STRIP_WIDTH)),
+        };
         layout::Node::new(size)
     }
 
@@ -1414,11 +1674,11 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             self.draw_strip(tree, renderer, layout.bounds(), cursor);
             return;
         }
-        // Slid away: everything moves right together, and nothing shows a
-        // hover.
+        // Slid away: everything moves toward the screen edge together, and
+        // nothing shows a hover.
         renderer::Renderer::with_translation(
             renderer,
-            Vector::new(self.x_offset, 0.0),
+            hide_translation(self.edge, self.x_offset),
             |renderer| {
                 self.draw_strip(tree, renderer, layout.bounds(), mouse::Cursor::Unavailable);
             },
@@ -1509,19 +1769,12 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 let Some(pos) = cursor.position() else {
                     return;
                 };
-                let dy = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => *y * 30.0,
-                    mouse::ScrollDelta::Pixels { y, .. } => *y,
-                };
-                // A peek with more lines than it shows scrolls them, and
-                // never the strip behind it.
-                if let Some(scroll) = self.peek_wheel(bounds, pos, dy) {
-                    if scroll != self.peek_scroll {
-                        shell.publish(Message::PeekScroll(scroll));
-                    }
+                let (message, capture) = self.wheel(bounds, pos, *delta);
+                if let Some(message) = message {
+                    shell.publish(message);
+                }
+                if capture {
                     shell.capture_event();
-                } else if bounds.contains(pos) {
-                    shell.publish(Message::StripScroll(dy));
                 }
             }
             _ => {}
@@ -1709,8 +1962,14 @@ fn search_glyph(slot: Rectangle) -> SearchGlyph {
 
 /// Where the fully open peek of the note on `bar` sits: the area that
 /// keeps it open while hovered and opens the note when clicked.
-pub fn peek_target(bar: Rectangle, bounds: Rectangle, text: &PeekText, width: f32) -> Rectangle {
-    peek_layout(bar, bounds, 1.0, text, width).rect
+pub fn peek_target(
+    bar: Rectangle,
+    bounds: Rectangle,
+    text: &PeekText,
+    width: f32,
+    edge: Edge,
+) -> Rectangle {
+    peek_layout(bar, bounds, 1.0, text, width, edge).rect
 }
 
 /// Draws an add/settings slot: a hollow outline that fills in as `reveal`
@@ -1757,6 +2016,7 @@ mod tests {
             &BarSettings::default(),
             false,
             None,
+            Edge::Right,
         )
     }
 
@@ -1774,6 +2034,7 @@ mod tests {
             &BarSettings::default(),
             true,
             None,
+            Edge::Right,
         )
     }
 
@@ -1786,11 +2047,11 @@ mod tests {
     #[test]
     fn progress_fill_grows_from_bottom() {
         let r = Rectangle::new(Point::new(10.0, 100.0), Size::new(8.0, 40.0));
-        assert_eq!(progress_fill(r, 0, 4).height, 0.0);
-        let half = progress_fill(r, 2, 4);
+        assert_eq!(progress_fill(r, 0, 4, Edge::Right).height, 0.0);
+        let half = progress_fill(r, 2, 4, Edge::Right);
         assert_eq!((half.height, half.y + half.height), (20.0, 140.0));
         assert_eq!((half.x, half.width), (r.x, r.width));
-        assert_eq!(progress_fill(r, 4, 4), r);
+        assert_eq!(progress_fill(r, 4, 4, Edge::Right), r);
     }
 
     #[test]
@@ -1821,7 +2082,7 @@ mod tests {
     #[test]
     fn stack_edges_sit_left_of_the_bar() {
         let r = Rectangle::new(Point::new(40.0, 100.0), Size::new(8.0, 40.0));
-        let [a, b] = stack_edges(r);
+        let [a, b] = stack_edges(r, Edge::Right);
         // Separate lines with a visible gap between them and the bar.
         assert!(a.x + a.width < r.x && b.x + b.width < a.x);
         assert!(a.width >= 2.0 && b.width >= 2.0);
@@ -1831,13 +2092,13 @@ mod tests {
     #[test]
     fn open_bar_is_wider_and_keeps_its_right_edge() {
         let r = Rectangle::new(Point::new(40.0, 100.0), Size::new(6.0, 30.0));
-        let open = bar_rect_for(1.0, r);
+        let open = bar_rect_for(1.0, r, Edge::Right);
         assert_eq!(open.width, r.width * 1.5);
         assert_eq!(open.x + open.width, r.x + r.width);
         assert_eq!((open.y, open.height), (r.y, r.height));
-        assert_eq!(bar_rect_for(0.0, r), r);
+        assert_eq!(bar_rect_for(0.0, r, Edge::Right), r);
         // It widens with the note's morph instead of jumping.
-        let half = bar_rect_for(0.5, r);
+        let half = bar_rect_for(0.5, r, Edge::Right);
         assert_eq!(half.width, r.width * 1.25);
         assert_eq!(half.x + half.width, r.x + r.width);
     }
@@ -1854,7 +2115,18 @@ mod tests {
     #[test]
     fn collapsing_bar_shrinks_with_progress() {
         let d = BarSettings::default();
-        let with = |collapse| compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &d, false, collapse);
+        let with = |collapse| {
+            compute_layout(
+                3,
+                |_| 1.0,
+                bounds(900.0),
+                0.0,
+                &d,
+                false,
+                collapse,
+                Edge::Right,
+            )
+        };
         let full = with(None);
         let half = with(Some((1, 0.5)));
         assert!((half.bars[1].height - d.height / 2.0).abs() < 0.01);
@@ -1878,7 +2150,16 @@ mod tests {
             height: 50.0,
             gap: 20.0,
         };
-        let l = compute_layout(3, |_| 1.0, bounds(900.0), 0.0, &bars, false, None);
+        let l = compute_layout(
+            3,
+            |_| 1.0,
+            bounds(900.0),
+            0.0,
+            &bars,
+            false,
+            None,
+            Edge::Right,
+        );
         assert_eq!(l.bars[0].size(), Size::new(10.0, 50.0));
         let gap = l.bars[1].y - (l.bars[0].y + l.bars[0].height);
         assert!((gap - 20.0).abs() < 0.01);
@@ -1936,13 +2217,14 @@ mod tests {
         let b = band(
             Rectangle::new(Point::new(5.0, 100.0), Size::new(64.0, 1000.0)),
             0.5,
+            Edge::Right,
         );
         assert_eq!(
             b,
             Rectangle::new(Point::new(5.0, 350.0), Size::new(64.0, 500.0))
         );
         let full = bounds(800.0);
-        assert_eq!(band(full, 1.0), full);
+        assert_eq!(band(full, 1.0, Edge::Right), full);
     }
 
     #[test]
@@ -1960,17 +2242,25 @@ mod tests {
     #[test]
     fn drop_zone_edges() {
         let bar = Rectangle::new(Point::new(40.0, 100.0), Size::new(8.0, 40.0));
-        assert_eq!(drop_zone(bar, 90.0), DropZone::Before);
-        assert_eq!(drop_zone(bar, 109.0), DropZone::Before);
-        assert_eq!(drop_zone(bar, 110.0), DropZone::Onto);
-        assert_eq!(drop_zone(bar, 120.0), DropZone::Onto);
-        assert_eq!(drop_zone(bar, 130.0), DropZone::Onto);
-        assert_eq!(drop_zone(bar, 131.0), DropZone::After);
-        assert_eq!(drop_zone(bar, 150.0), DropZone::After);
+        assert_eq!(drop_zone(bar, 90.0, Edge::Right), DropZone::Before);
+        assert_eq!(drop_zone(bar, 109.0, Edge::Right), DropZone::Before);
+        assert_eq!(drop_zone(bar, 110.0, Edge::Right), DropZone::Onto);
+        assert_eq!(drop_zone(bar, 120.0, Edge::Right), DropZone::Onto);
+        assert_eq!(drop_zone(bar, 130.0, Edge::Right), DropZone::Onto);
+        assert_eq!(drop_zone(bar, 131.0, Edge::Right), DropZone::After);
+        assert_eq!(drop_zone(bar, 150.0, Edge::Right), DropZone::After);
         let bars = [bar, Rectangle { y: 150.0, ..bar }];
-        assert_eq!(stack_target(&bars, 1, 120.0), Some(0));
-        assert_eq!(stack_target(&bars, 0, 120.0), None, "not onto itself");
-        assert_eq!(stack_target(&bars, 1, 145.0), None, "between bars");
+        assert_eq!(stack_target(&bars, 1, 120.0, Edge::Right), Some(0));
+        assert_eq!(
+            stack_target(&bars, 0, 120.0, Edge::Right),
+            None,
+            "not onto itself"
+        );
+        assert_eq!(
+            stack_target(&bars, 1, 145.0, Edge::Right),
+            None,
+            "between bars"
+        );
     }
 
     #[test]
@@ -1983,22 +2273,26 @@ mod tests {
             current_y,
         };
         assert_eq!(
-            drag_hint(&bars, Some(&drag(120.0))),
+            drag_hint(&bars, Some(&drag(120.0)), Edge::Right),
             Some(Hint {
                 text: "Stack",
                 accent: None,
                 at: HintAt::Bar(0)
             })
         );
-        assert_eq!(drag_hint(&bars, Some(&drag(145.0))), None, "between bars");
-        assert_eq!(drag_hint(&bars, None), None);
+        assert_eq!(
+            drag_hint(&bars, Some(&drag(145.0)), Edge::Right),
+            None,
+            "between bars"
+        );
+        assert_eq!(drag_hint(&bars, None, Edge::Right), None);
         // A press that hasn't moved yet is no drag.
         let still = DragState {
             bar_index: 0,
             origin_y: 120.0,
             current_y: 122.0,
         };
-        assert_eq!(drag_hint(&bars, Some(&still)), None);
+        assert_eq!(drag_hint(&bars, Some(&still), Edge::Right), None);
     }
 
     #[test]
@@ -2047,13 +2341,20 @@ mod tests {
     fn chip_sits_beside_its_anchor() {
         let anchor = Rectangle::new(Point::new(1040.0, 300.0), Size::new(8.0, 40.0));
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
-        let short = chip_rect(bounds, anchor, 320.0, "Stack", None);
+        let short = chip_rect(bounds, anchor, 320.0, "Stack", None, Edge::Right);
         assert!(short.x + short.width <= anchor.x);
         assert!((short.center().y - 320.0).abs() < 0.01);
-        let long = chip_rect(bounds, anchor, 320.0, "Clipboard is empty", None);
+        let long = chip_rect(
+            bounds,
+            anchor,
+            320.0,
+            "Clipboard is empty",
+            None,
+            Edge::Right,
+        );
         assert!(long.width > short.width);
         assert!((long.x + long.width - (short.x + short.width)).abs() < 0.01);
-        let accented = chip_rect(bounds, anchor, 320.0, "Stack", Some(" more"));
+        let accented = chip_rect(bounds, anchor, 320.0, "Stack", Some(" more"), Edge::Right);
         assert!(accented.width > short.width);
     }
 
@@ -2089,6 +2390,7 @@ mod tests {
             actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
+            edge: Edge::Right,
         }
     }
 
@@ -2169,13 +2471,13 @@ mod tests {
     fn chip_stays_inside_bounds() {
         let bounds = Rectangle::new(Point::new(1000.0, 100.0), Size::new(STRIP_WIDTH, 400.0));
         let top = Rectangle::new(Point::new(1040.0, 100.0), Size::new(8.0, 4.0));
-        let chip = chip_rect(bounds, top, 101.0, "Stack", None);
+        let chip = chip_rect(bounds, top, 101.0, "Stack", None, Edge::Right);
         assert_eq!(chip.y, bounds.y);
         let bottom = Rectangle::new(Point::new(1040.0, 496.0), Size::new(8.0, 4.0));
-        let chip = chip_rect(bounds, bottom, 499.0, "Stack", None);
+        let chip = chip_rect(bounds, bottom, 499.0, "Stack", None, Edge::Right);
         assert!((chip.y + chip.height - (bounds.y + bounds.height)).abs() < 0.01);
         // Centred where there is room.
-        let chip = chip_rect(bounds, top, 300.0, "Stack", None);
+        let chip = chip_rect(bounds, top, 300.0, "Stack", None, Edge::Right);
         assert!((chip.center_y() - 300.0).abs() < 0.01);
     }
 
@@ -2240,6 +2542,7 @@ mod tests {
             actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
+            edge: Edge::Right,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let toast = toast_rect(&strip.layout_in(bounds), bounds);
@@ -2305,11 +2608,12 @@ mod tests {
             actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
+            edge: Edge::Right,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
         let (_, width, text) = strip.peek_parts(0, bar).unwrap();
-        let parts = peek_layout(bar, bounds, 1.0, &text, width);
+        let parts = peek_layout(bar, bounds, 1.0, &text, width, Edge::Right);
         let press = |pos| strip.peek_press(bounds, pos);
         let member = notes[1].id;
         assert!(matches!(
@@ -2368,11 +2672,12 @@ mod tests {
             actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
+            edge: Edge::Right,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
         let (_, width, text) = strip.peek_parts(0, bar).unwrap();
-        let parts = peek_layout(bar, bounds, 1.0, &text, width);
+        let parts = peek_layout(bar, bounds, 1.0, &text, width, Edge::Right);
         let more = parts.stack_more.unwrap();
         assert!(matches!(
             strip.peek_press(bounds, more.center()),
@@ -2389,7 +2694,7 @@ mod tests {
         let bar = Rectangle::new(Point::new(48.0, 400.0), Size::new(6.0, 30.0));
         let strip = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let note = crate::note::Note::new(crate::note::PALETTE[0]);
-        let rect = peek_target(bar, strip, &peek_text(&note, 260.0), 260.0);
+        let rect = peek_target(bar, strip, &peek_text(&note, 260.0), 260.0, Edge::Right);
         assert!(rect.width > STRIP_WIDTH);
         assert!(rect.contains(Point::new(bar.x - 100.0, bar.center().y)));
     }
@@ -2425,12 +2730,20 @@ mod tests {
             actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
+            edge: Edge::Right,
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0));
         let bar = strip.layout_in(bounds).bars[0];
-        let width = note_peek_width(&notes[0], strip.default_note_width, bar);
+        let width = note_peek_width(&notes[0], strip.default_note_width, bar, Edge::Right);
         assert_eq!(
-            peek_target(bar, bounds, &peek_text(&notes[0], width), width).width,
+            peek_target(
+                bar,
+                bounds,
+                &peek_text(&notes[0], width),
+                width,
+                Edge::Right
+            )
+            .width,
             260.0
         );
         let inside = Point::new(bar.x + bar.width - 100.0, bar.center().y);
@@ -2499,6 +2812,7 @@ mod tests {
             actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
+            edge: Edge::Right,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
@@ -2543,10 +2857,17 @@ mod tests {
             actions_expanded: false,
             x_offset: 0.0,
             peek_scroll: 0.0,
+            edge: Edge::Right,
         };
         let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
         let bar = strip(None).layout_in(bounds).bars[0];
-        let peek = peek_target(bar, bounds, &peek_text(&notes[0], 260.0), 260.0);
+        let peek = peek_target(
+            bar,
+            bounds,
+            &peek_text(&notes[0], 260.0),
+            260.0,
+            Edge::Right,
+        );
         // The peek's top right corner (where its trash sits) lies inside the
         // strip, above the bar it grew from.
         let on_peek_in_strip = Point::new(peek.x + peek.width - 4.0, peek.y + 4.0);
@@ -2722,10 +3043,333 @@ mod tests {
         let rects = layout
             .bars
             .iter()
-            .map(|bar| bar_rect_for(1.0, *bar))
+            .map(|bar| bar_rect_for(1.0, *bar, Edge::Right))
             .chain([layout.actions_button]);
         for rect in rects {
             assert!(rect.x + HIDE_SHIFT >= right + 24.0, "{rect:?}");
         }
+    }
+
+    fn edge_bounds(edge: Edge) -> Rectangle {
+        match edge {
+            Edge::Right => STRIP_BOUNDS,
+            Edge::Left => Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0)),
+            Edge::Top => Rectangle::new(Point::ORIGIN, Size::new(900.0, STRIP_WIDTH)),
+        }
+    }
+
+    const SCALES: [f32; 6] = [1.0, 2.3, 3.7, 1.6, 2.9, 1.15];
+
+    fn edge_layout(edge: Edge, expanded: bool) -> StripLayout {
+        let b = edge_bounds(edge);
+        compute_layout(
+            3,
+            |i| SCALES[i],
+            band(b, 0.8, edge),
+            0.0,
+            &BarSettings::default(),
+            expanded,
+            None,
+            edge,
+        )
+    }
+
+    /// Every bar and slot rect of `l`, in the edge-local frame of `edge`.
+    fn local_rects(l: &StripLayout, edge: Edge) -> Vec<LocalRect> {
+        let frame = Frame {
+            edge,
+            bounds: edge_bounds(edge),
+        };
+        l.bars
+            .iter()
+            .chain([
+                &l.actions_button,
+                &l.actions_hit_area,
+                &l.add_button,
+                &l.add_hit_area,
+                &l.search_button,
+                &l.search_hit_area,
+                &l.settings_button,
+                &l.settings_hit_area,
+            ])
+            .map(|r| frame.local(*r))
+            .collect()
+    }
+
+    #[test]
+    fn layout_is_edge_equivalent() {
+        for expanded in [false, true] {
+            let right = local_rects(&edge_layout(Edge::Right, expanded), Edge::Right);
+            for edge in [Edge::Left, Edge::Top] {
+                let l = edge_layout(edge, expanded);
+                assert_eq!(l.edge, edge);
+                let other = local_rects(&l, edge);
+                assert_eq!(right.len(), other.len());
+                for (a, b) in right.iter().zip(&other) {
+                    for (x, y) in [
+                        (a.along, b.along),
+                        (a.away, b.away),
+                        (a.length, b.length),
+                        (a.thickness, b.thickness),
+                    ] {
+                        assert!((x - y).abs() < 1e-3, "{edge:?} {a:?} vs {b:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn right_layout_unchanged() {
+        let close = |a: Rectangle, (x, y, w, h): (f32, f32, f32, f32)| {
+            assert!(
+                (a.x - x).abs() < 1e-4
+                    && (a.y - y).abs() < 1e-4
+                    && (a.width - w).abs() < 1e-4
+                    && (a.height - h).abs() < 1e-4,
+                "{a:?} vs {:?}",
+                (x, y, w, h)
+            );
+        };
+        // Recorded with the strip before it knew about edges.
+        let bars = [
+            (1044.0, 247.6, 10.0, 42.0),
+            (1031.0, 305.6, 23.0, 96.6),
+            (1017.0, 418.2, 37.0, 155.40001),
+        ];
+        let collapsed = edge_layout(Edge::Right, false);
+        for (bar, want) in collapsed.bars.iter().zip(bars) {
+            close(*bar, want);
+        }
+        close(collapsed.actions_button, (1038.0, 593.60004, 16.0, 58.8));
+        close(collapsed.actions_hit_area, (1000.0, 583.60004, 64.0, 84.8));
+        close(collapsed.add_hit_area, (1000.0, 583.60004, 64.0, 84.8));
+        assert_eq!(collapsed.max_scroll, 0.0);
+
+        let expanded = edge_layout(Edge::Right, true);
+        for (bar, want) in expanded.bars.iter().zip(bars) {
+            close(*bar, want);
+        }
+        close(expanded.actions_button, (989.5, 593.60004, 64.5, 58.8));
+        close(expanded.actions_hit_area, (1000.0, 583.60004, 64.0, 84.8));
+        close(expanded.add_button, (1038.0, 593.60004, 16.0, 58.8));
+        close(expanded.add_hit_area, (1036.0, 583.60004, 28.0, 84.79999));
+        close(expanded.search_button, (1005.0, 593.60004, 29.0, 58.8));
+        close(
+            expanded.search_hit_area,
+            (1003.0, 583.60004, 33.0, 84.79999),
+        );
+        close(expanded.settings_button, (989.5, 598.85004, 11.5, 48.3));
+        close(
+            expanded.settings_hit_area,
+            (1000.0, 583.60004, 3.0, 84.79999),
+        );
+
+        // Overflowing, scrolled and with a bar collapsing.
+        let over = compute_layout(
+            12,
+            |i| 1.0 + 0.1 * i as f32,
+            band(STRIP_BOUNDS, 0.5, Edge::Right),
+            50.0,
+            &BarSettings::default(),
+            false,
+            Some((4, 0.5)),
+            Edge::Right,
+        );
+        close(over.bars[0], (1044.0, 191.0, 10.0, 42.0));
+        close(over.bars[4], (1040.0, 448.2, 14.0, 29.4));
+        close(over.bars[11], (1033.0, 1022.6, 21.0, 88.2));
+        close(over.actions_button, (1032.0, 1130.7999, 22.0, 58.8));
+        assert!((over.max_scroll - 580.60004).abs() < 1e-3);
+    }
+
+    fn three_notes() -> [Note; 3] {
+        [
+            Note::new(crate::note::PALETTE[0]),
+            Note::new(crate::note::PALETTE[1]),
+            Note::new(crate::note::PALETTE[2]),
+        ]
+    }
+
+    #[test]
+    fn hit_tests_follow_edge() {
+        let notes = three_notes();
+        let entries = crate::strip_model::entries(&notes);
+        let (magnification, drag, bars) = (MagnificationState::new(), None, BarSettings::default());
+        let none = keyboard::Modifiers::default();
+        // Where bar 2 and the add slot sit on Right, in the edge-local frame.
+        let mut right = plain_strip(&notes, &entries, &magnification, &drag, &bars);
+        right.actions_expanded = true;
+        let right_frame = Frame {
+            edge: Edge::Right,
+            bounds: STRIP_BOUNDS,
+        };
+        let layout = right.layout_in(STRIP_BOUNDS);
+        let bar = right_frame.local(layout.bars[2]);
+        let add = right_frame.local(layout.add_button);
+        for edge in Edge::ALL {
+            let mut strip = plain_strip(&notes, &entries, &magnification, &drag, &bars);
+            strip.actions_expanded = true;
+            strip.edge = edge;
+            let bounds = edge_bounds(edge);
+            let frame = Frame { edge, bounds };
+            let at = frame.rect(bar).center();
+            let along = edge.to_local(at, bounds.size()).along;
+            assert!(
+                matches!(
+                    strip.left_press(bounds, at, none),
+                    Some(Some(Message::DragStart(2, a))) if (a - along).abs() < 1e-3
+                ),
+                "{edge:?}"
+            );
+            assert!(
+                matches!(
+                    strip.left_press(bounds, frame.rect(add).center(), none),
+                    Some(Some(Message::AddNote))
+                ),
+                "{edge:?}"
+            );
+            assert!(
+                matches!(
+                    strip.hover_message(bounds, at),
+                    Some(Message::StripHover(Some(a))) if (a - along).abs() < 1e-3
+                ),
+                "{edge:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn top_drag_reorders_by_x() {
+        let notes = three_notes();
+        let entries = crate::strip_model::entries(&notes);
+        let (magnification, bars) = (MagnificationState::new(), BarSettings::default());
+        let bounds = edge_bounds(Edge::Top);
+        let drag = |current_y| {
+            Some(DragState {
+                bar_index: 0,
+                origin_y: 0.0,
+                current_y,
+            })
+        };
+        let none = None;
+        let mut strip = plain_strip(&notes, &entries, &magnification, &none, &bars);
+        strip.edge = Edge::Top;
+        let layout = strip.layout_in(bounds);
+        let row = &layout.bars;
+        // A row along x, all hugging the top.
+        assert!(row[0].x + row[0].width < row[1].x && row[1].x + row[1].width < row[2].x);
+        assert!(row.iter().all(|b| (b.y - EDGE_MARGIN).abs() < 1e-3));
+        let mid = row[1].center_x();
+        assert_eq!(stack_target(row, 0, mid, Edge::Top), Some(1));
+        assert_eq!(
+            drop_zone(row[1], row[1].x + 1.0, Edge::Top),
+            DropZone::Before
+        );
+        assert_eq!(
+            drop_zone(row[1], row[1].x + row[1].width - 1.0, Edge::Top),
+            DropZone::After
+        );
+        let over = drag(mid);
+        assert_eq!(
+            drag_hint(row, over.as_ref(), Edge::Top).map(|h| h.at),
+            Some(HintAt::Bar(1))
+        );
+        // Past bar 2's middle along x, the drop goes after it.
+        let past = drag(row[2].center_x() + 1.0).unwrap();
+        assert_eq!(strip.insertion_index(&past, row), 3);
+        let before = drag(row[1].x - 1.0).unwrap();
+        assert_eq!(strip.insertion_index(&before, row), 1);
+    }
+
+    #[test]
+    fn top_wheel_scrolls_along() {
+        let notes = three_notes();
+        let entries = crate::strip_model::entries(&notes);
+        let (magnification, drag, bars) = (MagnificationState::new(), None, BarSettings::default());
+        let scroll = |edge: Edge, delta| {
+            let mut strip = plain_strip(&notes, &entries, &magnification, &drag, &bars);
+            strip.edge = edge;
+            let bounds = edge_bounds(edge);
+            match strip.wheel(bounds, bounds.center(), delta) {
+                (Some(Message::StripScroll(d)), false) => Some(d),
+                _ => None,
+            }
+        };
+        let vertical = mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 };
+        let right = scroll(Edge::Right, vertical);
+        assert_eq!(right, Some(-30.0));
+        assert_eq!(scroll(Edge::Top, vertical), right);
+        assert_eq!(scroll(Edge::Left, vertical), right);
+        // On Top a horizontal wheel scrolls along it too.
+        let horizontal = mouse::ScrollDelta::Pixels { x: -12.0, y: 0.0 };
+        assert_eq!(scroll(Edge::Top, horizontal), Some(-12.0));
+        assert_eq!(scroll(Edge::Right, horizontal), Some(0.0));
+    }
+
+    #[test]
+    fn notch_and_progress_sides() {
+        // A bar on Top runs along x.
+        let top = Rectangle::new(Point::new(100.0, 10.0), Size::new(42.0, 10.0));
+        let notch = start_cap(top, NOTCH_HEIGHT, Edge::Top);
+        assert_eq!((notch.x, notch.width), (top.x, NOTCH_HEIGHT));
+        assert!(notch.y > top.y && notch.y + notch.height < top.y + top.height);
+        let fill = progress_fill(top, 1, 4, Edge::Top);
+        assert_eq!(fill.x + fill.width, top.x + top.width);
+        assert_eq!((fill.width, fill.y, fill.height), (10.5, top.y, top.height));
+        let open = bar_rect_for(1.0, top, Edge::Top);
+        assert_eq!((open.y, open.height), (top.y, top.height * 1.5));
+
+        // On Right the notch caps the bar's top.
+        let right = Rectangle::new(Point::new(40.0, 100.0), Size::new(10.0, 42.0));
+        let notch = start_cap(right, NOTCH_HEIGHT, Edge::Right);
+        assert_eq!((notch.y, notch.height), (right.y, NOTCH_HEIGHT));
+
+        // On Left the stack edges sit right of the bar, and an open bar
+        // keeps its left edge.
+        let left = Rectangle::new(Point::new(10.0, 100.0), Size::new(8.0, 40.0));
+        let [a, b] = stack_edges(left, Edge::Left);
+        assert!(a.x > left.x + left.width && b.x > a.x + a.width);
+        assert!(b.height < a.height && a.height < left.height);
+        let open = bar_rect_for(1.0, left, Edge::Left);
+        assert_eq!((open.x, open.width), (left.x, left.width * 1.5));
+        // On Top they sit below it.
+        let [a, b] = stack_edges(top, Edge::Top);
+        assert!(a.y > top.y + top.height && b.y > a.y + a.height);
+        assert!(b.width < a.width && a.width < top.width);
+    }
+
+    #[test]
+    fn chips_sit_on_the_away_side() {
+        let left = Rectangle::new(Point::new(10.0, 300.0), Size::new(8.0, 40.0));
+        let bounds = edge_bounds(Edge::Left);
+        let chip = chip_rect(bounds, left, 320.0, "Stack", None, Edge::Left);
+        assert!(chip.x >= left.x + left.width);
+        assert!((chip.center_y() - 320.0).abs() < 0.01);
+        let top = Rectangle::new(Point::new(300.0, 10.0), Size::new(40.0, 8.0));
+        let bounds = edge_bounds(Edge::Top);
+        let chip = chip_rect(bounds, top, 320.0, "Stack", None, Edge::Top);
+        assert!(chip.y >= top.y + top.height);
+        assert!((chip.center_x() - 320.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hidden_strip_moves_toward_its_edge() {
+        assert_eq!(hide_translation(Edge::Right, 5.0), Vector::new(5.0, 0.0));
+        assert_eq!(hide_translation(Edge::Left, 5.0), Vector::new(-5.0, 0.0));
+        assert_eq!(hide_translation(Edge::Top, 5.0), Vector::new(0.0, -5.0));
+    }
+
+    #[test]
+    fn top_band_is_centred_along_x() {
+        let b = band(
+            Rectangle::new(Point::new(100.0, 5.0), Size::new(1000.0, 64.0)),
+            0.5,
+            Edge::Top,
+        );
+        assert_eq!(
+            b,
+            Rectangle::new(Point::new(350.0, 5.0), Size::new(500.0, 64.0))
+        );
     }
 }
