@@ -113,6 +113,35 @@ fn pointer_after_resize(pointer: Option<Point>, edge: Edge, old: f32, new: f32) 
     }
 }
 
+/// Where a cursor that didn't move is after the window docked to `edge`
+/// moved from `old` to `new`: it keeps its screen spot, across the edge (see
+/// `pointer_after_resize`) and along it. `None` once it is outside.
+fn pointer_after_dock(
+    pointer: Option<Point>,
+    edge: Edge,
+    old: Rectangle,
+    new: Rectangle,
+) -> Option<Point> {
+    let p = pointer_after_resize(
+        pointer,
+        edge,
+        edge.thickness(old.size()),
+        edge.thickness(new.size()),
+    )?;
+    match edge {
+        Edge::Right | Edge::Left => {
+            let y = p.y + old.y - new.y;
+            (0.0..=new.height)
+                .contains(&y)
+                .then_some(Point::new(p.x, y))
+        }
+        Edge::Top => {
+            let x = p.x + old.x - new.x;
+            (0.0..=new.width).contains(&x).then_some(Point::new(x, p.y))
+        }
+    }
+}
+
 /// The window docked to `edge` on `monitor`. With `passthrough` it covers
 /// the monitor, below the `top_inset` (the menu bar) on Top. Without, it is
 /// `thickness` away from the edge and the `fraction` of the edge long,
@@ -2856,6 +2885,17 @@ impl App {
         )
     }
 
+    /// How much of the edge's length the docked window spans without
+    /// `passthrough`: all of it as the edge sliver, so the cursor can reveal
+    /// the strip anywhere along the edge, else the configured fraction.
+    fn dock_fraction(&self, passthrough: bool) -> f32 {
+        if self.wants_sliver(passthrough) {
+            1.0
+        } else {
+            self.settings.settings().window.height_fraction
+        }
+    }
+
     /// Docks the window to the chosen screen edge, centred along it. The
     /// strip is centred inside, so it sits at the middle of that screen
     /// border. Does nothing if the window is already there.
@@ -2873,7 +2913,7 @@ impl App {
             self.top_inset,
             SUPPORTS_PASSTHROUGH,
             self.window_width(SUPPORTS_PASSTHROUGH),
-            self.settings.settings().window.height_fraction,
+            self.dock_fraction(SUPPORTS_PASSTHROUGH),
         );
         let (origin, size) = (frame.position(), frame.size());
         if size == self.window_size && self.window_origin == Some(origin) {
@@ -2884,12 +2924,20 @@ impl App {
         // widens to reveal. A shrink can leave it outside, without a
         // `CursorLeft`.
         if !SUPPORTS_PASSTHROUGH {
-            self.pointer = pointer_after_resize(
-                self.pointer,
-                edge,
-                edge.thickness(self.window_size),
-                edge.thickness(size),
-            );
+            self.pointer = match self.window_origin {
+                Some(old) => pointer_after_dock(
+                    self.pointer,
+                    edge,
+                    Rectangle::new(old, self.window_size),
+                    frame,
+                ),
+                None => pointer_after_resize(
+                    self.pointer,
+                    edge,
+                    edge.thickness(self.window_size),
+                    edge.thickness(size),
+                ),
+            };
         }
         self.window_size = size;
         self.window_origin = Some(origin);
@@ -2977,9 +3025,10 @@ impl App {
     }
 
     /// Whether `position` is in the edge zone: the window's outermost
-    /// `EDGE_ZONE` px on the strip's edge, within the strip's band.
+    /// `EDGE_ZONE` px on the strip's edge, anywhere along it (the window
+    /// spans the whole edge with passthrough, and as the edge sliver).
     ///
-    /// In the edge sliver that is anywhere inside the window, within the band.
+    /// In the edge sliver that is anywhere inside the window.
     fn in_edge(&self, position: Point) -> bool {
         if self.is_sliver() {
             let edge = self.edge();
@@ -2987,10 +3036,9 @@ impl App {
                 Edge::Right | Edge::Left => position.x,
                 Edge::Top => position.y,
             };
-            return (0.0..=edge.thickness(self.window_size)).contains(&across)
-                && self.in_band(self.along(position));
+            return (0.0..=edge.thickness(self.window_size)).contains(&across);
         }
-        self.near_edge(position, EDGE_ZONE) && self.over_strip(position)
+        self.near_edge(position, EDGE_ZONE)
     }
 
     /// Whether `position` is where the strip is in use: its column within
@@ -7287,8 +7335,9 @@ mod tests {
         assert!(!app.is_interactive(column));
         let left_of_edge = Point::new(app.window_size.width - 3.0, edge.y);
         assert!(!app.is_interactive(left_of_edge));
+        // Anywhere along the edge reveals, outside the band too.
         let below_band = Point::new(edge.x, app.window_size.height - 2.0);
-        assert!(!app.is_interactive(below_band));
+        assert!(app.is_interactive(below_band));
     }
 
     #[test]
@@ -7537,7 +7586,7 @@ mod tests {
         assert_eq!(app.window_width(false), EDGE_SLIVER);
         assert_eq!(app.window_width(true), open, "passthrough stays wide");
 
-        // Anywhere inside the sliver within the band counts as the edge zone.
+        // Anywhere inside the sliver counts as the edge zone.
         dock_without_passthrough(&mut app);
         let _ = app.update(Message::CursorMoved(Point::new(0.5, edge_point(&app).y)));
         assert!(app.auto_hide.next_deadline().is_some(), "no dwell started");
@@ -7587,11 +7636,11 @@ mod tests {
         assert_eq!(app.window_width(false), open);
         dock_without_passthrough(&mut app);
 
-        // The wide window's rightmost 2 px within the band are the edge.
+        // The wide window's rightmost 2 px, anywhere along it, are the edge.
         let edge = edge_point(&app);
         assert!(app.in_edge(edge));
         assert!(!app.in_edge(Point::new(app.window_size.width - 3.0, edge.y)));
-        assert!(!app.in_edge(Point::new(edge.x, app.window_size.height - 2.0)));
+        assert!(app.in_edge(Point::new(edge.x, app.window_size.height - 2.0)));
         let _ = app.update(Message::CursorMoved(edge));
         assert!(app.auto_hide.next_deadline().is_some(), "no dwell started");
 
@@ -7620,7 +7669,7 @@ mod tests {
     }
 
     #[test]
-    fn sliver_edge_requires_band() {
+    fn sliver_edge_ignores_band() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = auto_hide_app(&dir);
         hide_strip(&mut app, Instant::now());
@@ -7630,9 +7679,9 @@ mod tests {
         assert!(!app.in_edge(Point::new(-5.0, mid)), "left of the sliver");
         assert!(!app.in_edge(Point::new(3.0, mid)), "right of the sliver");
         let below = Point::new(1.0, app.window_size.height - 2.0);
-        assert!(!app.in_edge(below), "below the band");
+        assert!(app.in_edge(below), "below the band");
         let _ = app.update(Message::CursorMoved(below));
-        assert_eq!(app.auto_hide.next_deadline(), None);
+        assert!(app.auto_hide.next_deadline().is_some(), "no dwell started");
     }
 
     #[test]
@@ -7725,7 +7774,7 @@ mod tests {
         assert!(!app.in_edge(Point::new(3.0, mid)));
         assert!(app.over_strip(Point::new(STRIP_WIDTH - 1.0, mid)));
         assert!(!app.over_strip(Point::new(1399.0, mid)));
-        assert!(!app.in_edge(Point::new(1.0, 898.0)), "outside the band");
+        assert!(app.in_edge(Point::new(1.0, 898.0)), "outside the band");
 
         let app = on_edge(app, Edge::Top);
         assert_eq!(
@@ -7735,7 +7784,7 @@ mod tests {
         let mid = band_middle(&app);
         assert!(app.in_edge(Point::new(mid, 1.0)));
         assert!(!app.in_edge(Point::new(mid, 899.0)));
-        assert!(!app.in_edge(Point::new(1399.0, 1.0)), "outside the band");
+        assert!(app.in_edge(Point::new(1399.0, 1.0)), "outside the band");
         assert!(app.over_strip(Point::new(mid, STRIP_WIDTH - 1.0)));
         assert!(!app.over_strip(Point::new(mid, STRIP_WIDTH + 1.0)));
         assert!(app.is_interactive(Point::new(mid, 1.0)));
@@ -7870,7 +7919,7 @@ mod tests {
         let left = dock_frame(Edge::Left, monitor, 0.0, false, sliver, 0.9);
         assert_eq!((left.x, left.width, left.height), (0.0, 2.0, 810.0));
 
-        // The Top sliver's edge zone is its 2 px height, within the band.
+        // The Top sliver's edge zone is its 2 px height, anywhere along it.
         let dir = tempfile::tempdir().unwrap();
         let mut app = on_edge(auto_hide_app(&dir), Edge::Top);
         hide_strip(&mut app, Instant::now());
@@ -7880,7 +7929,99 @@ mod tests {
         let mid = band_middle(&app);
         assert!(app.in_edge(Point::new(mid, 1.0)));
         assert!(!app.in_edge(Point::new(mid, 3.0)), "below the sliver");
-        assert!(!app.in_edge(Point::new(1.0, 1.0)), "outside the band");
+        assert!(app.in_edge(Point::new(1.0, 1.0)), "outside the band");
+    }
+
+    #[test]
+    fn edge_dwell_anywhere_reveals() {
+        for edge in [Edge::Right, Edge::Left, Edge::Top] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = on_edge(auto_hide_app(&dir), edge);
+            hide_strip(&mut app, Instant::now());
+            let size = app.window_size;
+            // Near the window's corner, far outside the strip's band.
+            let corner = match edge {
+                Edge::Right => Point::new(size.width - 1.0, 5.0),
+                Edge::Left => Point::new(1.0, size.height - 5.0),
+                Edge::Top => Point::new(size.width - 5.0, 1.0),
+            };
+            assert!(!app.in_band(app.along(corner)), "{edge:?}: inside the band");
+            assert!(app.in_edge(corner), "{edge:?}");
+            assert!(app.is_interactive(corner), "{edge:?}");
+            // Still only the outermost 2 px.
+            let inside = match edge {
+                Edge::Right => Point::new(size.width - 3.0, 5.0),
+                Edge::Left => Point::new(3.0, size.height - 5.0),
+                Edge::Top => Point::new(size.width - 5.0, 3.0),
+            };
+            assert!(!app.in_edge(inside), "{edge:?}: too deep");
+            let entered = Instant::now();
+            let _ = app.update(Message::CursorMoved(corner));
+            assert!(
+                app.auto_hide.next_deadline().is_some(),
+                "{edge:?}: no dwell"
+            );
+            let _ = app.update(Message::Tick(
+                entered + REVEAL_DWELL + Duration::from_millis(5),
+            ));
+            assert_eq!(
+                app.auto_hide.phase(),
+                crate::autohide::Phase::Revealing,
+                "{edge:?}"
+            );
+        }
+        // On Top the menu bar counts anywhere along it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = on_edge(auto_hide_app(&dir), Edge::Top);
+        hide_strip(&mut app, Instant::now());
+        assert!(app.in_edge(Point::new(5.0, -10.0)));
+    }
+
+    #[test]
+    fn linux_sliver_spans_full_edge() {
+        let monitor = Size::new(1440.0, 900.0);
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        let fraction = app.settings.settings().window.height_fraction;
+        assert!(fraction < 1.0);
+        assert_eq!(
+            app.dock_fraction(false),
+            fraction,
+            "shown: the strip's length"
+        );
+        hide_strip(&mut app, Instant::now());
+        assert_eq!(app.dock_fraction(false), 1.0, "the sliver spans the edge");
+        assert_eq!(
+            app.dock_fraction(true),
+            fraction,
+            "passthrough is unaffected"
+        );
+        for edge in [Edge::Right, Edge::Left, Edge::Top] {
+            let sliver = dock_frame(edge, monitor, 0.0, false, EDGE_SLIVER, 1.0);
+            assert_eq!(edge.edge_length(sliver.size()), edge.edge_length(monitor));
+            assert_eq!(edge.thickness(sliver.size()), EDGE_SLIVER);
+        }
+
+        // Anywhere inside the full-length sliver is the edge zone.
+        let sliver = dock_frame(Edge::Right, monitor, 0.0, false, EDGE_SLIVER, 1.0);
+        app.window_size = sliver.size();
+        assert!(app.is_sliver());
+        assert!(app.in_edge(Point::new(1.0, 3.0)));
+        assert!(app.in_edge(Point::new(1.0, 897.0)));
+
+        // Revealing shortens the window along the edge: the pointer keeps its
+        // screen spot, or is gone once outside.
+        let shown = dock_frame(Edge::Right, monitor, 0.0, false, STRIP_WIDTH, fraction);
+        assert!(shown.y > 0.0);
+        let at = |y| Some(Point::new(1.0, y));
+        assert_eq!(
+            pointer_after_dock(at(3.0), Edge::Right, sliver, shown),
+            None
+        );
+        assert_eq!(
+            pointer_after_dock(at(450.0), Edge::Right, sliver, shown),
+            Some(Point::new(STRIP_WIDTH - 1.0, 450.0 - shown.y))
+        );
     }
 
     #[test]

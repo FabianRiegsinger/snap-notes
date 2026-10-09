@@ -25,12 +25,12 @@
 - **From the clipboard:** **New Note from Clipboard** in the tray menu, or Alt/Option-click on `+`, makes a note whose body is the clipboard's text or image.
 - **Screen edge:** the strip sits on the right edge by default. In Settings → Window → **Screen edge** choose **Right**, **Left** or **Top**; the change applies right away. On Left everything mirrors Right: the peek, notes, panels and hints open to the right of the strip. On Top the bars sit side by side along the top edge and grow downward, and everything opens below the strip. On macOS the strip then sits below the menu bar. Notes you dragged keep their place.
 - **Scroll:** with more notes than fit on screen, scroll the strip with the mouse wheel.
-- **Auto-hide:** on by default, switch it off in Settings → Window. The strip then slides off toward its edge 0.8 s after the cursor leaves the strip, its peek or the undo toast. To bring it back, hold the cursor against that edge where the strip sits for about 0.15 s. On Top with macOS, pushing the cursor up into the menu bar over the strip also reveals it. The setting is saved, but the strip is always shown when the app starts.
+- **Auto-hide:** on by default, switch it off in Settings → Window. The strip then slides off toward its edge 0.8 s after the cursor leaves the strip, its peek or the undo toast. To bring it back, hold the cursor against that edge for about 0.15 s, anywhere along it. On Top with macOS, pushing the cursor up into the menu bar also reveals it. The setting is saved, but the strip is always shown when the app starts.
   - **Stays shown:** while a search, settings or export panel is open, during a bar or file drag, and while the undo toast or the "Clipboard is empty" hint shows. A fired reminder does not slide the whole strip in: only that note's bar (or bars, if several are due) stays visible at the edge and jumps or pulses until you open it; other bars stay hidden.
   - **Open notes:** an open note does not keep the strip shown. The strip can slide away while the note stays open and usable.
   - **Other ways back:** the global hotkey, the tray's **New Note**, **New Note from Clipboard**, **Search…**, **Settings…** and **Export…**, and Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+,.
   - **Tray Hide:** **Hide Notes** still hides everything, and the edge does nothing until you choose **Show**.
-  - **On Linux:** while the strip is hidden, the window shrinks to a 2 px sliver on the chosen edge. Move the cursor into it to reveal the strip.
+  - **On Linux:** while the strip is hidden, the window shrinks to a 2 px sliver along the whole chosen edge. Move the cursor into it anywhere to reveal the strip.
 
 ### Notes
 - **Unfold and fold:** a click morphs the bar into a sticky note. Esc, the close button, a click outside the note or a click on its bar folds it back.
