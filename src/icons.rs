@@ -14,6 +14,9 @@ pub const TITLE_FONT: Font = Font {
 /// Lucide icon font.
 pub const ICON_FONT: Font = Font::with_name("lucide");
 
+/// The bundled Lucide icon font subset.
+pub const ICON_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/lucide.subset.ttf");
+
 /// Bundled font files: Inter Regular, Italic, SemiBold, Bold, BoldItalic, then Lucide.
 pub static FONTS: [&[u8]; 6] = [
     include_bytes!("../assets/fonts/Inter-Regular.subset.ttf"),
@@ -21,7 +24,7 @@ pub static FONTS: [&[u8]; 6] = [
     include_bytes!("../assets/fonts/Inter-SemiBold.subset.ttf"),
     include_bytes!("../assets/fonts/Inter-Bold.subset.ttf"),
     include_bytes!("../assets/fonts/Inter-BoldItalic.subset.ttf"),
-    include_bytes!("../assets/fonts/lucide.subset.ttf"),
+    ICON_FONT_BYTES,
 ];
 
 /// Icons available in the bundled Lucide subset.
@@ -148,7 +151,7 @@ mod tests {
 
     #[test]
     fn every_icon_is_in_the_icon_font() {
-        let face = ttf_parser::Face::parse(FONTS[5], 0).expect("icon font parses");
+        let face = ttf_parser::Face::parse(ICON_FONT_BYTES, 0).expect("icon font parses");
         for icon in Icon::ALL {
             assert!(face.glyph_index(icon.codepoint()).is_some(), "{icon:?}");
         }
@@ -156,7 +159,7 @@ mod tests {
 
     #[test]
     fn icon_font_holds_only_the_listed_icons() {
-        let face = ttf_parser::Face::parse(FONTS[5], 0).expect("icon font parses");
+        let face = ttf_parser::Face::parse(ICON_FONT_BYTES, 0).expect("icon font parses");
         let mut mapped = HashSet::new();
         for table in face.tables().cmap.expect("cmap").subtables {
             table.codepoints(|c| {

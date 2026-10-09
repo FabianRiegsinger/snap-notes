@@ -47,8 +47,9 @@ impl NoteStore {
         // Older tagged notes get a fixed reminder anchor. Repairs made here
         // are saved soon after.
         let mut changed = regrouped;
+        let now = chrono::Local::now();
         for note in &mut notes {
-            changed |= crate::reminder::freeze_anchor(note);
+            changed |= crate::reminder::freeze_anchor(note, now);
         }
         Self {
             notes,

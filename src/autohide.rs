@@ -62,7 +62,11 @@ impl AutoHide {
             return false;
         }
 
-        let active = inputs.in_use_area || inputs.blocked || inputs.force_reveal;
+        // A cursor resting at the edge keeps a shown strip shown: anywhere
+        // along it reveals, so hiding there would only reveal again.
+        let resting_at_edge =
+            inputs.in_edge && matches!(self.phase, Phase::Shown | Phase::Revealing);
+        let active = inputs.in_use_area || inputs.blocked || inputs.force_reveal || resting_at_edge;
         // Activity restarts the grace; it only counts down while Shown.
         if active || self.phase != Phase::Shown {
             self.idle_since = None;

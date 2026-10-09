@@ -226,15 +226,15 @@ struct ReminderLabel {
     tooltip: Option<String>,
 }
 
-/// The header's reminder label for `status` in a note `width` wide; `None`
-/// shows nothing. A fired reminder is dimmed. A narrow note keeps just the
-/// bell, with the text as its tooltip.
 /// What the title field shows: the title without its reminder tag, which
 /// only appears as the header's rendered date and time.
 pub fn title_field_text(note: &Note) -> String {
     reminder::visible_title(&note.title)
 }
 
+/// The header's reminder label for `status` in a note `width` wide; `None`
+/// shows nothing. A fired reminder is dimmed. A narrow note keeps just the
+/// bell, with the text as its tooltip.
 fn reminder_label(status: &reminder::Status, width: f32) -> Option<ReminderLabel> {
     let (text, ink, bell) = match status {
         reminder::Status::None => return None,

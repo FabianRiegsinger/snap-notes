@@ -916,6 +916,9 @@ pub fn strip_thickness(
 ///
 /// `collapse` is a deleted bar's index and how far it has collapsed (0..=1):
 /// its length and one gap next to it shrink by that share.
+///
+/// Settled: the row fully unfolded when `actions_expanded`, else folded.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn compute_layout(
     count: usize,
@@ -924,6 +927,35 @@ pub fn compute_layout(
     scroll_offset: f32,
     bars_settings: &BarSettings,
     actions_expanded: bool,
+    collapse: Option<(usize, f32)>,
+    edge: Edge,
+) -> StripLayout {
+    let progress = if actions_expanded { 1.0 } else { 0.0 };
+    compute_layout_with(
+        count,
+        scale,
+        bounds,
+        scroll_offset,
+        bars_settings,
+        actions_expanded,
+        progress,
+        collapse,
+        edge,
+    )
+}
+
+/// [`compute_layout`] with the Actions row `actions_progress` (eased, 0..=1)
+/// of the way unfolded: the row's length along the edge, and so where the
+/// bars sit, follows it, so nothing jumps as it unfolds or folds back.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_layout_with(
+    count: usize,
+    scale: impl Fn(usize) -> f32,
+    bounds: Rectangle,
+    scroll_offset: f32,
+    bars_settings: &BarSettings,
+    actions_expanded: bool,
+    actions_progress: f32,
     collapse: Option<(usize, f32)>,
     edge: Edge,
 ) -> StripLayout {
@@ -957,11 +989,11 @@ pub fn compute_layout(
         .height
         .max(search_size.height)
         .max(gear_size.height);
-    let row_length = if actions_expanded {
-        expanded_length
-    } else {
-        actions_size.height
-    };
+    let row_length = crate::animation::lerp(
+        actions_size.height,
+        expanded_length,
+        actions_progress.clamp(0.0, 1.0),
+    );
     let content_length = bars_length + add_gap + row_length;
 
     let available = span.length - 2.0 * EDGE_PADDING;
@@ -1090,7 +1122,7 @@ pub fn compute_layout(
         }),
         actions_hit_area,
         actions_expanded,
-        actions_progress: if actions_expanded { 1.0 } else { 0.0 },
+        actions_progress,
         actions_slot: frame.rect(actions_button_slot),
         pill_slots: [pill_add, pill_search, pill_gear].map(|r| frame.rect(r)),
         add_button: frame.rect(add_button),
@@ -1209,18 +1241,17 @@ impl<'a> BarStrip<'a> {
     }
 
     fn layout_in(&self, bounds: Rectangle) -> StripLayout {
-        let mut layout = compute_layout(
+        compute_layout_with(
             self.entries.len(),
             |i| self.magnification.scale(i),
             band(bounds, self.height_fraction, self.edge),
             self.scroll_offset,
             self.bars,
             self.actions_expanded,
+            self.actions_progress,
             self.collapse,
             self.edge,
-        );
-        layout.actions_progress = self.actions_progress;
-        layout
+        )
     }
 
     /// The cursor at `pos`'s coordinate along the edge.
@@ -2410,7 +2441,8 @@ mod tests {
         assert_eq!(pill_icon(Slot::Search), Some(Icon::Search));
         assert_eq!(pill_icon(Slot::Settings), Some(Icon::Settings));
         assert_eq!(pill_icon(Slot::Actions), None);
-        let face = ttf_parser::Face::parse(crate::icons::FONTS[5], 0).expect("icon font parses");
+        let face =
+            ttf_parser::Face::parse(crate::icons::ICON_FONT_BYTES, 0).expect("icon font parses");
         for slot in [Slot::Add, Slot::Search, Slot::Settings] {
             let icon = pill_icon(slot).unwrap();
             assert!(face.glyph_index(icon.codepoint()).is_some(), "{icon:?}");
@@ -3686,6 +3718,44 @@ mod tests {
             assert_eq!(strip_thickness(&bars, 3, scale, false, 0.0), STRIP_WIDTH);
             assert_eq!(strip_thickness(&bars, 3, scale, true, 0.0), expanded);
         }
+    }
+
+    #[test]
+    fn row_length_follows_actions_progress() {
+        let bars = BarSettings::default();
+        // New / Search / Settings magnified more than the collapsed slot, so
+        // the expanded row is longer.
+        let scale = |i: usize| if i > 3 { 1.6 } else { 1.0 };
+        let at = |expanded, p| {
+            compute_layout_with(
+                3,
+                scale,
+                STRIP_BOUNDS,
+                0.0,
+                &bars,
+                expanded,
+                p,
+                None,
+                Edge::Right,
+            )
+            .bars[0]
+                .y
+        };
+        let (collapsed, expanded) = (at(false, 0.0), at(true, 1.0));
+        assert!(expanded < collapsed, "precondition: the row grows");
+        let mut last = collapsed;
+        for step in 0..=10 {
+            let y = at(true, step as f32 / 10.0);
+            assert!(y <= last + 0.001, "bars went back at {step}");
+            last = y;
+        }
+        assert!((last - expanded).abs() < 0.001);
+        // And back down when collapsing.
+        assert!(
+            (at(false, 1.0) - expanded).abs() < 0.001,
+            "jumped on collapse"
+        );
+        assert!((at(false, 0.0) - collapsed).abs() < 0.001);
     }
 
     #[test]

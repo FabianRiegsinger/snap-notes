@@ -154,12 +154,16 @@ pub fn retitle(note: &mut Note, title: String, now: DateTime<Local>) {
 }
 
 /// Gives a tagged note without an anchor (written before anchors existed)
-/// its `updated_at` as one, so later edits can't move its reminder. True if
-/// it changed the note.
-pub fn freeze_anchor(note: &mut Note) -> bool {
+/// its `updated_at` as one, so later edits can't move its reminder. A time
+/// that has already passed by `now` counts as fired: such a tag never armed,
+/// so it must not alert on load. True if it changed the note.
+pub fn freeze_anchor(note: &mut Note, now: DateTime<Local>) -> bool {
     let freeze = note.reminder_set_at.is_none() && tag_text(&note.title).is_some();
     if freeze {
         note.reminder_set_at = Some(note.updated_at);
+        if let Some(time) = at(note).filter(|time| *time <= now) {
+            note.reminder_fired = Some(time.with_timezone(&Utc));
+        }
     }
     freeze
 }
@@ -335,12 +339,22 @@ pub fn edit_visible(title: &str, visible: &str) -> String {
     if visible.is_empty() {
         return hidden.to_string();
     }
-    let front = format!("{hidden} {visible}");
-    if tag_text(&front) == Some(hidden) {
-        front
-    } else {
-        format!("{visible} {hidden}")
-    }
+    // Before a word (the first that works), else at the end: wherever the
+    // tag stays exactly itself and the text around it comes back unchanged.
+    let starts = std::iter::once(0).chain(
+        visible
+            .char_indices()
+            .filter(|&(_, c)| c == ' ')
+            .map(|(i, _)| i + 1),
+    );
+    let mut placements = starts
+        .map(|i| format!("{}{hidden} {}", &visible[..i], &visible[i..]))
+        .chain(std::iter::once(format!("{visible} {hidden}")));
+    let round_trips =
+        |title: &String| tag_text(title) == Some(hidden) && visible_title(title) == visible;
+    placements
+        .find(round_trips)
+        .unwrap_or_else(|| format!("{hidden} {visible}"))
 }
 
 /// A reminder time as shown in an export: `Thu 15 Oct 16:30`.
@@ -390,6 +404,10 @@ mod tests {
         let edited = edit_visible("Call @tue", "12:00 lunch");
         assert_eq!(tag_text(&edited), Some("@tue"));
         assert_eq!(visible_title(&edited), "12:00 lunch");
+        // A leading time and a `@` candidate together still keep it.
+        let edited = edit_visible("@tue", "12:00 @frx");
+        assert_eq!(tag_text(&edited), Some("@tue"));
+        assert_eq!(visible_title(&edited), "12:00 @frx");
         // Without a tag the text is the title.
         assert_eq!(edit_visible("Call", "Call @frx"), "Call @frx");
         assert_eq!(edit_visible("@15:00 x", ""), "@15:00");
@@ -608,12 +626,12 @@ mod tests {
         let mut n = note("Call @15:00", now());
         n.reminder_set_at = None;
         assert_eq!(at(&n), None);
-        assert!(freeze_anchor(&mut n));
+        assert!(freeze_anchor(&mut n, now()));
         assert_eq!(n.reminder_set_at, Some(n.updated_at));
-        assert!(!freeze_anchor(&mut n));
+        assert!(!freeze_anchor(&mut n, now()));
         let mut plain = note("Plain", now());
         plain.reminder_set_at = None;
-        assert!(!freeze_anchor(&mut plain));
+        assert!(!freeze_anchor(&mut plain, now()));
     }
 
     #[test]

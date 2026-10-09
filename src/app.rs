@@ -1,8 +1,8 @@
 use crate::animation::{ease_out_cubic, morph_frame, MagnificationState, Morph, MorphFrame};
 use crate::autohide::{self, AutoHide};
 use crate::bar_strip::{
-    along_center, along_span, band, compute_layout, hide_translation, peek_target, stack_target,
-    BarStrip, StripLayout, HIDE_SHIFT, STRIP_WIDTH,
+    along_center, along_span, band, compute_layout_with, hide_translation, peek_target,
+    stack_target, BarStrip, StripLayout, HIDE_SHIFT, STRIP_WIDTH,
 };
 use crate::edge::{Edge, LocalRect};
 use crate::export::{self, ExportFormat};
@@ -1464,13 +1464,18 @@ impl App {
                 self.reminder_picker = None;
             }
             Message::ToggleReminderPicker => {
+                // The picker works on the committed title.
+                self.commit_title();
                 if self.reminder_picker.is_some() {
                     self.reminder_picker = None;
                 } else {
                     self.open_reminder_picker();
                 }
             }
-            Message::OpenReminderPicker => self.open_reminder_picker(),
+            Message::OpenReminderPicker => {
+                self.commit_title();
+                self.open_reminder_picker();
+            }
             Message::ReminderPickerDay(date) => {
                 if let Some(draft) = &mut self.reminder_picker {
                     draft.date = date;
@@ -1495,6 +1500,7 @@ impl App {
                 }
             }
             Message::ReminderPickerDone => {
+                self.commit_title();
                 let Some(draft) = self.reminder_picker.take() else {
                     return Task::none();
                 };
@@ -1520,6 +1526,7 @@ impl App {
                 self.store.mark_dirty();
             }
             Message::ReminderPickerClear => {
+                self.commit_title();
                 let Some(id) = self.active_note else {
                     self.reminder_picker = None;
                     return Task::none();
@@ -2634,6 +2641,7 @@ impl App {
         if self.note_drag.is_some() {
             self.finish_note_drag();
         }
+        self.commit_title();
         self.active_note = None;
         self.note_hovered = false;
         self.editor_content = None;
@@ -2694,10 +2702,13 @@ impl App {
     /// and the fired time saved at once so it never fires twice. Alerting
     /// bars stay visible while the strip may remain auto-hidden.
     fn fire_reminders(&mut self, now: chrono::DateTime<chrono::Local>) -> Task<Message> {
+        // A title being typed may parse as a time on its way to another.
+        let editing = self.title_edit.as_ref().map(|e| e.id);
         let due: Vec<_> = self
             .store
             .notes()
             .iter()
+            .filter(|note| Some(note.id) != editing)
             .filter_map(|note| Some((note.id, reminder::due(note, now)?)))
             .collect();
         if due.is_empty() {
@@ -3834,9 +3845,19 @@ impl App {
     }
 
     /// Ends the title field's edit: the field shows the title without its
-    /// valid tag again, so a tag typed in becomes the reminder.
+    /// valid tag again, so a tag typed in becomes the reminder. A tag other
+    /// than the one before the edit counts from now, the commit.
     fn commit_title(&mut self) {
-        self.title_edit = None;
+        let Some(edit) = self.title_edit.take() else {
+            return;
+        };
+        if let Some(note) = self.store.note_mut(edit.id) {
+            let tag = reminder::tag_text(&note.title);
+            if tag.is_some() && tag != edit.hidden.as_deref() {
+                note.reminder_set_at = Some(chrono::Utc::now());
+                self.store.mark_dirty();
+            }
+        }
     }
 
     /// What the open note's title field shows: the text as typed while it is
@@ -3870,18 +3891,17 @@ impl App {
     fn strip_layout(&self) -> StripLayout {
         let bounds = self.strip_bounds();
         let edge = self.edge();
-        let mut layout = compute_layout(
+        compute_layout_with(
             self.entries().len(),
             |i| self.magnification.scale(i),
             band(bounds, self.strip_fraction(), edge),
             self.scroll_offset,
             &self.settings.settings().bars,
             self.actions_open,
+            self.actions_progress(),
             self.collapse(),
             edge,
-        );
-        layout.actions_progress = self.actions_progress();
-        layout
+        )
     }
 
     /// Share of the window's length along the edge the strip uses. Without
@@ -7406,6 +7426,139 @@ mod tests {
         assert_eq!(title_field(&app), "Call @frx");
         let note = &app.store.notes()[0];
         assert_eq!(reminder::status(note), reminder::Status::Invalid);
+    }
+
+    #[test]
+    fn legacy_bare_weekday_tag_does_not_fire_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.json");
+        let mut store = NoteStore::load(path.clone());
+        let id = store.add_note(&crate::note::PALETTE);
+        let note = store.note_mut(id).unwrap();
+        note.title = "Team @monday standup".into();
+        note.updated_at = chrono::Utc::now() - chrono::Duration::days(14);
+        note.reminder_set_at = None;
+        store.save().unwrap();
+
+        let mut app = app_in(&dir);
+        let note = &app.store.notes()[0];
+        assert!(note.reminder_set_at.is_some(), "anchor not frozen");
+        let _ = app.update(Message::ReminderTick);
+        assert!(app.pulsing.is_empty(), "a legacy tag alerted on load");
+        let note = &app.store.notes()[0];
+        assert_eq!(reminder::due(note, chrono::Local::now()), None);
+    }
+
+    #[test]
+    fn resting_at_the_edge_outside_the_band_does_not_cycle() {
+        use crate::autohide::Phase;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        let mut now = hide_strip(&mut app, Instant::now());
+        let corner = Point::new(app.window_size.width - 1.0, 5.0);
+        assert!(
+            !app.in_band(app.along(corner)),
+            "precondition: outside the band"
+        );
+        let _ = app.update(Message::CursorMoved(corner));
+        let mut reveals = 0;
+        let mut hid_after_reveal = false;
+        let mut last = app.auto_hide.phase();
+        for _ in 0..(5000 / 16) {
+            now += Duration::from_millis(16);
+            let _ = app.update(Message::Tick(now));
+            let phase = app.auto_hide.phase();
+            if phase == Phase::Revealing && last != Phase::Revealing {
+                reveals += 1;
+            }
+            if reveals > 0 && phase == Phase::Hiding {
+                hid_after_reveal = true;
+            }
+            last = phase;
+        }
+        assert_eq!(reveals, 1);
+        assert!(!hid_after_reveal, "the strip hid under a resting cursor");
+        assert_eq!(app.auto_hide.phase(), Phase::Shown);
+        // Moving away hides it after the grace.
+        let _ = app.update(Message::CursorMoved(Point::new(700.0, 450.0)));
+        run_for(&mut app, now, 2000);
+        assert!(
+            app.auto_hide.offset() > 0.0,
+            "didn't hide once the cursor left"
+        );
+    }
+
+    #[test]
+    fn no_fire_while_typing_a_partial_past_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        // On the way to "@2026-01-020…" the text parses as a past date.
+        let _ = app.update(Message::TitleEdited("Call @2026-01-02".into()));
+        let _ = app.update(Message::ReminderTick);
+        assert!(app.pulsing.is_empty(), "fired while typing");
+        assert_eq!(app.store.notes()[0].reminder_fired, None);
+    }
+
+    #[test]
+    fn commit_sets_fresh_anchor_for_a_new_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let id = app.active_note.unwrap();
+        let days_ago = |d| Some(chrono::Utc::now() - chrono::Duration::days(d));
+        // A new tag, typed long before the commit, counts from the commit.
+        let _ = app.update(Message::TitleEdited("Call @16:00".into()));
+        app.store.note_mut(id).unwrap().reminder_set_at = days_ago(3);
+        let before = chrono::Utc::now();
+        let _ = app.update(Message::TitleCommitted);
+        let anchor = app.store.notes()[0].reminder_set_at.unwrap();
+        assert!(anchor >= before, "the anchor wasn't refreshed on commit");
+        // The same tag as before the edit keeps its anchor.
+        app.store.note_mut(id).unwrap().reminder_set_at = days_ago(1);
+        let kept = app.store.notes()[0].reminder_set_at;
+        let _ = app.update(Message::TitleEdited("Call @17:00".into()));
+        let _ = app.update(Message::TitleEdited("Call".into()));
+        let _ = app.update(Message::TitleCommitted);
+        assert_eq!(tag(&app).as_deref(), Some("@16:00"));
+        assert_eq!(app.store.notes()[0].reminder_set_at, kept);
+    }
+
+    #[test]
+    fn picker_tag_survives_a_following_title_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let _ = app.update(Message::TitleEdited("Call".into()));
+        let _ = app.update(Message::ToggleReminderPicker);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        let _ = app.update(Message::ReminderPickerDay(date));
+        if let Some(draft) = &mut app.reminder_picker {
+            draft.hour = 16;
+            draft.minute = 45;
+        }
+        let _ = app.update(Message::ReminderPickerDone);
+        assert_eq!(title_field(&app), "Call");
+        let _ = app.update(Message::TitleEdited("Call Bob".into()));
+        assert_eq!(tag(&app).as_deref(), Some("@2026-11-03 16:45"));
+        // Clearing it sticks too.
+        let _ = app.update(Message::OpenReminderPicker);
+        let _ = app.update(Message::ReminderPickerClear);
+        let _ = app.update(Message::TitleEdited("Call Bobby".into()));
+        assert_eq!(tag(&app), None);
+    }
+
+    #[test]
+    fn delete_mid_edit_then_undo_shows_no_raw_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let id = app.active_note.unwrap();
+        let _ = app.update(Message::TitleEdited("Call @tue".into()));
+        let _ = app.update(Message::DeleteNote(id));
+        settle(&mut app);
+        assert!(app.active_note.is_none());
+        let _ = app.update(Message::UndoDelete);
+        settle(&mut app);
+        let _ = app.update(Message::BarClicked(0));
+        settle(&mut app);
+        assert_eq!(title_field(&app), "Call");
     }
 
     #[test]
