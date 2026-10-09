@@ -108,7 +108,8 @@ fn pointer_after_resize(pointer: Option<Point>, edge: Edge, old: f32, new: f32) 
 /// The window docked to `edge` on `monitor`. With `passthrough` it covers
 /// the monitor, below the `top_inset` (the menu bar) on Top. Without, it is
 /// `thickness` away from the edge and the `fraction` of the edge long,
-/// flush to the edge and centred along it.
+/// flush to the edge and centred along it, and no thicker than the screen
+/// below the menu bar.
 fn dock_frame(
     edge: Edge,
     monitor: Size,
@@ -120,7 +121,14 @@ fn dock_frame(
     let size = match (passthrough, edge) {
         (true, Edge::Top) => Size::new(monitor.width, monitor.height - top_inset),
         (true, _) => monitor,
-        (false, _) => edge.size((edge.edge_length(monitor) * fraction).round(), thickness),
+        (false, _) => {
+            let room = match edge {
+                Edge::Top => monitor.height - top_inset,
+                Edge::Right | Edge::Left => edge.thickness(monitor),
+            };
+            let length = (edge.edge_length(monitor) * fraction).round();
+            edge.size(length, thickness.min(room))
+        }
     };
     let origin = edge.dock_origin(size, monitor, top_inset);
     // Whole pixels along the edge, where the window is centred.
@@ -874,6 +882,7 @@ impl App {
             }
             Message::ResetGroup(SettingsGroup::Data) => {}
             Message::ResetGroup(group) => {
+                let edge = self.edge();
                 if group == SettingsGroup::Palette {
                     let changes = self.settings.settings_mut().reset_palette();
                     if self.store.recolor_many(&changes) {
@@ -887,6 +896,9 @@ impl App {
                     self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
                     self.sync_hotkey();
                     return self.apply_app_visibility();
+                }
+                if self.edge() != edge {
+                    return self.edge_changed(edge);
                 }
                 return self.apply_settings();
             }
@@ -2641,7 +2653,8 @@ impl App {
     }
 
     /// Whether `position` is at most `depth` from the window's border on
-    /// the strip's edge (or beyond it).
+    /// the strip's edge (or beyond it). On Top a negative y, in the menu bar
+    /// above the window, counts too: the menu bar is part of the edge zone.
     fn near_edge(&self, position: Point, depth: f32) -> bool {
         match self.edge() {
             Edge::Right => position.x >= self.window_size.width - depth,
@@ -3380,14 +3393,23 @@ impl App {
         ])
     }
 
-    /// Docks the strip to `edge` right away (E10): the peek, the hover and
-    /// any chip close, a drag is cancelled, an open note or panel stays and
-    /// re-anchors on its bar or slot, and the window re-docks.
+    /// Docks the strip to `edge` right away (E10).
     fn change_edge(&mut self, edge: Edge) -> Task<Message> {
-        if edge == self.edge() {
+        let old = self.edge();
+        if edge == old {
             return Task::none();
         }
         self.settings.settings_mut().window.edge = edge;
+        self.edge_changed(old)
+    }
+
+    /// Follows the edge setting having changed from `old` (E10): the peek,
+    /// the hover and any chip close, a drag is cancelled, an open note or
+    /// panel stays and re-anchors on its bar or slot, and the window
+    /// re-docks.
+    fn edge_changed(&mut self, old: Edge) -> Task<Message> {
+        let edge = self.edge();
+        debug_assert_ne!(old, edge, "the edge didn't change");
         self.hide_peek();
         self.cursor_y = None;
         self.drag = None;
@@ -3397,11 +3419,16 @@ impl App {
             (self.window_origin, self.pointer, self.last_cursor);
         let dock = self.apply_settings();
         // Positions seen before are in the old window's frame: the cursor
-        // keeps its screen spot.
+        // keeps its screen spot, if that is still in the window.
         let shift = old_origin
             .zip(self.window_origin)
             .map(|(old, new)| old - new);
-        let moved = |p: Option<Point>| shift.and_then(|shift| Some(p? + shift));
+        let window = Rectangle::new(Point::ORIGIN, self.window_size);
+        let moved = |p: Option<Point>| {
+            shift
+                .and_then(|shift| Some(p? + shift))
+                .filter(|p| window.contains(*p))
+        };
         self.pointer = moved(pointer);
         self.last_cursor = moved(last_cursor);
         // Re-anchor in the docked window.
@@ -7105,12 +7132,14 @@ mod tests {
             rect(0.0, 45.0, STRIP_WIDTH, 810.0)
         );
         assert_eq!(frame(Edge::Left, wide), rect(0.0, 45.0, open, 810.0));
-        // Top: as tall as the thickness, below the menu bar.
+        // Top: as tall as the thickness, below the menu bar, and no taller
+        // than the screen below it.
         assert_eq!(
             frame(Edge::Top, strip),
             rect(72.0, 25.0, 1296.0, STRIP_WIDTH)
         );
-        assert_eq!(frame(Edge::Top, wide), rect(72.0, 25.0, 1296.0, open));
+        assert!(open > 875.0);
+        assert_eq!(frame(Edge::Top, wide), rect(72.0, 25.0, 1296.0, 875.0));
 
         // With passthrough the window covers the monitor (below the menu
         // bar on Top), whatever the thickness.
@@ -7168,7 +7197,11 @@ mod tests {
         let right = Point::new(1399.0, mid);
         assert!(!app.is_interactive(right));
         let _ = app.update(Message::CursorMoved(right));
-        assert_eq!(app.auto_hide.next_deadline(), None, "right edge dwells");
+        assert_eq!(
+            app.auto_hide.next_deadline(),
+            None,
+            "a right-edge dwell started on a Left strip"
+        );
 
         let left = Point::new(1.0, mid);
         assert!(app.is_interactive(left));
@@ -7179,6 +7212,92 @@ mod tests {
             entered + REVEAL_DWELL + Duration::from_millis(5),
         ));
         assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
+    }
+
+    #[test]
+    fn menu_bar_reveals_a_hidden_top_strip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = on_edge(auto_hide_app(&dir), Edge::Top);
+        hide_strip(&mut app, Instant::now());
+        // Above the window, in the menu bar, within the band.
+        let menu_bar = Point::new(band_middle(&app), -10.0);
+        assert!(app.is_interactive(menu_bar));
+        let entered = Instant::now();
+        let _ = app.update(Message::CursorMoved(menu_bar));
+        assert!(app.auto_hide.next_deadline().is_some(), "no dwell started");
+        let _ = app.update(Message::Tick(
+            entered + REVEAL_DWELL + Duration::from_millis(5),
+        ));
+        assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
+    }
+
+    #[test]
+    fn top_window_fits_a_short_screen() {
+        let monitor = Size::new(1366.0, 768.0);
+        let open = App::docked_width(&Settings::default(), true, false);
+        assert!(open > 768.0, "the open window must not fit");
+        let top = dock_frame(Edge::Top, monitor, 25.0, false, open, 0.9);
+        assert_eq!((top.y, top.height), (25.0, 743.0), "{top:?}");
+        let right = dock_frame(Edge::Right, monitor, 25.0, false, open, 0.9);
+        assert_eq!(right.width, open);
+    }
+
+    /// `app` with a window on a 1440×900 monitor below a 25 px menu bar,
+    /// docked to its edge.
+    fn docked(mut app: App) -> App {
+        app.window_id = Some(window::Id::unique());
+        app.monitor = Some(Size::new(1440.0, 900.0));
+        app.top_inset = 25.0;
+        let _ = app.dock_window();
+        app
+    }
+
+    /// `p`, seen in a window whose origin was `old`, in the current window:
+    /// `None` once outside it.
+    fn moved_into(app: &App, old: Point, p: Point) -> Option<Point> {
+        let p = p + (old - app.window_origin.unwrap());
+        Some(p).filter(|p| Rectangle::new(Point::ORIGIN, app.window_size).contains(*p))
+    }
+
+    #[test]
+    fn edge_change_drops_a_pointer_outside_the_new_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = app_with_notes(&dir, &[("a", "x")]);
+        let mut app = docked(app);
+        let old = app.window_origin.unwrap();
+        let (pointer, cursor) = (Point::new(100.0, 10.0), Point::new(100.0, 400.0));
+        app.pointer = Some(pointer);
+        app.last_cursor = Some(cursor);
+        let _ = app.update(Message::EdgeChosen(Edge::Top));
+        assert_eq!(app.pointer, moved_into(&app, old, pointer));
+        assert_eq!(app.last_cursor, moved_into(&app, old, cursor));
+        if SUPPORTS_PASSTHROUGH {
+            assert_eq!(app.pointer, None, "the pointer is in the menu bar");
+            assert!(app.last_cursor.is_some());
+        }
+    }
+
+    #[test]
+    fn reset_window_reanchors_open_panels() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = app_with_notes(&dir, &[("a", "x")]);
+        let mut app = docked(on_edge(app, Edge::Top));
+        let _ = app.update(Message::ToggleSettings);
+        settle(&mut app);
+        let top_anchor = app.settings_anchor_y;
+        let old = app.window_origin.unwrap();
+        let (pointer, cursor) = (Point::new(100.0, -30.0), Point::new(100.0, 400.0));
+        app.pointer = Some(pointer);
+        app.last_cursor = Some(cursor);
+
+        let _ = app.update(Message::ResetGroup(SettingsGroup::Window));
+        assert_eq!(app.edge(), Edge::Right);
+        let expected = along_center(app.strip_layout().settings_anchor(), Edge::Right);
+        assert_ne!(expected, top_anchor);
+        assert_eq!(app.settings_anchor_y, expected, "settings not re-anchored");
+        assert_eq!(app.pointer, moved_into(&app, old, pointer));
+        assert_eq!(app.last_cursor, moved_into(&app, old, cursor));
+        assert_eq!(app.pointer, None, "the pointer is outside the window");
     }
 
     #[test]
