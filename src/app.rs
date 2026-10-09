@@ -2914,8 +2914,9 @@ impl App {
         } else {
             self.in_use_area(position)
         };
-        // The color bubble can reach beyond the note.
-        let over_bubble = self.color_picker_open
+        // The color bubble, and the reminder calendar that shares its
+        // overlay, can reach beyond the note.
+        let over_bubble = (self.color_picker_open || self.reminder_picker.is_some())
             && self
                 .color_bubble_rect
                 .is_some_and(|rect| rect.expand(8.0).contains(position));
@@ -5768,6 +5769,23 @@ mod tests {
         let _ = app.update(Message::ToggleColorPicker);
         let _ = app.update(Message::ColorBubbleMoved(card));
         assert!(app.is_interactive(on_card));
+        let _ = app.update(Message::CloseColorBubble);
+        assert!(!app.is_interactive(on_card));
+    }
+
+    #[test]
+    fn the_reminder_picker_card_takes_presses_while_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_note(&dir, "x");
+        let note = app.note_frame().unwrap().rect;
+        // The calendar shares the bubble overlay above the note.
+        let card = Rectangle::new(Point::new(note.x, note.y - 260.0), Size::new(240.0, 220.0));
+        let on_card = card.center();
+        assert!(!app.is_interactive(on_card));
+        let _ = app.update(Message::OpenReminderPicker);
+        assert!(app.reminder_picker.is_some());
+        let _ = app.update(Message::ColorBubbleMoved(card));
+        assert!(app.is_interactive(on_card), "the calendar takes clicks");
         let _ = app.update(Message::CloseColorBubble);
         assert!(!app.is_interactive(on_card));
     }

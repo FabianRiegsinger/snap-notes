@@ -42,14 +42,12 @@ const ADD_MAX_HEIGHT_SCALE: f32 = 1.4;
 const SLOT_AWAY_SCALE: f32 = 1.5;
 /// Slot length along the edge, as a fraction of bar height (half → squat).
 const SLOT_ALONG_SCALE: f32 = 0.5;
-/// Magnification at which the "+" inside the add bar is fully visible.
-const ADD_PLUS_SCALE: f32 = 3.0;
 const EDGE_PADDING: f32 = 16.0;
 const CORNER_RADIUS: f32 = theme::RADIUS_BAR;
-/// Corner radius for soft glass action pills (Settings / Search / Add).
+/// Corner radius for action pills (Settings / Search / Add).
 const GLASS_SLOT_RADIUS: f32 = 6.0;
-/// Icon ink strength inside glass action pills.
-const GLASS_ICON_INK: f32 = 0.7;
+/// Icon ink strength inside action pills.
+const SLOT_ICON_INK: f32 = 0.85;
 /// The open note's bar is this much wider than a docked one.
 const OPEN_BAR_SCALE: f32 = 1.5;
 /// Opacity factor for bars of notes that don't match the search.
@@ -1332,11 +1330,6 @@ impl<'a> BarStrip<'a> {
         Some((hint, chip_alpha(since, now)))
     }
 
-    /// How far a slot at magnification `scale` has revealed its glyph (0..=1).
-    fn reveal(scale: f32) -> f32 {
-        ((scale - 1.0) / (ADD_PLUS_SCALE - 1.0)).clamp(0.0, 1.0)
-    }
-
     /// The gap the dragged bar drops into, kept within its pin group.
     fn insertion_index(&self, drag: &DragState, bars: &[Rectangle]) -> usize {
         let centers: Vec<f32> = bars
@@ -1559,9 +1552,9 @@ impl<'a> BarStrip<'a> {
         let idle = self.drag.is_none();
         let count = self.entries.len();
         let pressed = tree.state.downcast_ref::<StripState>().pressed_slot;
-        let icon = |reveal: f32| self.theme.ink(GLASS_ICON_INK * reveal);
+        let icon = |_reveal: f32| slot_style(false, &self.theme).icon;
         if strip.actions_expanded {
-            let add_reveal = Self::reveal(self.magnification.scale(count));
+            let add_reveal = slot_visibility(self.magnification.scale(count));
             // The shake is a horizontal "no" on every edge.
             let add = sink_slot(
                 strip.add_button + Vector::new(self.add_shake, 0.0),
@@ -1571,33 +1564,30 @@ impl<'a> BarStrip<'a> {
                 renderer,
                 add,
                 idle && cursor.is_over(strip.add_hit_area),
-                add_reveal,
                 &self.theme,
             );
             if add_reveal > 0.0 {
                 draw_plus(renderer, add, icon(add_reveal));
             }
 
-            let search_reveal = Self::reveal(self.magnification.scale(count + 1));
+            let search_reveal = slot_visibility(self.magnification.scale(count + 1));
             let search = sink_slot(strip.search_button, pressed == Some(Slot::Search));
             draw_slot(
                 renderer,
                 search,
                 idle && cursor.is_over(strip.search_hit_area),
-                search_reveal,
                 &self.theme,
             );
             if search_reveal > 0.0 {
                 draw_search(renderer, search, icon(search_reveal));
             }
 
-            let gear_reveal = Self::reveal(self.magnification.scale(count + 2));
+            let gear_reveal = slot_visibility(self.magnification.scale(count + 2));
             let gear = sink_slot(strip.settings_button, pressed == Some(Slot::Settings));
             draw_slot(
                 renderer,
                 gear,
                 idle && cursor.is_over(strip.settings_hit_area),
-                gear_reveal,
                 &self.theme,
             );
             if gear_reveal > 0.0 {
@@ -1619,7 +1609,7 @@ impl<'a> BarStrip<'a> {
                 }
             }
         } else {
-            let reveal = Self::reveal(self.magnification.scale(count));
+            let reveal = slot_visibility(self.magnification.scale(count));
             let actions = sink_slot(
                 strip.actions_button + Vector::new(self.add_shake, 0.0),
                 pressed == Some(Slot::Actions),
@@ -1628,7 +1618,6 @@ impl<'a> BarStrip<'a> {
                 renderer,
                 actions,
                 idle && cursor.is_over(strip.actions_hit_area),
-                reveal,
                 &self.theme,
             );
             if reveal > 0.0 {
@@ -2112,7 +2101,7 @@ pub fn peek_target(
     peek_layout(bar, bounds, 1.0, text, width, edge).rect
 }
 
-/// Nudges a glass pill 1 px down while pressed.
+/// Nudges an action pill 1 px down while pressed.
 fn sink_slot(rect: Rectangle, pressed: bool) -> Rectangle {
     if pressed {
         Rectangle {
@@ -2124,35 +2113,56 @@ fn sink_slot(rect: Rectangle, pressed: bool) -> Rectangle {
     }
 }
 
-/// Soft glass action pill: frosted fill, hairline border, brighter on hover.
-/// `reveal` (0..=1) fades the whole pill in with magnification.
-fn draw_slot(
-    renderer: &mut iced::Renderer,
-    rect: Rectangle,
-    hovered: bool,
-    reveal: f32,
-    theme: &theme::Theme,
-) {
-    let reveal = reveal.clamp(0.0, 1.0);
-    if reveal <= 0.0 {
-        return;
-    }
-    let fill_alpha = (if hovered { 0.22 } else { 0.12 }) * reveal;
-    let border_alpha = (if hovered { 0.22 } else { 0.12 }) * reveal;
-    renderer::Renderer::fill_quad(
-        renderer,
-        renderer::Quad {
-            bounds: rect,
-            border: iced::Border {
-                radius: GLASS_SLOT_RADIUS.into(),
-                width: 1.0,
-                color: theme.ink(border_alpha),
-            },
-            shadow: Default::default(),
-            snap: true,
+/// How an action pill is painted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SlotStyle {
+    fill: Color,
+    border: Color,
+    icon: Color,
+}
+
+/// Action pills are solid cards, like the peek and the chips: the window is
+/// transparent, so a tint would vanish against a dark or busy desktop.
+fn slot_style(hovered: bool, theme: &theme::Theme) -> SlotStyle {
+    let card = theme.card();
+    SlotStyle {
+        fill: if hovered {
+            theme::mix(card, theme.ink(1.0), 0.08)
+        } else {
+            card
         },
-        theme.ink(fill_alpha),
-    );
+        border: theme.ink(0.18),
+        icon: theme.ink(SLOT_ICON_INK),
+    }
+}
+
+/// How visible an action pill is at magnification `scale`: always fully, so
+/// it can be found without hovering; magnification only changes its size.
+fn slot_visibility(_scale: f32) -> f32 {
+    1.0
+}
+
+/// An action pill: a solid card with a hairline border and a soft shadow,
+/// slightly darker on hover.
+fn draw_slot(renderer: &mut iced::Renderer, rect: Rectangle, hovered: bool, theme: &theme::Theme) {
+    let style = slot_style(hovered, theme);
+    let [contact, ambient] = theme.shadows(1.0);
+    for shadow in [ambient, contact] {
+        renderer::Renderer::fill_quad(
+            renderer,
+            renderer::Quad {
+                bounds: rect,
+                border: iced::Border {
+                    radius: GLASS_SLOT_RADIUS.into(),
+                    width: 1.0,
+                    color: style.border,
+                },
+                shadow,
+                snap: true,
+            },
+            style.fill,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3634,5 +3644,30 @@ mod tests {
             b,
             Rectangle::new(Point::new(350.0, 5.0), Size::new(500.0, 64.0))
         );
+    }
+
+    #[test]
+    fn action_pills_are_solid_and_readable_in_both_modes() {
+        for mode in [theme::Mode::Light, theme::Mode::Dark] {
+            let theme = theme::Theme::new(mode);
+            for hovered in [false, true] {
+                let style = slot_style(hovered, &theme);
+                // Opaque, so the desktop behind never washes it out.
+                assert_eq!(style.fill.a, 1.0, "{mode:?} fill");
+                let ratio = theme::contrast(style.icon, style.fill);
+                assert!(ratio >= 4.5, "{mode:?} hovered={hovered} icon: {ratio}");
+            }
+            assert_ne!(
+                slot_style(true, &theme).fill,
+                slot_style(false, &theme).fill,
+                "{mode:?} hover shows"
+            );
+        }
+    }
+
+    #[test]
+    fn action_pills_are_visible_at_rest() {
+        assert_eq!(slot_visibility(1.0), 1.0);
+        assert_eq!(slot_visibility(3.0), 1.0);
     }
 }
