@@ -82,8 +82,7 @@ pub enum ReminderAlertStyle {
 }
 
 impl ReminderAlertStyle {
-    pub const ALL: [ReminderAlertStyle; 2] =
-        [ReminderAlertStyle::Jump, ReminderAlertStyle::Pulse];
+    pub const ALL: [ReminderAlertStyle; 2] = [ReminderAlertStyle::Jump, ReminderAlertStyle::Pulse];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -498,9 +497,7 @@ impl Settings {
         if let Some(v) = edge.and_then(|v| v.as_str()) {
             settings.window.edge = Edge::parse(v);
         }
-        let alert = value
-            .get("motion")
-            .and_then(|m| m.get("reminder_alert"));
+        let alert = value.get("motion").and_then(|m| m.get("reminder_alert"));
         if let Some(v) = alert.and_then(|v| v.as_str()) {
             settings.motion.reminder_alert = ReminderAlertStyle::parse(v);
         }

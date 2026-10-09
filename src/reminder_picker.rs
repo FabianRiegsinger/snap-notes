@@ -50,7 +50,11 @@ const WIDTH: f32 = 252.0;
 const DAY: f32 = 32.0;
 
 /// Calendar + time steppers + Clear / Done.
-pub fn view<'a>(draft: &'a ReminderDraft, can_clear: bool, theme: theme::Theme) -> Element<'a, Message> {
+pub fn view<'a>(
+    draft: &'a ReminderDraft,
+    can_clear: bool,
+    theme: theme::Theme,
+) -> Element<'a, Message> {
     let month_label = text(draft.view_month.format("%B %Y").to_string())
         .size(TEXT_SM)
         .color(theme.ink(0.85));
@@ -66,15 +70,10 @@ pub fn view<'a>(draft: &'a ReminderDraft, can_clear: bool, theme: theme::Theme) 
     .width(WIDTH);
 
     let weekdays = row(["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map(|d| {
-        container(
-            text(d)
-                .size(TEXT_XS)
-                .color(theme.ink(0.45))
-                .center(),
-        )
-        .width(DAY)
-        .height(22.0)
-        .into()
+        container(text(d).size(TEXT_XS).color(theme.ink(0.45)).center())
+            .width(DAY)
+            .height(22.0)
+            .into()
     }))
     .spacing(2);
 
@@ -90,9 +89,7 @@ pub fn view<'a>(draft: &'a ReminderDraft, can_clear: bool, theme: theme::Theme) 
             .width(Length::Fixed(28.0))
             .center(),
         step_btn("+", Message::ReminderPickerHour(1), theme),
-        text(":")
-            .size(TEXT_SM)
-            .color(theme.ink(0.45)),
+        text(":").size(TEXT_SM).color(theme.ink(0.45)),
         step_btn("−", Message::ReminderPickerMinute(-5), theme),
         text(format!("{:02}", draft.minute))
             .size(TEXT_SM)
@@ -107,7 +104,12 @@ pub fn view<'a>(draft: &'a ReminderDraft, can_clear: bool, theme: theme::Theme) 
 
     let mut actions = row![].spacing(space(2));
     if can_clear {
-        actions = actions.push(action_btn("Clear", Message::ReminderPickerClear, false, theme));
+        actions = actions.push(action_btn(
+            "Clear",
+            Message::ReminderPickerClear,
+            false,
+            theme,
+        ));
     }
     actions = actions.push(Space::new().width(Length::Fill));
     actions = actions.push(action_btn("Done", Message::ReminderPickerDone, true, theme));
@@ -145,10 +147,8 @@ fn month_grid<'a>(draft: &'a ReminderDraft, theme: theme::Theme) -> Element<'a, 
                 .height(DAY)
                 .on_press(Message::ReminderPickerDay(date))
                 .style(move |_theme: &Theme, status| {
-                    let hovered = matches!(
-                        status,
-                        button::Status::Hovered | button::Status::Pressed
-                    );
+                    let hovered =
+                        matches!(status, button::Status::Hovered | button::Status::Pressed);
                     button::Style {
                         background: if selected {
                             Some(theme.ink(0.22).into())
@@ -196,10 +196,7 @@ fn action_btn<'a>(
         .padding(Padding::new(6.0).left(12.0).right(12.0))
         .on_press(message)
         .style(move |_theme: &Theme, status| {
-            let hovered = matches!(
-                status,
-                button::Status::Hovered | button::Status::Pressed
-            );
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
             button::Style {
                 background: Some(
                     theme
@@ -235,7 +232,10 @@ pub fn adjust_time(draft: &mut ReminderDraft, hour_delta: i32, minute_delta: i32
 /// Move the visible calendar month by `delta` months; keeps the selected day
 /// when it exists in the new month.
 pub fn shift_month(draft: &mut ReminderDraft, delta: i32) {
-    let (y, m) = (draft.view_month.year(), draft.view_month.month() as i32 + delta);
+    let (y, m) = (
+        draft.view_month.year(),
+        draft.view_month.month() as i32 + delta,
+    );
     let mut year = y;
     let mut month = m;
     while month < 1 {
@@ -273,9 +273,8 @@ mod tests {
 
     #[test]
     fn adjust_time_wraps_within_day() {
-        let mut d = ReminderDraft::from_at(
-            Local.with_ymd_and_hms(2026, 10, 15, 23, 55, 0).unwrap(),
-        );
+        let mut d =
+            ReminderDraft::from_at(Local.with_ymd_and_hms(2026, 10, 15, 23, 55, 0).unwrap());
         adjust_time(&mut d, 0, 10);
         assert_eq!((d.hour, d.minute), (0, 5));
         adjust_time(&mut d, -1, 0);
@@ -284,9 +283,7 @@ mod tests {
 
     #[test]
     fn shift_month_clamps_day() {
-        let mut d = ReminderDraft::from_at(
-            Local.with_ymd_and_hms(2026, 1, 31, 10, 0, 0).unwrap(),
-        );
+        let mut d = ReminderDraft::from_at(Local.with_ymd_and_hms(2026, 1, 31, 10, 0, 0).unwrap());
         shift_month(&mut d, 1);
         assert_eq!(d.view_month, NaiveDate::from_ymd_opt(2026, 2, 1).unwrap());
         assert_eq!(d.date, NaiveDate::from_ymd_opt(2026, 2, 28).unwrap());

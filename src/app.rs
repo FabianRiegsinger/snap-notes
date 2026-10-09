@@ -31,8 +31,8 @@ use crate::strip_model::{self, Entry};
 use crate::theme;
 use crate::tray;
 
-use iced::widget::{container, mouse_area, opaque, pin, stack, text_editor, Space};
 use chrono::Datelike;
+use iced::widget::{container, mouse_area, opaque, pin, stack, text_editor, Space};
 use iced::{
     event, keyboard, mouse, window, Element, Fill, Point, Rectangle, Size, Subscription, Task,
     Vector,
@@ -1382,8 +1382,9 @@ impl App {
             Message::ReminderPickerDay(date) => {
                 if let Some(draft) = &mut self.reminder_picker {
                     draft.date = date;
-                    draft.view_month = chrono::NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
-                        .expect("valid month");
+                    draft.view_month =
+                        chrono::NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
+                            .expect("valid month");
                 }
             }
             Message::ReminderPickerMonth(delta) => {
@@ -3007,13 +3008,8 @@ impl App {
         if self.pulsing.is_empty() {
             return false;
         }
-        if self
-            .peek_rect()
-            .is_some_and(|rect| rect.contains(position))
-        {
-            return self
-                .peek_note
-                .is_some_and(|id| self.pulsing.contains(&id));
+        if self.peek_rect().is_some_and(|rect| rect.contains(position)) {
+            return self.peek_note.is_some_and(|id| self.pulsing.contains(&id));
         }
         let alerts = self.bar_alert();
         self.strip_layout()
@@ -3263,11 +3259,9 @@ impl App {
     }
 
     fn jump_settle_active(&self) -> bool {
-        self.jump_settle
-            .as_ref()
-            .is_some_and(|(_, since, from)| {
-                *from != 0.0 && since.elapsed().as_secs_f32() < JUMP_SETTLE_SECS
-            })
+        self.jump_settle.as_ref().is_some_and(|(_, since, from)| {
+            *from != 0.0 && since.elapsed().as_secs_f32() < JUMP_SETTLE_SECS
+        })
     }
 
     fn cursor_on_peek(&self) -> bool {
@@ -5948,7 +5942,10 @@ mod tests {
         app.last_cursor = Some(Point::new(start.x + 20.0, start.y + 8.0));
         let _ = app.update(Message::SettingsDragStart);
         assert!(app.settings_drag.is_some());
-        let _ = app.update(Message::CursorMoved(Point::new(start.x + 120.0, start.y + 80.0)));
+        let _ = app.update(Message::CursorMoved(Point::new(
+            start.x + 120.0,
+            start.y + 80.0,
+        )));
         app.mouse_down = false;
         let _ = app.update(Message::MouseButton(false));
         let after = app.settings_frame().unwrap().rect.position();
@@ -7883,7 +7880,11 @@ mod tests {
         settle(&mut app);
         let rect = app.note_frame().unwrap().rect;
         assert_eq!(rect, app.note_target_rect());
-        assert_eq!(rect.y, STRIP_WIDTH + NOTE_GAP, "below the strip");
+        assert_eq!(
+            rect.y,
+            app.panel_away(),
+            "below the strip and its Actions row"
+        );
         assert!(
             (rect.center_x() - bar.center_x()).abs() < 0.01,
             "centred on its bar"

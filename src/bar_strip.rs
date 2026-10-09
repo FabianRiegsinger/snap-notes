@@ -833,7 +833,13 @@ pub fn actions_row_extent(
     let add = slot_size(bars, scale(bar_count));
     let search = slot_size(bars, scale(bar_count + 1));
     let gear = slot_size(bars, scale(bar_count + 2));
-    (EDGE_MARGIN + add.width + ACTION_GAP + search.width + ACTION_GAP + gear.width + ACTIONS_HOVER_PAD)
+    (EDGE_MARGIN
+        + add.width
+        + ACTION_GAP
+        + search.width
+        + ACTION_GAP
+        + gear.width
+        + ACTIONS_HOVER_PAD)
         .max(STRIP_WIDTH)
 }
 
@@ -1391,8 +1397,7 @@ impl<'a> BarStrip<'a> {
             if let Some((peek_index, progress)) = self.peek {
                 if peek_index == i && progress > 0.0 {
                     if let Some((note, width, text)) = self.peek_parts(i, *bar_rect) {
-                        let peek_bar =
-                            *bar_rect + hide_translation(edge, self.bar_slide(i));
+                        let peek_bar = *bar_rect + hide_translation(edge, self.bar_slide(i));
                         draw_peek(
                             renderer,
                             note,
@@ -1796,12 +1801,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 renderer,
                 hide_translation(self.edge, self.x_offset),
                 |renderer| {
-                    self.draw_strip(
-                        tree,
-                        renderer,
-                        layout.bounds(),
-                        mouse::Cursor::Unavailable,
-                    );
+                    self.draw_strip(tree, renderer, layout.bounds(), mouse::Cursor::Unavailable);
                 },
             );
             return;
@@ -1921,13 +1921,14 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         if self.slid() {
             if let Some(pos) = cursor.position() {
                 let strip = self.layout_in(layout.bounds());
-                let over_alert = self.peek_hit(layout.bounds(), pos).is_some_and(|i| {
-                    self.is_alert(i)
-                }) || strip
-                    .bars
-                    .iter()
-                    .enumerate()
-                    .any(|(i, bar)| self.is_alert(i) && bar.contains(pos));
+                let over_alert = self
+                    .peek_hit(layout.bounds(), pos)
+                    .is_some_and(|i| self.is_alert(i))
+                    || strip
+                        .bars
+                        .iter()
+                        .enumerate()
+                        .any(|(i, bar)| self.is_alert(i) && bar.contains(pos));
                 if over_alert {
                     return mouse::Interaction::Pointer;
                 }
@@ -2212,10 +2213,7 @@ mod tests {
 
     #[test]
     fn jump_translation_moves_into_the_screen() {
-        assert_eq!(
-            jump_translation(Edge::Right, 5.0),
-            Vector::new(-5.0, 0.0)
-        );
+        assert_eq!(jump_translation(Edge::Right, 5.0), Vector::new(-5.0, 0.0));
         assert_eq!(jump_translation(Edge::Left, 5.0), Vector::new(5.0, 0.0));
         assert_eq!(jump_translation(Edge::Top, 5.0), Vector::new(0.0, 5.0));
     }
@@ -2243,12 +2241,16 @@ mod tests {
         assert_eq!(progress_alpha(Some((3, 3))), 0.45);
         assert_eq!(progress_alpha(Some((1, 3))), 0.45);
         assert_eq!(progress_alpha(None), 1.0);
-        assert_eq!(progress_fill(
-            Rectangle::new(Point::ORIGIN, Size::new(10.0, 40.0)),
-            5,
-            5,
-            Edge::Right,
-        ).height, 40.0);
+        assert_eq!(
+            progress_fill(
+                Rectangle::new(Point::ORIGIN, Size::new(10.0, 40.0)),
+                5,
+                5,
+                Edge::Right,
+            )
+            .height,
+            40.0
+        );
     }
 
     #[test]
@@ -3141,8 +3143,16 @@ mod tests {
             "precondition: magnified row overflows the strip ({})",
             l.actions_button.width
         );
-        assert!(l.over_actions(l.settings_button.center()), "{:?}", l.settings_button);
-        assert!(l.over_actions(l.search_button.center()), "{:?}", l.search_button);
+        assert!(
+            l.over_actions(l.settings_button.center()),
+            "{:?}",
+            l.settings_button
+        );
+        assert!(
+            l.over_actions(l.search_button.center()),
+            "{:?}",
+            l.search_button
+        );
         assert!(l.over_actions(l.add_button.center()), "{:?}", l.add_button);
         assert!(l.settings_hit_area.contains(l.settings_button.center()));
         assert!(
@@ -3167,10 +3177,7 @@ mod tests {
         let d = BarSettings::default();
         let l = layout_expanded(2, |i| if i == 4 { 4.0 } else { 1.0 }, 900.0, 0.0);
         assert!((l.settings_button.width - d.width * SLOT_AWAY_SCALE * 4.0).abs() < 0.01);
-        let chip = Size::new(
-            d.width * SLOT_AWAY_SCALE,
-            d.height * SLOT_ALONG_SCALE,
-        );
+        let chip = Size::new(d.width * SLOT_AWAY_SCALE, d.height * SLOT_ALONG_SCALE);
         assert_eq!(l.add_button.size(), chip);
         assert_eq!(l.search_button.size(), chip);
     }
@@ -3399,10 +3406,7 @@ mod tests {
         close(expanded.add_button, (1030.0, 608.3, 24.0, 29.4));
         close(expanded.add_hit_area, (1028.0, 598.3, 36.0, 55.400024));
         close(expanded.search_button, (982.5, 608.3, 43.5, 29.4));
-        close(
-            expanded.search_hit_area,
-            (980.5, 598.3, 47.5, 55.400024),
-        );
+        close(expanded.search_hit_area, (980.5, 598.3, 47.5, 55.400024));
         close(expanded.settings_button, (961.25, 610.925, 17.25, 24.15));
         close(
             expanded.settings_hit_area,

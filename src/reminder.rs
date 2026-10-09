@@ -539,9 +539,18 @@ mod tests {
     #[test]
     fn with_reminder_replaces_or_appends() {
         let at = local(2026, 10, 15, 16, 30);
-        assert_eq!(with_reminder("Call Anna @15:00", at), "Call Anna @2026-10-15 16:30");
-        assert_eq!(with_reminder("Pay @tomorrow 18:15 rent", at), "Pay @2026-10-15 16:30 rent");
-        assert_eq!(with_reminder("Plain note", at), "Plain note @2026-10-15 16:30");
+        assert_eq!(
+            with_reminder("Call Anna @15:00", at),
+            "Call Anna @2026-10-15 16:30"
+        );
+        assert_eq!(
+            with_reminder("Pay @tomorrow 18:15 rent", at),
+            "Pay @2026-10-15 16:30 rent"
+        );
+        assert_eq!(
+            with_reminder("Plain note", at),
+            "Plain note @2026-10-15 16:30"
+        );
         assert_eq!(with_reminder("", at), "@2026-10-15 16:30");
         // Invalid candidate stays; absolute tag is appended.
         assert_eq!(
@@ -566,8 +575,17 @@ mod tests {
 
     #[test]
     fn default_at_is_next_whole_hour() {
-        assert_eq!(default_at(local(2026, 10, 5, 14, 0)), local(2026, 10, 5, 15, 0));
-        assert_eq!(default_at(local(2026, 10, 5, 14, 1)), local(2026, 10, 5, 15, 0));
-        assert_eq!(default_at(local(2026, 10, 5, 23, 30)), local(2026, 10, 6, 0, 0));
+        assert_eq!(
+            default_at(local(2026, 10, 5, 14, 0)),
+            local(2026, 10, 5, 15, 0)
+        );
+        assert_eq!(
+            default_at(local(2026, 10, 5, 14, 1)),
+            local(2026, 10, 5, 15, 0)
+        );
+        assert_eq!(
+            default_at(local(2026, 10, 5, 23, 30)),
+            local(2026, 10, 6, 0, 0)
+        );
     }
 }
