@@ -1,6 +1,7 @@
 use crate::animation::MagnificationState;
 use crate::app::{DragState, Message};
 use crate::edge::{Edge, LocalRect};
+use crate::icons::{Icon, ICON_FONT};
 use crate::note::Note;
 use crate::peek::{
     draw_peek, entry_peek_text, max_body_scroll, note_peek_width, peek_layout, scroll_body,
@@ -1567,7 +1568,7 @@ impl<'a> BarStrip<'a> {
                 &self.theme,
             );
             if add_reveal > 0.0 {
-                draw_plus(renderer, add, icon(add_reveal));
+                draw_pill_icon(renderer, Slot::Add, add, icon(add_reveal));
             }
 
             let search_reveal = slot_visibility(self.magnification.scale(count + 1));
@@ -1579,7 +1580,7 @@ impl<'a> BarStrip<'a> {
                 &self.theme,
             );
             if search_reveal > 0.0 {
-                draw_search(renderer, search, icon(search_reveal));
+                draw_pill_icon(renderer, Slot::Search, search, icon(search_reveal));
             }
 
             let gear_reveal = slot_visibility(self.magnification.scale(count + 2));
@@ -1591,22 +1592,7 @@ impl<'a> BarStrip<'a> {
                 &self.theme,
             );
             if gear_reveal > 0.0 {
-                let color = icon(gear_reveal);
-                for quad in settings_glyph(gear) {
-                    renderer::Renderer::fill_quad(
-                        renderer,
-                        renderer::Quad {
-                            bounds: quad,
-                            border: iced::Border {
-                                radius: 1.0.into(),
-                                ..Default::default()
-                            },
-                            shadow: Default::default(),
-                            snap: true,
-                        },
-                        color,
-                    );
-                }
+                draw_pill_icon(renderer, Slot::Settings, gear, icon(gear_reveal));
             }
         } else {
             let reveal = slot_visibility(self.magnification.scale(count));
@@ -1983,110 +1969,43 @@ fn actions_glyph(slot: Rectangle) -> Vec<Rectangle> {
     ]
 }
 
-fn draw_plus(renderer: &mut iced::Renderer, slot: Rectangle, color: Color) {
-    let thickness = 2.0;
-    let len = (slot.width.min(slot.height) * 0.5).max(thickness);
-    let cx = slot.x + slot.width / 2.0;
-    let cy = slot.y + slot.height / 2.0;
-    for size in [Size::new(len, thickness), Size::new(thickness, len)] {
-        renderer::Renderer::fill_quad(
-            renderer,
-            renderer::Quad {
-                bounds: Rectangle::new(
-                    Point::new(cx - size.width / 2.0, cy - size.height / 2.0),
-                    size,
-                ),
-                border: iced::Border {
-                    radius: 1.0.into(),
-                    ..Default::default()
-                },
-                shadow: Default::default(),
-                snap: true,
-            },
-            color,
-        );
+/// The Lucide icon an expanded action pill shows; the collapsed Actions
+/// pill draws its brand mark instead.
+fn pill_icon(slot: Slot) -> Option<Icon> {
+    match slot {
+        Slot::Add => Some(Icon::Plus),
+        Slot::Search => Some(Icon::Search),
+        Slot::Settings => Some(Icon::Settings),
+        Slot::Actions => None,
     }
 }
 
-fn draw_search(renderer: &mut iced::Renderer, slot: Rectangle, color: Color) {
-    let glyph = search_glyph(slot);
-    renderer::Renderer::fill_quad(
-        renderer,
-        renderer::Quad {
-            bounds: glyph.ring,
-            border: iced::Border {
-                radius: (glyph.ring.width / 2.0).into(),
-                width: glyph.stroke,
-                color,
-            },
-            shadow: Default::default(),
-            snap: true,
+/// The icon font size that fits a pill: 60% of its shorter side.
+fn pill_icon_size(slot: Rectangle) -> f32 {
+    (slot.width.min(slot.height) * 0.6).max(1.0)
+}
+
+/// Draws `slot`'s Lucide icon centered in the pill `rect`.
+fn draw_pill_icon(renderer: &mut iced::Renderer, slot: Slot, rect: Rectangle, color: Color) {
+    let Some(icon) = pill_icon(slot) else {
+        return;
+    };
+    renderer.fill_text(
+        text::Text {
+            content: icon.codepoint().to_string(),
+            bounds: rect.size(),
+            size: Pixels(pill_icon_size(rect)),
+            line_height: text::LineHeight::Relative(1.0),
+            font: ICON_FONT,
+            align_x: alignment::Horizontal::Center.into(),
+            align_y: alignment::Vertical::Center,
+            shaping: text::Shaping::Basic,
+            wrapping: text::Wrapping::None,
         },
-        Color::TRANSPARENT,
-    );
-    renderer::Renderer::fill_quad(
-        renderer,
-        renderer::Quad {
-            bounds: glyph.handle,
-            border: iced::Border {
-                radius: 1.0.into(),
-                ..Default::default()
-            },
-            shadow: Default::default(),
-            snap: true,
-        },
+        rect.center(),
         color,
+        rect,
     );
-}
-
-/// A "sliders" settings icon inside `slot`: three tracks, each with a knob
-/// at a different position. Drawn from quads so it needs no icon font.
-fn settings_glyph(slot: Rectangle) -> Vec<Rectangle> {
-    let track = 1.5_f32.min(slot.height * 0.05);
-    let knob = (slot.width.min(slot.height) * 0.22).max(track);
-    let width = slot.width * 0.6;
-    let left = slot.x + (slot.width - width) / 2.0;
-    let mut quads = Vec::with_capacity(6);
-    for (row, at) in [(0.3, 0.3), (0.5, 0.7), (0.7, 0.45)] {
-        let cy = slot.y + slot.height * row;
-        quads.push(Rectangle::new(
-            Point::new(left, cy - track / 2.0),
-            Size::new(width, track),
-        ));
-        let kx = (left + width * at - knob / 2.0).clamp(left, left + width - knob);
-        quads.push(Rectangle::new(
-            Point::new(kx, cy - knob / 2.0),
-            Size::new(knob, knob),
-        ));
-    }
-    quads
-}
-
-/// A magnifier inside a slot: a ring and a short handle at its lower right.
-struct SearchGlyph {
-    ring: Rectangle,
-    /// The ring's line width.
-    stroke: f32,
-    handle: Rectangle,
-}
-
-/// The magnifier for `slot`, drawn from quads so it needs no icon font.
-/// Quads can't rotate, so the handle is an axis-aligned square set
-/// diagonally off the ring.
-fn search_glyph(slot: Rectangle) -> SearchGlyph {
-    let size = slot.width.min(slot.height) * 0.6;
-    let stroke = (size * 0.12).clamp(1.0, 2.0);
-    let radius = size * 0.36;
-    let left = slot.x + (slot.width - size) / 2.0;
-    let top = slot.y + (slot.height - size) / 2.0;
-    // The handle overlaps the ring where its diagonal leaves it.
-    let handle = (stroke * 2.0).min(size * 0.3);
-    let at = radius * (1.0 + std::f32::consts::FRAC_1_SQRT_2) - handle * 0.15;
-    SearchGlyph {
-        ring: Rectangle::new(Point::new(left, top), Size::new(2.0 * radius, 2.0 * radius)),
-        stroke,
-        handle: Rectangle::new(Point::new(left + at, top + at), Size::new(handle, handle)),
-    }
 }
 
 /// Where the fully open peek of the note on `bar` sits: the area that
@@ -2425,15 +2344,26 @@ mod tests {
     }
 
     #[test]
-    fn settings_glyph_fits_its_slot() {
-        let slot = Rectangle::new(Point::new(10.0, 20.0), Size::new(24.0, 36.0));
-        let quads = settings_glyph(slot);
-        assert!(!quads.is_empty());
-        for q in &quads {
-            assert!(q.width > 0.0 && q.height > 0.0);
-            assert!(slot.contains(q.position()));
-            assert!(slot.contains(Point::new(q.x + q.width, q.y + q.height)));
+    fn action_pills_use_lucide_icons_from_the_subset() {
+        assert_eq!(pill_icon(Slot::Add), Some(Icon::Plus));
+        assert_eq!(pill_icon(Slot::Search), Some(Icon::Search));
+        assert_eq!(pill_icon(Slot::Settings), Some(Icon::Settings));
+        assert_eq!(pill_icon(Slot::Actions), None);
+        let face = ttf_parser::Face::parse(crate::icons::FONTS[5], 0).expect("icon font parses");
+        for slot in [Slot::Add, Slot::Search, Slot::Settings] {
+            let icon = pill_icon(slot).unwrap();
+            assert!(face.glyph_index(icon.codepoint()).is_some(), "{icon:?}");
         }
+    }
+
+    #[test]
+    fn pill_icon_fits_its_slot() {
+        let slot = Rectangle::new(Point::new(10.0, 20.0), Size::new(24.0, 36.0));
+        let size = pill_icon_size(slot);
+        assert!(size > 0.0 && size <= slot.width.min(slot.height));
+        // Grows with the pill.
+        let big = Rectangle::new(Point::ORIGIN, Size::new(48.0, 72.0));
+        assert!(pill_icon_size(big) > size);
     }
 
     #[test]
@@ -3246,21 +3176,6 @@ mod tests {
             l.add_button.size(),
             Size::new(d.width * SLOT_AWAY_SCALE, d.height * SLOT_ALONG_SCALE)
         );
-    }
-
-    #[test]
-    fn search_glyph_fits_its_slot() {
-        let slot = Rectangle::new(Point::new(10.0, 20.0), Size::new(24.0, 36.0));
-        let glyph = search_glyph(slot);
-        for q in [glyph.ring, glyph.handle] {
-            assert!(q.width > 0.0 && q.height > 0.0);
-            assert!(slot.contains(q.position()));
-            assert!(slot.contains(Point::new(q.x + q.width, q.y + q.height)));
-        }
-        assert_eq!(glyph.ring.width, glyph.ring.height);
-        // The handle sits at the ring's lower right.
-        assert!(glyph.handle.center().x > glyph.ring.center().x);
-        assert!(glyph.handle.center().y > glyph.ring.center().y);
     }
 
     #[test]

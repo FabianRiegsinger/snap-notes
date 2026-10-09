@@ -49,12 +49,13 @@ pub enum Icon {
     Pin,
     Bell,
     Layers,
+    Settings,
 }
 
 impl Icon {
     /// Every icon in the subset.
     #[allow(dead_code)] // used by tests only
-    pub const ALL: [Icon; 21] = [
+    pub const ALL: [Icon; 22] = [
         Icon::Trash,
         Icon::Close,
         Icon::Bold,
@@ -76,6 +77,7 @@ impl Icon {
         Icon::Pin,
         Icon::Bell,
         Icon::Layers,
+        Icon::Settings,
     ];
 
     /// The icon's Private Use Area codepoint in the Lucide font.
@@ -102,6 +104,7 @@ impl Icon {
             Icon::Pin => '\u{e259}',
             Icon::Bell => '\u{e059}',
             Icon::Layers => '\u{e529}',
+            Icon::Settings => '\u{e154}',
         }
     }
 }
