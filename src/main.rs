@@ -27,6 +27,7 @@ mod platform;
 mod press_shift;
 mod press_through;
 mod reminder;
+mod reminder_picker;
 mod resize;
 mod rich;
 mod rich_highlight;

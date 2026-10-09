@@ -9,6 +9,7 @@ use crate::pass_wheel::pass_wheel;
 use crate::press_shift::press_shift;
 use crate::press_through::press_through;
 use crate::reminder;
+use crate::reminder_picker::{self, ReminderDraft};
 use crate::rich::Doc;
 use crate::rich_highlight;
 use crate::rich_view;
@@ -125,6 +126,8 @@ pub struct PostIt<'a> {
     pub mode_fade: f32,
     /// What the title says about a reminder, for the header label.
     pub reminder: reminder::Status,
+    /// Open reminder calendar draft, if any.
+    pub reminder_draft: Option<&'a ReminderDraft>,
 }
 
 /// A button whose background darkens while pressed and whose label sinks
@@ -373,6 +376,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         dragging,
         mode_fade,
         reminder,
+        reminder_draft,
     } = p;
     let mode_eased = ease_out_cubic(mode_fade);
     // The body that just appeared fades in after a mode switch.
@@ -446,6 +450,12 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
 
         // The reminder's state right of the title: bell and time, or why
         // the tag isn't one. Its width hugs the text so the title keeps the row.
+        // Pending/Fired labels open the calendar picker; while not editing the
+        // bubble anchors here (toolbar hosts it in edit mode).
+        let can_clear_reminder = matches!(
+            reminder,
+            reminder::Status::Pending(_) | reminder::Status::Fired(_)
+        );
         let reminder_tag = reminder_label(&reminder, size.width).map(|l| {
             let ink = theme.ink(l.ink * a);
             let tag = row![
@@ -459,11 +469,38 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
             .spacing(space(1))
             .align_y(iced::Alignment::Center)
             .width(Length::Shrink);
-            match l.tooltip {
-                Some(tip) => Element::from(
-                    tooltip(tag, tip_label(tip, theme), tooltip::Position::Bottom).gap(4),
-                ),
+            let tag: Element<'_, Message> = match l.tooltip {
+                Some(tip) => tooltip(tag, tip_label(tip, theme), tooltip::Position::Bottom)
+                    .gap(4)
+                    .into(),
                 None => tag.into(),
+            };
+            let clickable = can_clear_reminder;
+            let tag = if clickable {
+                pressable(tag, Padding::new(2.0), Message::OpenReminderPicker)
+                    .style(move |_theme: &Theme, status| button::Style {
+                        background: match status {
+                            button::Status::Hovered => Some(theme.ink(0.1 * a).into()),
+                            button::Status::Pressed => Some(theme.ink(0.18 * a).into()),
+                            _ => None,
+                        },
+                        border: border::rounded(RADIUS_CONTROL),
+                        ..Default::default()
+                    })
+                    .into()
+            } else {
+                tag
+            };
+            if clickable && !editing {
+                color_bubble(
+                    tag,
+                    reminder_draft
+                        .map(|draft| reminder_picker::view(draft, can_clear_reminder, theme)),
+                    theme,
+                )
+                .into()
+            } else {
+                tag
             }
         });
 
@@ -624,6 +661,8 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                 text_color_picker_open,
                 controls,
                 mode_eased,
+                reminder_draft,
+                can_clear_reminder,
                 theme,
             ));
         }
@@ -947,6 +986,7 @@ mod tests {
             dragging: false,
             mode_fade: 1.0,
             reminder: reminder::status(&note),
+            reminder_draft: None,
         });
         let mut root: Element<'_, Message> =
             iced::widget::column![Space::new().height(top), view].into();

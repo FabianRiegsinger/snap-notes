@@ -4,7 +4,8 @@
 use crate::note::Note;
 
 use chrono::{
-    DateTime, Datelike, Days, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc, Weekday,
+    DateTime, Datelike, Days, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc,
+    Weekday,
 };
 use std::ops::Range;
 
@@ -109,7 +110,7 @@ fn parse_weekday(s: &str) -> Option<Weekday> {
 }
 
 /// `naive` as local time. In a daylight-saving gap it moves on an hour.
-fn to_local(naive: NaiveDateTime) -> Option<DateTime<Local>> {
+pub(crate) fn to_local(naive: NaiveDateTime) -> Option<DateTime<Local>> {
     Local.from_local_datetime(&naive).earliest().or_else(|| {
         Local
             .from_local_datetime(&(naive + chrono::Duration::hours(1)))
@@ -250,6 +251,60 @@ pub fn status(note: &Note) -> Status {
 /// A reminder time as shown in the header and peek: `Tue 15:00`.
 pub fn label(at: DateTime<Local>) -> String {
     at.format("%a %H:%M").to_string()
+}
+
+/// Absolute reminder tag written by the calendar picker: `@YYYY-MM-DD HH:MM`.
+pub fn format_tag(date: NaiveDate, time: NaiveTime) -> String {
+    format!("@{} {}", date.format("%Y-%m-%d"), time.format("%H:%M"))
+}
+
+/// The next whole hour after `now` (00:00 the next day when past 23:00).
+pub fn default_at(now: DateTime<Local>) -> DateTime<Local> {
+    let next = now + chrono::Duration::hours(1);
+    let naive = next
+        .date_naive()
+        .and_hms_opt(next.hour(), 0, 0)
+        .expect("hour is valid");
+    to_local(naive).unwrap_or(next)
+}
+
+/// Title with a reminder tag set to `at`: replaces a valid existing tag, else
+/// appends. Invalid `@` candidates and emails are left alone.
+pub fn with_reminder(title: &str, at: DateTime<Local>) -> String {
+    let tag_str = format_tag(at.date_naive(), at.time());
+    match tag(title) {
+        Some(Tag {
+            range,
+            when: Some(_),
+        }) => {
+            let before = title[..range.start].trim_end();
+            let after = title[range.end..].trim_start();
+            let mut out = String::new();
+            if !before.is_empty() {
+                out.push_str(before);
+                out.push(' ');
+            }
+            out.push_str(&tag_str);
+            if !after.is_empty() {
+                out.push(' ');
+                out.push_str(after);
+            }
+            out
+        }
+        _ => {
+            let trimmed = title.trim();
+            if trimmed.is_empty() {
+                tag_str
+            } else {
+                format!("{trimmed} {tag_str}")
+            }
+        }
+    }
+}
+
+/// Title without its valid reminder tag. Invalid candidates are unchanged.
+pub fn without_reminder(title: &str) -> String {
+    display(title)
 }
 
 #[cfg(test)]
@@ -472,5 +527,47 @@ mod tests {
             due(&n, local(2026, 10, 5, 14, 30)),
             Some(local(2026, 10, 5, 14, 30).with_timezone(&Utc))
         );
+    }
+
+    #[test]
+    fn format_tag_is_absolute_date_and_time() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
+        let time = NaiveTime::from_hms_opt(16, 30, 0).unwrap();
+        assert_eq!(format_tag(date, time), "@2026-10-15 16:30");
+    }
+
+    #[test]
+    fn with_reminder_replaces_or_appends() {
+        let at = local(2026, 10, 15, 16, 30);
+        assert_eq!(with_reminder("Call Anna @15:00", at), "Call Anna @2026-10-15 16:30");
+        assert_eq!(with_reminder("Pay @tomorrow 18:15 rent", at), "Pay @2026-10-15 16:30 rent");
+        assert_eq!(with_reminder("Plain note", at), "Plain note @2026-10-15 16:30");
+        assert_eq!(with_reminder("", at), "@2026-10-15 16:30");
+        // Invalid candidate stays; absolute tag is appended.
+        assert_eq!(
+            with_reminder("Plan @noon", at),
+            "Plan @noon @2026-10-15 16:30"
+        );
+        // Emails are not tags.
+        assert_eq!(
+            with_reminder("mail bob@x.com", at),
+            "mail bob@x.com @2026-10-15 16:30"
+        );
+    }
+
+    #[test]
+    fn without_reminder_strips_valid_tag() {
+        assert_eq!(without_reminder("Call Anna @15:00"), "Call Anna");
+        assert_eq!(without_reminder("Pay @tomorrow 18:15 rent"), "Pay rent");
+        assert_eq!(without_reminder("@fri"), "");
+        assert_eq!(without_reminder("Plan @noon"), "Plan @noon");
+        assert_eq!(without_reminder("Plain"), "Plain");
+    }
+
+    #[test]
+    fn default_at_is_next_whole_hour() {
+        assert_eq!(default_at(local(2026, 10, 5, 14, 0)), local(2026, 10, 5, 15, 0));
+        assert_eq!(default_at(local(2026, 10, 5, 14, 1)), local(2026, 10, 5, 15, 0));
+        assert_eq!(default_at(local(2026, 10, 5, 23, 30)), local(2026, 10, 6, 0, 0));
     }
 }

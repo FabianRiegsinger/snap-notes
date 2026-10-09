@@ -1,8 +1,10 @@
 use crate::app::Message;
+use crate::color_bubble::color_bubble;
 use crate::color_picker::swatch;
 use crate::icons::{icon, Icon, ICON_FONT};
 use crate::note::NoteColor;
 use crate::note_panel::pressable;
+use crate::reminder_picker::{self, ReminderDraft};
 use crate::rich::Format;
 use crate::theme::{self, space, RADIUS_CONTROL, TEXT_SM};
 
@@ -28,7 +30,7 @@ impl fmt::Display for SizeChoice {
 }
 
 /// The toolbar's icons, in button order.
-fn button_icons() -> [Icon; 9] {
+fn button_icons() -> [Icon; 10] {
     [
         Icon::Bold,
         Icon::Italic,
@@ -39,6 +41,7 @@ fn button_icons() -> [Icon; 9] {
         Icon::Size,
         Icon::Link,
         Icon::Image,
+        Icon::Bell,
     ]
 }
 
@@ -82,11 +85,14 @@ pub fn slide_padding(fade: f32) -> SlidePadding {
 /// The formatting row shown above the editor, with the text color grid
 /// below it while `color_open`. `alpha` fades it like the header controls;
 /// `fade` (eased, 0..=1) fades it in further and slides it up into place.
+/// When `reminder` is set, the Reminder button hosts the calendar bubble.
 pub fn toolbar<'a>(
     palette: &'a [NoteColor],
     color_open: bool,
     alpha: f32,
     fade: f32,
+    reminder: Option<&'a ReminderDraft>,
+    can_clear_reminder: bool,
     theme: theme::Theme,
 ) -> Element<'a, Message> {
     let alpha = alpha * fade;
@@ -130,7 +136,14 @@ pub fn toolbar<'a>(
         border: border::rounded(RADIUS_CONTROL),
     });
 
-    let [bold, italic, strike, code, palette_icon, highlight, _size, link, image] = button_icons();
+    let [bold, italic, strike, code, palette_icon, highlight, _size, link, image, bell] =
+        button_icons();
+    let remind = tool(bell, Message::ToggleReminderPicker);
+    let remind = color_bubble(
+        remind,
+        reminder.map(|draft| reminder_picker::view(draft, can_clear_reminder, theme)),
+        theme,
+    );
     let buttons = row![
         apply(bold, Format::Bold),
         apply(italic, Format::Italic),
@@ -141,6 +154,7 @@ pub fn toolbar<'a>(
         sizes,
         apply(link, Format::Link),
         tool(image, Message::PickImage),
+        remind,
     ]
     .spacing(2)
     .align_y(iced::Alignment::Center)
@@ -181,12 +195,12 @@ pub fn toolbar<'a>(
         .into()
 }
 
-/// Width the toolbar needs on one line, from the bundled fonts: eight icon
+/// Width the toolbar needs on one line, from the bundled fonts: nine icon
 /// buttons (14 px glyph + 16 px padding), the size picker ("normal" at 13 px
 /// = 42.2 px, + 13 px handle + 6 px + 12 px padding), 2 px gaps and the
 /// 14 px side padding.
 #[cfg(test)]
-pub const ONE_LINE_WIDTH: f32 = 8.0 * 30.0 + (42.2 + 13.0 + 6.0 + 12.0) + 8.0 * 2.0 + 28.0;
+pub const ONE_LINE_WIDTH: f32 = 9.0 * 30.0 + (42.2 + 13.0 + 6.0 + 12.0) + 9.0 * 2.0 + 28.0;
 
 #[cfg(test)]
 mod tests {
@@ -222,6 +236,7 @@ mod tests {
                 Icon::Size,
                 Icon::Link,
                 Icon::Image,
+                Icon::Bell,
             ]
         );
     }

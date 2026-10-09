@@ -16,6 +16,7 @@ use crate::notify;
 use crate::peek::{entry_peek_text, note_peek_width};
 use crate::platform::{self, SUPPORTS_PASSTHROUGH};
 use crate::reminder;
+use crate::reminder_picker::ReminderDraft;
 use crate::resize::{resize_frame, resized, Edges, MIN_SIZE};
 use crate::rich::{self, BlockKind, Doc};
 use crate::rich_view;
@@ -31,6 +32,7 @@ use crate::theme;
 use crate::tray;
 
 use iced::widget::{container, mouse_area, opaque, pin, stack, text_editor, Space};
+use chrono::Datelike;
 use iced::{
     event, keyboard, mouse, window, Element, Fill, Point, Rectangle, Size, Subscription, Task,
     Vector,
@@ -309,6 +311,16 @@ pub enum Message {
     /// Where the bubble's card is on screen, so presses on it never fall
     /// through the window.
     ColorBubbleMoved(Rectangle),
+    /// Toolbar Reminder button: open or close the calendar picker.
+    ToggleReminderPicker,
+    /// Header trigger time: open the calendar picker.
+    OpenReminderPicker,
+    ReminderPickerDay(chrono::NaiveDate),
+    ReminderPickerMonth(i32),
+    ReminderPickerHour(i32),
+    ReminderPickerMinute(i32),
+    ReminderPickerDone,
+    ReminderPickerClear,
     DragStart(usize, f32),
     DragMove(f32),
     DragEnd,
@@ -451,6 +463,8 @@ pub struct App {
     /// The bubble's card on screen, as last reported while open.
     color_bubble_rect: Option<Rectangle>,
     text_color_picker_open: bool,
+    /// Calendar draft while the reminder picker bubble is open.
+    reminder_picker: Option<ReminderDraft>,
     note_hovered: bool,
     drag: Option<DragState>,
     scroll_offset: f32,
@@ -700,6 +714,7 @@ impl App {
             color_hex: String::new(),
             color_bubble_rect: None,
             text_color_picker_open: false,
+            reminder_picker: None,
             note_hovered: false,
             drag: None,
             scroll_offset: 0.0,
@@ -1100,6 +1115,7 @@ impl App {
                 if self.editing {
                     self.editing = false;
                     self.text_color_picker_open = false;
+                    self.reminder_picker = None;
                     self.reparse();
                     self.restart_mode_fade();
                 }
@@ -1140,6 +1156,7 @@ impl App {
                     self.animating = true;
                     self.color_picker_open = false;
                     self.text_color_picker_open = false;
+                    self.reminder_picker = None;
                 }
             }
             Message::DeleteNote(id) => {
@@ -1306,6 +1323,7 @@ impl App {
             Message::ToggleColorPicker => {
                 self.color_picker_open = !self.color_picker_open;
                 self.text_color_picker_open = false;
+                self.reminder_picker = None;
                 if self.color_picker_open {
                     self.color_bubble_rect = None;
                     let notes = self.store.notes();
@@ -1317,6 +1335,83 @@ impl App {
             Message::ToggleTextColorPicker => {
                 self.text_color_picker_open = !self.text_color_picker_open;
                 self.color_picker_open = false;
+                self.reminder_picker = None;
+            }
+            Message::ToggleReminderPicker => {
+                if self.reminder_picker.is_some() {
+                    self.reminder_picker = None;
+                } else {
+                    self.open_reminder_picker();
+                }
+            }
+            Message::OpenReminderPicker => self.open_reminder_picker(),
+            Message::ReminderPickerDay(date) => {
+                if let Some(draft) = &mut self.reminder_picker {
+                    draft.date = date;
+                    draft.view_month = chrono::NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
+                        .expect("valid month");
+                }
+            }
+            Message::ReminderPickerMonth(delta) => {
+                if let Some(draft) = &mut self.reminder_picker {
+                    crate::reminder_picker::shift_month(draft, delta);
+                }
+            }
+            Message::ReminderPickerHour(delta) => {
+                if let Some(draft) = &mut self.reminder_picker {
+                    crate::reminder_picker::adjust_time(draft, delta, 0);
+                }
+            }
+            Message::ReminderPickerMinute(delta) => {
+                if let Some(draft) = &mut self.reminder_picker {
+                    crate::reminder_picker::adjust_time(draft, 0, delta);
+                }
+            }
+            Message::ReminderPickerDone => {
+                let Some(draft) = self.reminder_picker.take() else {
+                    return Task::none();
+                };
+                let Some(at) = draft.at() else {
+                    return Task::none();
+                };
+                let Some(id) = self.active_note else {
+                    return Task::none();
+                };
+                let title = self
+                    .store
+                    .notes()
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| reminder::with_reminder(&n.title, at))
+                    .unwrap_or_else(|| reminder::with_reminder("", at));
+                if let Some(note) = self.store.note_mut(id) {
+                    reminder::retitle(note, title, chrono::Local::now());
+                    note.reminder_fired = None;
+                    note.updated_at = chrono::Utc::now();
+                }
+                self.pulsing.remove(&id);
+                self.store.mark_dirty();
+            }
+            Message::ReminderPickerClear => {
+                let Some(id) = self.active_note else {
+                    self.reminder_picker = None;
+                    return Task::none();
+                };
+                self.reminder_picker = None;
+                let title = self
+                    .store
+                    .notes()
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| reminder::without_reminder(&n.title))
+                    .unwrap_or_default();
+                if let Some(note) = self.store.note_mut(id) {
+                    reminder::retitle(note, title, chrono::Local::now());
+                    note.reminder_fired = None;
+                    note.updated_at = chrono::Utc::now();
+                }
+                self.pulsing.remove(&id);
+                self.store.mark_dirty();
             }
             Message::FormatApplied(format) => return self.apply_format(format),
             Message::ImageDropped(path) if self.note_open() => {
@@ -1389,6 +1484,7 @@ impl App {
             }
             Message::ColorHexSubmitted | Message::CloseColorBubble => {
                 self.color_picker_open = false;
+                self.reminder_picker = None;
             }
             Message::ColorBubbleMoved(rect) => {
                 self.color_bubble_rect = Some(rect);
@@ -1643,6 +1739,9 @@ impl App {
                     keyboard::Key::Named(Named::Escape) if self.color_picker_open => {
                         self.color_picker_open = false
                     }
+                    keyboard::Key::Named(Named::Escape) if self.reminder_picker.is_some() => {
+                        self.reminder_picker = None
+                    }
                     keyboard::Key::Named(Named::Escape) if self.search_morph.is_opening() => {
                         self.close_search()
                     }
@@ -1837,6 +1936,7 @@ impl App {
                         dragging: self.note_drag.is_some(),
                         mode_fade: self.mode_fade.progress(),
                         reminder: reminder::status(note),
+                        reminder_draft: self.reminder_picker.as_ref(),
                     });
                     let note_view = mouse_area(note_view)
                         .on_enter(Message::NoteHovered(true))
@@ -2033,6 +2133,7 @@ impl App {
         self.reparse();
         self.color_picker_open = false;
         self.text_color_picker_open = false;
+        self.reminder_picker = None;
         if let Some(bar) = self
             .note_entry(index)
             .and_then(|entry| self.strip_layout().bars.get(entry).copied())
@@ -2062,6 +2163,7 @@ impl App {
     /// back to the note and leaves the wrapped text selected.
     fn apply_format(&mut self, format: rich::Format) -> Task<Message> {
         self.text_color_picker_open = false;
+        self.reminder_picker = None;
         let (Some(id), true, Some(content)) =
             (self.active_note, self.editing, &mut self.editor_content)
         else {
@@ -2401,12 +2503,33 @@ impl App {
         self.rendered_click = None;
         self.color_picker_open = false;
         self.text_color_picker_open = false;
+        self.reminder_picker = None;
         self.note_resize = None;
         let collapse = match self.pending_delete.take() {
             Some(id) => self.start_collapse(id),
             None => Task::none(),
         };
         Task::batch([collapse, self.dock_window()])
+    }
+
+    /// Opens the reminder calendar for the active note, prefilling from its
+    /// current trigger or the next whole hour.
+    fn open_reminder_picker(&mut self) {
+        let Some(id) = self.active_note else {
+            return;
+        };
+        let now = chrono::Local::now();
+        let draft = self
+            .store
+            .notes()
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(|n| reminder::at(n).map(ReminderDraft::from_at))
+            .unwrap_or_else(|| ReminderDraft::from_now(now));
+        self.reminder_picker = Some(draft);
+        self.color_picker_open = false;
+        self.text_color_picker_open = false;
+        self.color_bubble_rect = None;
     }
 
     /// Starts shrinking the deleted note's bar away. A collapse still
@@ -6711,6 +6834,43 @@ mod tests {
         app.store.note_mut(id).unwrap().reminder_set_at = None;
         let _ = app.update(Message::TitleEdited("Call Bob @wed".into()));
         assert!(anchor(&app).is_some());
+    }
+
+    #[test]
+    fn reminder_picker_done_writes_absolute_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let _ = app.update(Message::TitleEdited("Call".into()));
+        let _ = app.update(Message::ToggleReminderPicker);
+        assert!(app.reminder_picker.is_some());
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        let _ = app.update(Message::ReminderPickerDay(date));
+        if let Some(draft) = &mut app.reminder_picker {
+            draft.hour = 16;
+            draft.minute = 45;
+        }
+        let _ = app.update(Message::ReminderPickerDone);
+        assert!(app.reminder_picker.is_none());
+        let note = &app.store.notes()[0];
+        assert_eq!(note.title, "Call @2026-11-03 16:45");
+        assert!(note.reminder_set_at.is_some());
+    }
+
+    #[test]
+    fn reminder_picker_clear_strips_tag_and_dismiss_keeps_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let _ = app.update(Message::TitleEdited("Call @15:00".into()));
+        let _ = app.update(Message::OpenReminderPicker);
+        assert!(app.reminder_picker.is_some());
+        let _ = app.update(Message::CloseColorBubble);
+        assert!(app.reminder_picker.is_none());
+        assert_eq!(app.store.notes()[0].title, "Call @15:00");
+        let _ = app.update(Message::OpenReminderPicker);
+        let _ = app.update(Message::ReminderPickerClear);
+        assert!(app.reminder_picker.is_none());
+        assert_eq!(app.store.notes()[0].title, "Call");
+        assert!(app.store.notes()[0].reminder_set_at.is_none());
     }
 
     #[test]

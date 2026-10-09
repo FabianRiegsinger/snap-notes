@@ -54,8 +54,9 @@ Put a tag in a note's title:
 | `@YYYY-MM-DD`, optionally with `HH:MM` | That date, default 09:00 |
 
 - **Local time:** times are local. Only the first tag counts, and it stays in the title.
+- **Calendar:** the toolbar's Reminder (bell) button opens a date/time picker that writes `@YYYY-MM-DD HH:MM`. Click the header's due time to open the same picker; Clear removes the tag.
 - **When it's due:** a system notification appears and the bar jumps (or pulses, per Settings → Motion) until you open the note. With auto-hide on, only alerting bars stay visible at the edge. Clicking a stack's bar opens the note whose reminder fired. Reminders missed while the app was closed fire at startup.
-- **Change it:** editing the tag sets a new reminder.
+- **Change it:** editing the tag or using the picker sets a new reminder.
 - **Hint:** the empty title's placeholder suggests "@15:00".
 - **Label:** while the title has a tag, the note header shows a bell and the due time. A fired reminder shows them dimmed, and a tag that isn't understood shows "not a reminder". On notes narrower than 420 px only the bell shows, and its tooltip carries the text. The peek also shows a bell.
 
