@@ -4,6 +4,7 @@ use std::ops::Range;
 use uuid::Uuid;
 
 use crate::note::Note;
+use crate::reminder;
 
 pub const MAX_RESULTS: usize = 50;
 
@@ -111,7 +112,8 @@ fn search_with(
     };
     for note in notes {
         let body_match = find(&note.content, &needle);
-        if body_match.is_none() && find(&note.title, &needle).is_none() {
+        // The reminder tag is hidden, so it never matches.
+        if body_match.is_none() && find(&reminder::display(&note.title), &needle).is_none() {
             continue;
         }
         result.matches.insert(note.id);
@@ -131,7 +133,7 @@ fn hit(note: &Note, body_match: Option<Range<usize>>) -> Hit {
     };
     Hit {
         note_id: note.id,
-        title: note.title.clone(),
+        title: reminder::display(&note.title),
         snippet,
         highlight,
         body_match,

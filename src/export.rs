@@ -1,4 +1,5 @@
 use crate::note::Note;
+use crate::reminder;
 use crate::rich;
 use std::ffi::OsString;
 use std::io;
@@ -20,10 +21,11 @@ impl ExportFormat {
     }
 }
 
-fn title_or_untitled(note: &Note) -> &str {
-    let title = note.title.trim();
+/// The title without its reminder tag, or "Untitled".
+fn title_or_untitled(note: &Note) -> String {
+    let title = reminder::display(&note.title);
     if title.is_empty() {
-        "Untitled"
+        "Untitled".to_string()
     } else {
         title
     }
@@ -109,6 +111,11 @@ pub fn render(notes: &[&Note], format: ExportFormat) -> String {
                 ),
             };
             // Blank lines go, but not the first line's indentation.
+            // The reminder, rendered, on its own line under the title.
+            let heading = match reminder::at(note) {
+                Some(at) => format!("{heading}\nReminder: {}", reminder::export_label(at)),
+                None => heading,
+            };
             let body = body.trim_start_matches(['\n', '\r']).trim_end();
             if body.is_empty() {
                 heading
@@ -155,6 +162,30 @@ mod tests {
         n.title = title.into();
         n.content = content.into();
         n
+    }
+
+    #[test]
+    fn export_shows_rendered_reminder_not_tag() {
+        let mut a = note("Call @2026-10-15 16:30", "body");
+        a.reminder_set_at = Some(chrono::Utc::now());
+        assert_eq!(
+            render(&[&a], ExportFormat::Markdown),
+            "# Call\nReminder: Thu 15 Oct 16:30\n\nbody\n"
+        );
+        assert_eq!(
+            render(&[&a], ExportFormat::Text),
+            "Call\n====\nReminder: Thu 15 Oct 16:30\n\nbody\n"
+        );
+        // An invalid candidate is no reminder and stays in the title.
+        let b = note("Call @frx", "");
+        assert_eq!(render(&[&b], ExportFormat::Markdown), "# Call @frx\n");
+        // A tag-only title is untitled.
+        let mut c = note("@2026-10-15 16:30", "");
+        c.reminder_set_at = Some(chrono::Utc::now());
+        assert_eq!(
+            render(&[&c], ExportFormat::Markdown),
+            "# Untitled\nReminder: Thu 15 Oct 16:30\n"
+        );
     }
 
     #[test]

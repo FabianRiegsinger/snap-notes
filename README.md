@@ -53,12 +53,13 @@ Put a tag in a note's title:
 | `@mon` … `@sun`, optionally with `HH:MM` | The next such day, default 09:00. Before 09:00 on that day, `@weekday` means today. |
 | `@YYYY-MM-DD`, optionally with `HH:MM` | That date, default 09:00 |
 
-- **Local time:** times are local. Only the first tag counts, and it stays in the title.
-- **Calendar:** the toolbar's Reminder (bell) button opens a date/time picker that writes `@YYYY-MM-DD HH:MM`. Click the header's due time to open the same picker; Clear removes the tag.
+- **Local time:** times are local. Only the first tag counts.
+- **Shown as a date, not a tag:** once a tag is understood it disappears from the title field and shows only as the header's due time. The peek, stack lists, search, and the export list and files show the title without it (exports add a "Reminder: Thu 15 Oct 16:30" line under the title), and search doesn't match it. A tag that isn't understood stays visible as typed.
+- **Calendar:** the toolbar's Reminder (bell) button opens a date/time picker that sets the reminder to that date and time. Click the header's due time to open the same picker; Clear removes the tag.
 - **When it's due:** a system notification appears and the bar jumps (or pulses, per Settings → Motion) until you open the note. With auto-hide on, only alerting bars stay visible at the edge. Clicking a stack's bar opens the note whose reminder fired. Reminders missed while the app was closed fire at startup.
-- **Change it:** editing the tag or using the picker sets a new reminder.
+- **Change it:** typing a new tag into the title or using the picker sets a new reminder. Editing the rest of the title keeps it.
 - **Hint:** the empty title's placeholder suggests "@15:00".
-- **Label:** while the title has a tag, the note header shows a bell and the due time. A fired reminder shows them dimmed, and a tag that isn't understood shows "not a reminder". On notes narrower than 420 px only the bell shows, and its tooltip carries the text. The peek also shows a bell.
+- **Label:** while the note has a reminder, the note header shows a bell and the due time. A fired reminder shows them dimmed, and a tag that isn't understood shows "not a reminder". On notes narrower than 420 px only the bell shows, and its tooltip carries the text. The peek also shows a bell.
 
 ### Look and feel
 - **Inter and Lucide:** the interface uses the Inter typeface and a Lucide icon set, so text and icons look the same on every platform.

@@ -194,9 +194,7 @@ fn truncate(line: &str, max_chars: usize) -> String {
 
 /// The title (if any) and the body's lines.
 pub fn peek_text(note: &Note, width: f32) -> PeekText {
-    let title = Some(note.title.trim())
-        .filter(|t| !t.is_empty())
-        .map(str::to_string);
+    let title = Some(reminder::display(&note.title)).filter(|t| !t.is_empty());
     let max_chars = body_chars_per_line(width);
     PeekText {
         width,
@@ -238,8 +236,8 @@ pub fn entry_peek_text(notes: &[Note], entry: &Entry, width: f32) -> PeekText {
         .notes()
         .take(MAX_STACK_ROWS)
         .map(|i| {
-            let title = notes[i].title.trim();
-            let title = if title.is_empty() { UNTITLED } else { title };
+            let title = reminder::display(&notes[i].title);
+            let title = if title.is_empty() { UNTITLED } else { &title };
             (notes[i].id, truncate(title, max_chars))
         })
         .collect();

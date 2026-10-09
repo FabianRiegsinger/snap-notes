@@ -1073,6 +1073,8 @@ impl App {
             Message::TitleEdited(title) => {
                 if let Some(id) = self.active_note {
                     if let Some(note) = self.store.note_mut(id) {
+                        // The field shows the title without its tag.
+                        let title = reminder::edit_visible(&note.title, &title);
                         reminder::retitle(note, title, chrono::Local::now());
                         note.updated_at = chrono::Utc::now();
                     }
@@ -7056,6 +7058,94 @@ mod tests {
         app.store.note_mut(id).unwrap().reminder_set_at = None;
         let _ = app.update(Message::TitleEdited("Call Bob @wed".into()));
         assert!(anchor(&app).is_some());
+    }
+
+    /// The open note's title as its title field shows it.
+    fn title_field(app: &App) -> String {
+        let id = app.active_note.unwrap();
+        let note = app.store.notes().iter().find(|n| n.id == id).unwrap();
+        crate::note_panel::title_field_text(note)
+    }
+
+    #[test]
+    fn editing_visible_title_keeps_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let _ = app.update(Message::TitleEdited("Call @2026-10-15 16:30".into()));
+        assert_eq!(title_field(&app), "Call");
+        let set = app.store.notes()[0].reminder_set_at;
+        assert!(set.is_some());
+        for typed in ["Call ", "Call B", "Call Bob"] {
+            let _ = app.update(Message::TitleEdited(typed.into()));
+            assert_eq!(
+                title_field(&app),
+                typed,
+                "the field changed under the cursor"
+            );
+        }
+        let note = &app.store.notes()[0];
+        assert_eq!(reminder::tag_text(&note.title), Some("@2026-10-15 16:30"));
+        assert_eq!(note.reminder_set_at, set, "an unchanged tag re-armed");
+        assert_eq!(reminder::display(&note.title), "Call Bob");
+    }
+
+    #[test]
+    fn typing_a_tag_moves_it_into_the_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let _ = app.update(Message::TitleEdited("Call @15:00".into()));
+        assert_eq!(title_field(&app), "Call");
+        let _ = app.update(Message::TitleEdited("Call @tue".into()));
+        assert_eq!(title_field(&app), "Call");
+        let note = &app.store.notes()[0];
+        assert_eq!(reminder::tag_text(&note.title), Some("@tue"));
+        assert!(matches!(
+            reminder::status(note),
+            reminder::Status::Pending(_)
+        ));
+    }
+
+    #[test]
+    fn invalid_tag_stays_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let _ = app.update(Message::TitleEdited("Call @frx".into()));
+        assert_eq!(title_field(&app), "Call @frx");
+        let note = &app.store.notes()[0];
+        assert_eq!(reminder::status(note), reminder::Status::Invalid);
+    }
+
+    #[test]
+    fn peek_and_search_show_display_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, ids) = app_with_notes(
+            &dir,
+            &[("Call @2026-10-15 16:30", "body"), ("Plan @tue", "x")],
+        );
+        let notes = app.store.notes();
+        let call = notes.iter().find(|n| n.id == ids[0]).unwrap();
+        let text = crate::peek::peek_text(call, 300.0);
+        assert_eq!(text.title.as_deref(), Some("Call"));
+        // A stack's rows.
+        let mut stacked = notes.to_vec();
+        let plan = stacked.iter().position(|n| n.id == ids[1]).unwrap();
+        stacked[plan].stack = Some(ids[0]);
+        let entries = crate::strip_model::entries(&stacked);
+        let entry = entries.iter().find(|e| !e.members.is_empty()).unwrap();
+        let rows = crate::peek::entry_peek_text(&stacked, entry, 300.0).stack;
+        let titles: Vec<&str> = rows.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(
+            titles.contains(&"Call") && titles.contains(&"Plan"),
+            "{titles:?}"
+        );
+        // Search hits, and the hidden tag never matches.
+        let hits = crate::search::search(notes, "call").hits;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Call");
+        assert!(crate::search::search(notes, "2026").hits.is_empty());
+        assert!(crate::search::search(notes, "tue").hits.is_empty());
+        // Export panel rows.
+        assert_eq!(crate::export_panel::row_label(call), "Call");
     }
 
     #[test]

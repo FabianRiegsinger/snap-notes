@@ -182,7 +182,8 @@ pub fn due(note: &Note, now: DateTime<Local>) -> Option<DateTime<Utc>> {
     pending(note).filter(|time| *time <= now.with_timezone(&Utc))
 }
 
-/// The title without its reminder tag, for the notification.
+/// The title without its reminder tag and trimmed, wherever a title shows
+/// outside its own text field (see `visible_title`).
 pub fn display(title: &str) -> String {
     match tag(title) {
         Some(Tag {
@@ -302,6 +303,51 @@ pub fn with_reminder(title: &str, at: DateTime<Local>) -> String {
     }
 }
 
+/// The title as its text field shows it: without the valid reminder tag and
+/// one space that separates it, everything else exactly as typed (so the
+/// cursor doesn't jump). Invalid candidates stay.
+pub fn visible_title(title: &str) -> String {
+    match tag(title) {
+        Some(Tag {
+            mut range,
+            when: Some(_),
+        }) => {
+            if title[range.end..].starts_with(' ') {
+                range.end += 1;
+            } else if title[..range.start].ends_with(' ') {
+                range.start -= 1;
+            }
+            format!("{}{}", &title[..range.start], &title[range.end..])
+        }
+        _ => title.to_string(),
+    }
+}
+
+/// The title after its text field (see [`visible_title`]) changed to
+/// `visible`. The hidden tag stays, as typed so its anchor doesn't move; it
+/// goes in front, where a `@` typed later can't shadow it, unless that would
+/// make it swallow a leading time. A valid tag typed into `visible` replaces
+/// it.
+pub fn edit_visible(title: &str, visible: &str) -> String {
+    let Some(hidden) = tag_text(title).filter(|_| tag_text(visible).is_none()) else {
+        return visible.to_string();
+    };
+    if visible.is_empty() {
+        return hidden.to_string();
+    }
+    let front = format!("{hidden} {visible}");
+    if tag_text(&front) == Some(hidden) {
+        front
+    } else {
+        format!("{visible} {hidden}")
+    }
+}
+
+/// A reminder time as shown in an export: `Thu 15 Oct 16:30`.
+pub fn export_label(at: DateTime<Local>) -> String {
+    at.format("%a %-d %b %H:%M").to_string()
+}
+
 /// Title without its valid reminder tag. Invalid candidates are unchanged.
 pub fn without_reminder(title: &str) -> String {
     display(title)
@@ -312,6 +358,54 @@ mod tests {
     use super::*;
     use crate::note::PALETTE;
     use chrono::TimeZone;
+
+    #[test]
+    fn title_field_hides_the_reminder_tag() {
+        assert_eq!(visible_title("Call @2026-10-15 16:30"), "Call");
+        assert_eq!(visible_title("Call @15:00 mom"), "Call mom");
+        assert_eq!(visible_title("@tue Call Bob"), "Call Bob");
+        assert_eq!(visible_title("@2026-10-15 16:30"), "");
+        // Everything else stays as typed, spaces included, so the cursor
+        // doesn't jump.
+        assert_eq!(visible_title("@15:00 Call "), "Call ");
+        assert_eq!(visible_title("@15:00  two"), " two");
+        assert_eq!(visible_title("Call @frx"), "Call @frx");
+        assert_eq!(visible_title("mail bob@x.com "), "mail bob@x.com ");
+    }
+
+    #[test]
+    fn visible_edits_keep_the_hidden_tag() {
+        // The tag stays as typed, so the anchor doesn't move.
+        let edited = edit_visible("Call @2026-10-15 16:30", "Call Bob");
+        assert_eq!(tag_text(&edited), Some("@2026-10-15 16:30"));
+        assert_eq!(visible_title(&edited), "Call Bob");
+        // Typing at the end keeps every character, trailing space included.
+        let edited = edit_visible("Call @15:00", "Call ");
+        assert_eq!(visible_title(&edited), "Call ");
+        // A typed `@` candidate can't shadow the hidden tag.
+        let edited = edit_visible("Call @15:00", "Call @frx");
+        assert_eq!(tag_text(&edited), Some("@15:00"));
+        assert_eq!(visible_title(&edited), "Call @frx");
+        // Nor can a leading time extend a dateless tag.
+        let edited = edit_visible("Call @tue", "12:00 lunch");
+        assert_eq!(tag_text(&edited), Some("@tue"));
+        assert_eq!(visible_title(&edited), "12:00 lunch");
+        // Without a tag the text is the title.
+        assert_eq!(edit_visible("Call", "Call @frx"), "Call @frx");
+        assert_eq!(edit_visible("@15:00 x", ""), "@15:00");
+        // A valid typed tag replaces the hidden one.
+        let edited = edit_visible("Call @15:00", "Call @tue");
+        assert_eq!(tag_text(&edited), Some("@tue"));
+        assert_eq!(visible_title(&edited), "Call");
+    }
+
+    #[test]
+    fn export_label_has_the_date() {
+        assert_eq!(
+            export_label(local(2026, 10, 15, 16, 30)),
+            "Thu 15 Oct 16:30"
+        );
+    }
 
     /// Monday 5 October 2026, 14:00 local time.
     fn now() -> DateTime<Local> {

@@ -105,12 +105,20 @@ pub struct ExportView<'a> {
     pub content_alpha: f32,
 }
 
+/// A note's row in the list: its title without the reminder tag.
+pub(crate) fn row_label(note: &Note) -> String {
+    let title = crate::reminder::display(&note.title);
+    if title.is_empty() {
+        "Untitled".to_string()
+    } else {
+        title
+    }
+}
+
 fn note_row<'a>(note: &Note, checked: bool, theme: theme::Theme, a: f32) -> Element<'a, Message> {
-    let title = note.title.trim();
-    let title = if title.is_empty() { "Untitled" } else { title };
     let id = note.id;
     checkbox(checked)
-        .label(title.to_string())
+        .label(row_label(note))
         .on_toggle(move |_| Message::ExportToggleNote(id))
         .size(TEXT_SM + 2.0)
         .text_size(TEXT_SM)
