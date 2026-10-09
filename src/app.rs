@@ -86,6 +86,9 @@ const EDGE_ZONE: f32 = 2.0;
 /// screen edge.
 const EDGE_SLIVER: f32 = 2.0;
 
+/// How long the Actions row takes to unfold or fold back, at speed 1.
+const ACTIONS_SECS: f32 = 0.18;
+
 /// The strip's band along its edge, start and end: from the first bar (or
 /// the add slot without bars) less a bar gap, to the last slot's hit area.
 fn strip_band(strip: &StripLayout, gap: f32) -> (f32, f32) {
@@ -557,8 +560,10 @@ pub struct App {
     /// Live top-left while dragging settings.
     settings_drag_pos: Option<Point>,
     settings_tab: SettingsTab,
-    /// The strip Actions slot shows New / Search / Settings side by side.
+    /// The strip Actions slot shows New / Search / Settings side by side
+    /// (the target; `actions_morph` animates toward it).
     actions_open: bool,
+    actions_morph: Morph,
     palette_slot: Option<usize>,
     /// The search panel is showing (kept while it folds back into its slot).
     search_open: bool,
@@ -719,6 +724,7 @@ impl App {
         let morph = Morph::new(s.motion.speed);
         let peek = Morph::peek(s.motion.speed);
         let settings_morph = Morph::new(s.motion.speed);
+        let actions_morph = Morph::with_secs(ACTIONS_SECS, s.motion.speed);
         let search_morph = Morph::new(s.motion.speed);
         let export_morph = Morph::new(s.motion.speed);
         let mode_fade = Self::settled_fade(s.motion.speed);
@@ -790,6 +796,7 @@ impl App {
             settings_drag_pos: None,
             settings_tab: SettingsTab::default(),
             actions_open: false,
+            actions_morph,
             palette_slot: None,
             search_open: false,
             search_morph,
@@ -876,8 +883,10 @@ impl App {
                 // Keep Actions collapsed while a panel covers that column.
                 let open = open && !self.panel_open();
                 let was = self.actions_open;
-                self.actions_open = open;
-                if was != open && !SUPPORTS_PASSTHROUGH {
+                self.set_actions_open(open);
+                // Without passthrough the window widens now; it narrows once
+                // the row has folded back (see `Tick`).
+                if open && !was && !SUPPORTS_PASSTHROUGH {
                     return self.dock_window();
                 }
             }
@@ -886,7 +895,7 @@ impl App {
                     return self.update(Message::CloseSettings);
                 }
                 self.force_reveal = true;
-                self.actions_open = false;
+                self.set_actions_open(false);
                 let close_note = self.update(Message::ClosePanel);
                 self.close_search();
                 self.close_export();
@@ -1309,7 +1318,9 @@ impl App {
                     dt,
                     &self.settings.settings().hover,
                 );
-                let morph_active = self.morph.tick(dt)
+                let actions_folding = !self.actions_morph.is_closed();
+                let morph_active = self.actions_morph.tick(dt)
+                    | self.morph.tick(dt)
                     | self.peek.tick(dt)
                     | self.settings_morph.tick(dt)
                     | self.search_morph.tick(dt)
@@ -1368,7 +1379,8 @@ impl App {
                 if self.active_note.is_some() && self.morph.is_closed() {
                     return Task::batch([focus, self.finish_close()]);
                 }
-                if settings_closed || search_closed || export_closed {
+                let actions_folded = actions_folding && self.actions_morph.is_closed();
+                if settings_closed || search_closed || export_closed || actions_folded {
                     // Without passthrough the window shrinks back to the strip.
                     return Task::batch([focus, self.dock_window()]);
                 }
@@ -1960,6 +1972,7 @@ impl App {
             toast: self.toast_visible(),
             panel_open: self.panel_open(),
             actions_expanded: self.actions_open,
+            actions_progress: self.actions_progress(),
             x_offset: self.strip_x_offset(),
             edge: self.edge(),
         })
@@ -2875,6 +2888,7 @@ impl App {
             || self.last_deleted.is_some()
             || !self.pulsing.is_empty()
             || self.actions_open
+            || !self.actions_morph.is_closed()
     }
 
     /// The docked window's thickness away from the edge (see
@@ -3766,10 +3780,27 @@ impl App {
         )
     }
 
+    /// Expands or collapses the Actions row, animated from where it is.
+    fn set_actions_open(&mut self, open: bool) {
+        self.actions_open = open;
+        if open {
+            self.actions_morph.open();
+        } else {
+            self.actions_morph.close();
+        }
+        self.animating = true;
+    }
+
+    /// How far the Actions row has unfolded, eased: out on the way open and,
+    /// time-reversed, in on the way back, so a reversal never jumps.
+    fn actions_progress(&self) -> f32 {
+        ease_out_cubic(self.actions_morph.progress())
+    }
+
     fn strip_layout(&self) -> StripLayout {
         let bounds = self.strip_bounds();
         let edge = self.edge();
-        compute_layout(
+        let mut layout = compute_layout(
             self.entries().len(),
             |i| self.magnification.scale(i),
             band(bounds, self.strip_fraction(), edge),
@@ -3778,7 +3809,9 @@ impl App {
             self.actions_open,
             self.collapse(),
             edge,
-        )
+        );
+        layout.actions_progress = self.actions_progress();
+        layout
     }
 
     /// Share of the window's length along the edge the strip uses. Without
@@ -3861,7 +3894,7 @@ impl App {
         self.cursor_y = None;
         self.drag = None;
         self.clipboard_empty_at = None;
-        self.actions_open = false;
+        self.set_actions_open(false);
         let (old_origin, pointer, last_cursor) =
             (self.window_origin, self.pointer, self.last_cursor);
         let dock = self.apply_settings();
@@ -3893,6 +3926,7 @@ impl App {
         let s = self.settings.settings();
         let speed = s.motion.speed;
         self.morph.set_speed(speed);
+        self.actions_morph.set_speed(speed);
         self.peek.set_speed(speed);
         self.settings_morph.set_speed(speed);
         self.search_morph.set_speed(speed);
@@ -5997,6 +6031,122 @@ mod tests {
         assert!(app.strip_layout().actions_expanded);
         let _ = app.update(Message::ActionsHovered(false));
         assert!(!app.actions_open);
+    }
+
+    /// Ticks `app` once, 16 ms after `now`; returns the new instant.
+    fn tick_once(app: &mut App, now: Instant) -> Instant {
+        let now = now + Duration::from_millis(16);
+        let _ = app.update(Message::Tick(now));
+        now
+    }
+
+    #[test]
+    fn actions_expand_animates() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.window_size = Size::new(1400.0, 900.0);
+        app.store.add_note(&crate::note::PALETTE);
+        let _ = app.update(Message::ActionsHovered(true));
+        assert!(app.animating, "no frames for the unfold");
+        let strip = app.strip_layout();
+        assert_eq!(strip.actions_progress, 0.0, "jumped open");
+        let origin = strip.actions_slot.center();
+        // Starts at the collapsed slot.
+        for pill in strip.pill_rects() {
+            assert!(pill.center().distance(origin) < 0.5, "{pill:?}");
+        }
+        let mut now = Instant::now();
+        let mut last_progress = 0.0;
+        let mut last_x = [origin.x; 3];
+        let mut ticks = 0;
+        while app.strip_layout().actions_progress < 1.0 {
+            now = tick_once(&mut app, now);
+            ticks += 1;
+            assert!(ticks < 60, "never finished");
+            let strip = app.strip_layout();
+            assert!(strip.actions_progress > last_progress, "progress stalled");
+            last_progress = strip.actions_progress;
+            // On Right the pills slide left, away from the edge.
+            for (i, pill) in strip.pill_rects().iter().enumerate() {
+                assert!(pill.center().x <= last_x[i] + 0.01, "pill {i} went back");
+                last_x[i] = pill.center().x;
+            }
+        }
+        // ~180 ms at speed 1.
+        assert!((8..=16).contains(&ticks), "{ticks} ticks");
+        let strip = app.strip_layout();
+        assert_eq!(
+            strip.pill_rects(),
+            [strip.add_button, strip.search_button, strip.settings_button]
+        );
+        // Idle once settled.
+        tick_once(&mut app, now);
+        assert!(!app.animating, "frames while idle");
+    }
+
+    #[test]
+    fn actions_collapse_mid_way_reverses_smoothly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.window_size = Size::new(1400.0, 900.0);
+        let _ = app.update(Message::ActionsHovered(true));
+        let mut now = Instant::now();
+        for _ in 0..5 {
+            now = tick_once(&mut app, now);
+        }
+        let mid = app.strip_layout().actions_progress;
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        let pills = app.strip_layout().pill_rects();
+        let _ = app.update(Message::ActionsHovered(false));
+        assert!(!app.actions_open);
+        let strip = app.strip_layout();
+        assert_eq!(strip.actions_progress, mid, "the collapse jumped");
+        for (a, b) in strip.pill_rects().iter().zip(pills) {
+            assert!(a.center().distance(b.center()) < 0.5, "pill jumped");
+        }
+        now = tick_once(&mut app, now);
+        let back = app.strip_layout().actions_progress;
+        assert!(back < mid && back > 0.0, "{back}");
+        // And forward again from there.
+        let _ = app.update(Message::ActionsHovered(true));
+        assert_eq!(app.strip_layout().actions_progress, back);
+        tick_once(&mut app, now);
+        assert!(app.strip_layout().actions_progress > back);
+        settle(&mut app);
+        assert_eq!(app.strip_layout().actions_progress, 1.0);
+        let _ = app.update(Message::ActionsHovered(false));
+        settle(&mut app);
+        assert_eq!(app.strip_layout().actions_progress, 0.0);
+        assert!(!app.animating);
+    }
+
+    #[test]
+    fn actions_pills_clickable_only_when_expanded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        app.window_size = Size::new(1400.0, 900.0);
+        let _ = app.update(Message::ActionsHovered(true));
+        let target = |app: &App| app.strip_layout().settings_button.center();
+        let press = |app: &App| {
+            let strip = app.strip_layout();
+            strip.press_message(target(app), keyboard::Modifiers::default())
+        };
+        let mut now = Instant::now();
+        now = tick_once(&mut app, now);
+        assert!(app.strip_layout().actions_progress < 1.0);
+        assert!(press(&app).is_none(), "a half-drawn pill took the click");
+        assert_eq!(app.strip_layout().slot_at(target(&app)), None);
+        settle(&mut app);
+        assert!(matches!(press(&app), Some(Message::ToggleSettings)));
+        let at = target(&app);
+        // Collapsing: nothing but the Actions slot.
+        let _ = app.update(Message::ActionsHovered(false));
+        tick_once(&mut app, now);
+        let strip = app.strip_layout();
+        assert!(strip.actions_progress > 0.0);
+        assert!(strip
+            .press_message(at, keyboard::Modifiers::default())
+            .is_none());
     }
 
     #[test]

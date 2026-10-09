@@ -316,8 +316,16 @@ pub struct StripLayout {
     /// Collapsed Actions control, or the bounding box of the expanded row.
     pub actions_button: Rectangle,
     pub actions_hit_area: Rectangle,
-    /// Whether the three action children are shown side by side.
+    /// Whether the three action children are shown side by side (the
+    /// target; see `actions_progress` for how far they have unfolded).
     pub actions_expanded: bool,
+    /// How far New / Search / Settings have slid out of the Actions slot,
+    /// eased: 0 collapsed, 1 fully expanded. Only then do they take clicks.
+    pub actions_progress: f32,
+    /// The collapsed Actions slot, where the pills slide out from.
+    pub actions_slot: Rectangle,
+    /// Where New / Search / Settings sit once fully expanded.
+    pub pill_slots: [Rectangle; 3],
     pub add_button: Rectangle,
     pub add_hit_area: Rectangle,
     pub search_button: Rectangle,
@@ -329,6 +337,36 @@ pub struct StripLayout {
 }
 
 impl StripLayout {
+    /// Whether the expanded row has fully unfolded: only then do its pills
+    /// take clicks and show tooltips.
+    pub fn actions_settled(&self) -> bool {
+        self.actions_expanded && self.actions_progress >= 1.0
+    }
+
+    /// Where New / Search / Settings are drawn at `actions_progress`: from
+    /// the collapsed slot's center out to their slots, growing from half
+    /// size.
+    pub fn pill_rects(&self) -> [Rectangle; 3] {
+        let t = self.actions_progress.clamp(0.0, 1.0);
+        if t >= 1.0 {
+            return self.pill_slots;
+        }
+        let from = self.actions_slot.center();
+        let scale = crate::animation::lerp(0.5, 1.0, t);
+        self.pill_slots.map(|slot| {
+            let to = slot.center();
+            let center = Point::new(
+                crate::animation::lerp(from.x, to.x, t),
+                crate::animation::lerp(from.y, to.y, t),
+            );
+            let size = Size::new(slot.width * scale, slot.height * scale);
+            Rectangle::new(
+                Point::new(center.x - size.width / 2.0, center.y - size.height / 2.0),
+                size,
+            )
+        })
+    }
+
     /// Where the settings panel unfolds from.
     pub fn settings_anchor(&self) -> Rectangle {
         if self.actions_expanded {
@@ -363,7 +401,7 @@ impl StripLayout {
     /// The collapsed Actions slot only expands on hover; presses do nothing
     /// until New / Search / Settings are showing.
     pub fn slot_message(&self, pos: Point) -> Option<Message> {
-        if !self.actions_expanded {
+        if !self.actions_settled() {
             return None;
         }
         if self.add_hit_area.contains(pos) {
@@ -381,6 +419,9 @@ impl StripLayout {
     pub fn slot_at(&self, pos: Point) -> Option<Slot> {
         if !self.actions_expanded {
             return self.actions_hit_area.contains(pos).then_some(Slot::Actions);
+        }
+        if !self.actions_settled() {
+            return None;
         }
         if self.add_hit_area.contains(pos) {
             Some(Slot::Add)
@@ -894,11 +935,12 @@ pub fn compute_layout(
     let add_size = slot_size(bars_settings, scale(count));
     let search_size = slot_size(bars_settings, scale(count + 1));
     let gear_size = slot_size(bars_settings, scale(count + 2));
+    let expanded_length = add_size
+        .height
+        .max(search_size.height)
+        .max(gear_size.height);
     let row_length = if actions_expanded {
-        add_size
-            .height
-            .max(search_size.height)
-            .max(gear_size.height)
+        expanded_length
     } else {
         actions_size.height
     };
@@ -936,6 +978,20 @@ pub fn compute_layout(
         thickness: size.width,
     };
     let actions_button = slot(actions_size, EDGE_MARGIN);
+    // Where the expanded pills sit, collapsed or not, centred in the
+    // expanded row.
+    let pill = |size: Size, away: f32| LocalRect {
+        along: row_start + (expanded_length - size.height) / 2.0,
+        away,
+        length: size.height,
+        thickness: size.width,
+    };
+    let pill_add = pill(add_size, EDGE_MARGIN);
+    let pill_search = pill(search_size, pill_add.away + pill_add.thickness + ACTION_GAP);
+    let pill_gear = pill(
+        gear_size,
+        pill_search.away + pill_search.thickness + ACTION_GAP,
+    );
     // Expanded: New, Search, Settings going away from the edge.
     let add_button = slot(add_size, EDGE_MARGIN);
     let search_button = slot(
@@ -993,6 +1049,7 @@ pub fn compute_layout(
         // Collapsed: children share the Actions geometry for panel anchors.
         (actions_hit_area, actions_hit_area, actions_hit_area)
     };
+    let actions_button_slot = actions_button;
     let (add_button, search_button, settings_button) = if actions_expanded {
         (add_button, search_button, settings_button)
     } else {
@@ -1013,6 +1070,9 @@ pub fn compute_layout(
         }),
         actions_hit_area,
         actions_expanded,
+        actions_progress: if actions_expanded { 1.0 } else { 0.0 },
+        actions_slot: frame.rect(actions_button_slot),
+        pill_slots: [pill_add, pill_search, pill_gear].map(|r| frame.rect(r)),
         add_button: frame.rect(add_button),
         add_hit_area,
         search_button: frame.rect(search_button),
@@ -1075,6 +1135,8 @@ pub struct BarStrip<'a> {
     pub panel_open: bool,
     /// The Actions slot is expanded into New / Search / Settings.
     pub actions_expanded: bool,
+    /// How far the row has unfolded, eased (see `StripLayout::actions_progress`).
+    pub actions_progress: f32,
     /// How far toward its screen edge everything is drawn while auto-hide
     /// slides the strip away (0 = in place, `HIDE_SHIFT` = off screen), an
     /// away offset that `hide_translation` turns into a direction. Above 0
@@ -1127,7 +1189,7 @@ impl<'a> BarStrip<'a> {
     }
 
     fn layout_in(&self, bounds: Rectangle) -> StripLayout {
-        compute_layout(
+        let mut layout = compute_layout(
             self.entries.len(),
             |i| self.magnification.scale(i),
             band(bounds, self.height_fraction, self.edge),
@@ -1136,7 +1198,9 @@ impl<'a> BarStrip<'a> {
             self.actions_expanded,
             self.collapse,
             self.edge,
-        )
+        );
+        layout.actions_progress = self.actions_progress;
+        layout
     }
 
     /// The cursor at `pos`'s coordinate along the edge.
@@ -1549,80 +1613,56 @@ impl<'a> BarStrip<'a> {
             return;
         }
 
-        // Actions slot: collapsed brand mark, or New / Search / Settings in a row.
+        // Actions slot: collapsed brand mark, or New / Search / Settings in a
+        // row, sliding out of it as the row unfolds.
         let idle = self.drag.is_none();
-        let count = self.entries.len();
         let pressed = tree.state.downcast_ref::<StripState>().pressed_slot;
-        let icon = |_reveal: f32| slot_style(false, &self.theme).icon;
-        if strip.actions_expanded {
-            let add_reveal = slot_visibility(self.magnification.scale(count));
-            // The shake is a horizontal "no" on every edge.
-            let add = sink_slot(
-                strip.add_button + Vector::new(self.add_shake, 0.0),
-                pressed == Some(Slot::Add),
-            );
-            draw_slot(
-                renderer,
-                add,
-                idle && cursor.is_over(strip.add_hit_area),
-                &self.theme,
-            );
-            if add_reveal > 0.0 {
-                draw_pill_icon(renderer, Slot::Add, add, icon(add_reveal));
-            }
-
-            let search_reveal = slot_visibility(self.magnification.scale(count + 1));
-            let search = sink_slot(strip.search_button, pressed == Some(Slot::Search));
-            draw_slot(
-                renderer,
-                search,
-                idle && cursor.is_over(strip.search_hit_area),
-                &self.theme,
-            );
-            if search_reveal > 0.0 {
-                draw_pill_icon(renderer, Slot::Search, search, icon(search_reveal));
-            }
-
-            let gear_reveal = slot_visibility(self.magnification.scale(count + 2));
-            let gear = sink_slot(strip.settings_button, pressed == Some(Slot::Settings));
-            draw_slot(
-                renderer,
-                gear,
-                idle && cursor.is_over(strip.settings_hit_area),
-                &self.theme,
-            );
-            if gear_reveal > 0.0 {
-                draw_pill_icon(renderer, Slot::Settings, gear, icon(gear_reveal));
-            }
-        } else {
-            let reveal = slot_visibility(self.magnification.scale(count));
+        let unfold = strip.actions_progress.clamp(0.0, 1.0);
+        let settled = strip.actions_settled();
+        if unfold < 1.0 {
             let actions = sink_slot(
-                strip.actions_button + Vector::new(self.add_shake, 0.0),
+                strip.actions_slot + Vector::new(self.add_shake, 0.0),
                 pressed == Some(Slot::Actions),
             );
-            draw_slot(
-                renderer,
-                actions,
-                idle && cursor.is_over(strip.actions_hit_area),
-                &self.theme,
-            );
-            if reveal > 0.0 {
-                let color = icon(reveal);
-                for quad in actions_glyph(actions) {
-                    renderer::Renderer::fill_quad(
-                        renderer,
-                        renderer::Quad {
-                            bounds: quad,
-                            border: iced::Border {
-                                radius: 1.0.into(),
-                                ..Default::default()
-                            },
-                            shadow: Default::default(),
-                            snap: true,
+            let hovered = idle && !strip.actions_expanded && cursor.is_over(strip.actions_hit_area);
+            let alpha = 1.0 - unfold;
+            draw_slot(renderer, actions, hovered, alpha, &self.theme);
+            let color = slot_style(false, &self.theme).icon.scale_alpha(alpha);
+            for quad in actions_glyph(actions) {
+                renderer::Renderer::fill_quad(
+                    renderer,
+                    renderer::Quad {
+                        bounds: quad,
+                        border: iced::Border {
+                            radius: 1.0.into(),
+                            ..Default::default()
                         },
-                        color,
-                    );
-                }
+                        shadow: Default::default(),
+                        snap: true,
+                    },
+                    color,
+                );
+            }
+        }
+        if unfold > 0.0 {
+            let hit_areas = [
+                strip.add_hit_area,
+                strip.search_hit_area,
+                strip.settings_hit_area,
+            ];
+            let slots = [Slot::Add, Slot::Search, Slot::Settings];
+            for ((rect, hit), slot) in strip.pill_rects().into_iter().zip(hit_areas).zip(slots) {
+                // The shake is a horizontal "no" on every edge.
+                let shake = if slot == Slot::Add {
+                    Vector::new(self.add_shake, 0.0)
+                } else {
+                    Vector::ZERO
+                };
+                let rect = sink_slot(rect + shake, settled && pressed == Some(slot));
+                let hovered = idle && settled && cursor.is_over(hit);
+                draw_slot(renderer, rect, hovered, unfold, &self.theme);
+                let color = slot_style(false, &self.theme).icon.scale_alpha(unfold);
+                draw_pill_icon(renderer, slot, rect, color);
             }
         }
 
@@ -2055,17 +2095,18 @@ fn slot_style(hovered: bool, theme: &theme::Theme) -> SlotStyle {
     }
 }
 
-/// How visible an action pill is at magnification `scale`: always fully, so
-/// it can be found without hovering; magnification only changes its size.
-fn slot_visibility(_scale: f32) -> f32 {
-    1.0
-}
-
 /// An action pill: a solid card with a hairline border and a soft shadow,
 /// slightly darker on hover.
-fn draw_slot(renderer: &mut iced::Renderer, rect: Rectangle, hovered: bool, theme: &theme::Theme) {
+/// `alpha` fades it in and out while the Actions row unfolds.
+fn draw_slot(
+    renderer: &mut iced::Renderer,
+    rect: Rectangle,
+    hovered: bool,
+    alpha: f32,
+    theme: &theme::Theme,
+) {
     let style = slot_style(hovered, theme);
-    let [contact, ambient] = theme.shadows(1.0);
+    let [contact, ambient] = theme.shadows(alpha);
     for shadow in [ambient, contact] {
         renderer::Renderer::fill_quad(
             renderer,
@@ -2074,12 +2115,12 @@ fn draw_slot(renderer: &mut iced::Renderer, rect: Rectangle, hovered: bool, them
                 border: iced::Border {
                     radius: GLASS_SLOT_RADIUS.into(),
                     width: 1.0,
-                    color: style.border,
+                    color: style.border.scale_alpha(alpha),
                 },
                 shadow,
                 snap: true,
             },
-            style.fill,
+            style.fill.scale_alpha(alpha),
         );
     }
 }
@@ -2517,6 +2558,7 @@ mod tests {
             toast: false,
             panel_open: false,
             actions_expanded: false,
+            actions_progress: 0.0,
             x_offset: 0.0,
             peek_scroll: 0.0,
             edge: Edge::Right,
@@ -2671,6 +2713,7 @@ mod tests {
             toast: true,
             panel_open: false,
             actions_expanded: false,
+            actions_progress: 0.0,
             x_offset: 0.0,
             peek_scroll: 0.0,
             edge: Edge::Right,
@@ -2739,6 +2782,7 @@ mod tests {
             toast: false,
             panel_open: false,
             actions_expanded: false,
+            actions_progress: 0.0,
             x_offset: 0.0,
             peek_scroll: 0.0,
             edge: Edge::Right,
@@ -2805,6 +2849,7 @@ mod tests {
             toast: false,
             panel_open: false,
             actions_expanded: false,
+            actions_progress: 0.0,
             x_offset: 0.0,
             peek_scroll: 0.0,
             edge: Edge::Right,
@@ -2865,6 +2910,7 @@ mod tests {
             toast: false,
             panel_open: false,
             actions_expanded: false,
+            actions_progress: 0.0,
             x_offset: 0.0,
             peek_scroll: 0.0,
             edge: Edge::Right,
@@ -2949,6 +2995,7 @@ mod tests {
             toast: false,
             panel_open: false,
             actions_expanded: false,
+            actions_progress: 0.0,
             x_offset: 0.0,
             peek_scroll: 0.0,
             edge: Edge::Right,
@@ -2996,6 +3043,7 @@ mod tests {
             toast: false,
             panel_open: false,
             actions_expanded: false,
+            actions_progress: 0.0,
             x_offset: 0.0,
             peek_scroll: 0.0,
             edge: Edge::Right,
@@ -3373,6 +3421,7 @@ mod tests {
         // Where bar 2 and the add slot sit on Right, in the edge-local frame.
         let mut right = plain_strip(&notes, &entries, &magnification, &drag, &bars);
         right.actions_expanded = true;
+        right.actions_progress = 1.0;
         let right_frame = Frame {
             edge: Edge::Right,
             bounds: STRIP_BOUNDS,
@@ -3383,6 +3432,7 @@ mod tests {
         for edge in Edge::ALL {
             let mut strip = plain_strip(&notes, &entries, &magnification, &drag, &bars);
             strip.actions_expanded = true;
+            strip.actions_progress = 1.0;
             strip.edge = edge;
             let bounds = edge_bounds(edge);
             let frame = Frame { edge, bounds };
@@ -3582,7 +3632,27 @@ mod tests {
 
     #[test]
     fn action_pills_are_visible_at_rest() {
-        assert_eq!(slot_visibility(1.0), 1.0);
-        assert_eq!(slot_visibility(3.0), 1.0);
+        let mut l = compute_layout(
+            3,
+            |_| 1.0,
+            STRIP_BOUNDS,
+            0.0,
+            &BarSettings::default(),
+            true,
+            None,
+            Edge::Right,
+        );
+        // Fully unfolded, the pills sit at full size in their slots.
+        assert!(l.actions_settled());
+        assert_eq!(
+            l.pill_rects(),
+            [l.add_button, l.search_button, l.settings_button]
+        );
+        // Mid-way they are smaller and still between the slot and their spot.
+        l.actions_progress = 0.5;
+        assert!(!l.actions_settled());
+        for (pill, slot) in l.pill_rects().iter().zip(l.pill_slots) {
+            assert!(pill.width < slot.width && pill.width > 0.0);
+        }
     }
 }
