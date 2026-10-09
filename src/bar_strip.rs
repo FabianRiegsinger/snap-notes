@@ -36,9 +36,9 @@ const ACTION_GAP: f32 = 4.0;
 /// Slots magnify with the bars, but their length along the edge grows less
 /// so they stay compact chips rather than tall notes.
 const ADD_MAX_HEIGHT_SCALE: f32 = 1.4;
-/// Slot thickness away from the edge, as a multiple of bar width. 1.5× fits
-/// three expanded chips inside the strip with gaps; taller than a bar so
-/// they read as controls.
+/// Slot thickness away from the edge, as a multiple of bar width. At rest
+/// three chips nearly fit the strip; magnified rows grow past it and the
+/// widget/hit area widen to match.
 const SLOT_AWAY_SCALE: f32 = 1.5;
 /// Slot length along the edge, as a fraction of bar height (half → squat).
 const SLOT_ALONG_SCALE: f32 = 0.5;
@@ -816,6 +816,19 @@ fn slot_size(bars: &BarSettings, scale: f32) -> Size {
     )
 }
 
+/// How far from the screen edge the expanded Actions row reaches (margin +
+/// three chips + gaps), at least [`STRIP_WIDTH`] so the strip never shrinks.
+pub fn actions_row_extent(
+    bars: &BarSettings,
+    bar_count: usize,
+    scale: impl Fn(usize) -> f32,
+) -> f32 {
+    let add = slot_size(bars, scale(bar_count));
+    let search = slot_size(bars, scale(bar_count + 1));
+    let gear = slot_size(bars, scale(bar_count + 2));
+    (EDGE_MARGIN + add.width + ACTION_GAP + search.width + ACTION_GAP + gear.width).max(STRIP_WIDTH)
+}
+
 /// Lays out the bars plus the Actions slot (collapsed or expanded into New /
 /// Search / Settings side by side away from the edge), centred along the
 /// `edge` in `bounds`. Centering on the *current* (magnified) length keeps
@@ -925,11 +938,18 @@ pub fn compute_layout(
     } else {
         actions_button.away + actions_button.thickness
     };
+    // Expanded chips can reach past the strip band once they magnify; the
+    // hit area must cover the whole row or hover collapses before Settings.
+    let hit_thickness = if actions_expanded {
+        row_far.max(span.thickness)
+    } else {
+        span.thickness
+    };
     let hit = LocalRect {
         along: row_start - add_gap / 2.0,
         away: 0.0,
         length: row_length + add_gap / 2.0 + EDGE_PADDING,
-        thickness: span.thickness,
+        thickness: hit_thickness,
     };
     let actions_hit_area = frame.rect(hit);
     // The share of the hit area from `near` to `far` away from the edge.
@@ -1055,6 +1075,19 @@ impl<'a> BarStrip<'a> {
     /// Whether the strip is (partly) slid away and so ignores the mouse.
     fn slid(&self) -> bool {
         self.x_offset > 0.0
+    }
+
+    /// Widget thickness away from the edge: the strip band, or the expanded
+    /// Actions row when it sticks further into the screen (so hover/click
+    /// still land on Search and Settings).
+    fn widget_thickness(&self) -> f32 {
+        if self.actions_expanded {
+            actions_row_extent(self.bars, self.entries.len(), |i| {
+                self.magnification.scale(i)
+            })
+        } else {
+            STRIP_WIDTH
+        }
     }
 
     fn is_alert(&self, i: usize) -> bool {
@@ -1712,9 +1745,10 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
     }
 
     fn size(&self) -> Size<Length> {
+        let thick = self.widget_thickness();
         match self.edge {
-            Edge::Right | Edge::Left => Size::new(Length::Fixed(STRIP_WIDTH), Length::Fill),
-            Edge::Top => Size::new(Length::Fill, Length::Fixed(STRIP_WIDTH)),
+            Edge::Right | Edge::Left => Size::new(Length::Fixed(thick), Length::Fill),
+            Edge::Top => Size::new(Length::Fill, Length::Fixed(thick)),
         }
     }
 
@@ -1724,15 +1758,16 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         _renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
+        let thick = self.widget_thickness();
         let size = match self.edge {
             Edge::Right | Edge::Left => limits
-                .width(Length::Fixed(STRIP_WIDTH))
+                .width(Length::Fixed(thick))
                 .height(Length::Fill)
-                .resolve(STRIP_WIDTH, f32::INFINITY, Size::new(STRIP_WIDTH, 0.0)),
+                .resolve(thick, f32::INFINITY, Size::new(thick, 0.0)),
             Edge::Top => limits
                 .width(Length::Fill)
-                .height(Length::Fixed(STRIP_WIDTH))
-                .resolve(f32::INFINITY, STRIP_WIDTH, Size::new(0.0, STRIP_WIDTH)),
+                .height(Length::Fixed(thick))
+                .resolve(f32::INFINITY, thick, Size::new(0.0, thick)),
         };
         layout::Node::new(size)
     }
@@ -3054,6 +3089,29 @@ mod tests {
     }
 
     #[test]
+    fn expanded_actions_hit_area_covers_settings() {
+        // Regression: Search/Settings sit further into the screen than the
+        // strip band once slots magnify. The hover hit area must cover them,
+        // or moving toward Settings collapses the row before a click lands.
+        let l = layout_expanded(3, |i| if i >= 3 { 2.5 } else { 1.0 }, 900.0, 0.0);
+        assert!(
+            l.actions_button.width > STRIP_WIDTH,
+            "precondition: magnified row overflows the strip ({})",
+            l.actions_button.width
+        );
+        assert!(l.over_actions(l.settings_button.center()), "{:?}", l.settings_button);
+        assert!(l.over_actions(l.search_button.center()), "{:?}", l.search_button);
+        assert!(l.over_actions(l.add_button.center()), "{:?}", l.add_button);
+        assert!(l.settings_hit_area.contains(l.settings_button.center()));
+        assert!(
+            l.actions_hit_area.width + 0.01 >= l.actions_button.width,
+            "hit {:?} row {:?}",
+            l.actions_hit_area,
+            l.actions_button
+        );
+    }
+
+    #[test]
     fn collapsed_actions_anchor_panels() {
         let l = layout(2, |_| 1.0, 900.0, 0.0);
         assert_eq!(l.settings_anchor(), l.actions_button);
@@ -3295,18 +3353,18 @@ mod tests {
             close(*bar, want);
         }
         close(expanded.actions_button, (961.25, 608.3, 92.75, 29.4));
-        close(expanded.actions_hit_area, (1000.0, 598.3, 64.0, 55.4));
+        close(expanded.actions_hit_area, (961.25, 598.3, 102.75, 55.4));
         close(expanded.add_button, (1030.0, 608.3, 24.0, 29.4));
         close(expanded.add_hit_area, (1028.0, 598.3, 36.0, 55.400024));
         close(expanded.search_button, (982.5, 608.3, 43.5, 29.4));
         close(
             expanded.search_hit_area,
-            (1000.0, 598.3, 28.0, 55.400024),
+            (980.5, 598.3, 47.5, 55.400024),
         );
         close(expanded.settings_button, (961.25, 610.925, 17.25, 24.15));
         close(
             expanded.settings_hit_area,
-            (961.25, 610.925, 17.25, 24.15),
+            (961.25, 598.3, 19.25, 55.400024),
         );
 
         // Overflowing, scrolled and with a bar collapsing.

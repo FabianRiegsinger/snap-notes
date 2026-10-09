@@ -831,7 +831,11 @@ impl App {
                 }
             }
             Message::ActionsHovered(open) => {
+                let was = self.actions_open;
                 self.actions_open = open;
+                if was != open && !SUPPORTS_PASSTHROUGH {
+                    return self.dock_window();
+                }
             }
             Message::ToggleSettings => {
                 if self.settings_open && self.settings_morph.is_opening() {
@@ -2801,6 +2805,7 @@ impl App {
             || self.clipboard_empty_at.is_some()
             || self.last_deleted.is_some()
             || !self.pulsing.is_empty()
+            || self.actions_open
     }
 
     /// The docked window's thickness away from the edge (see
@@ -3594,16 +3599,25 @@ impl App {
         ))
     }
 
-    /// Where the strip widget sits in the window: `STRIP_WIDTH` thick along
-    /// the whole window border on its edge.
+    /// Where the strip widget sits in the window: the strip band, or wider
+    /// while Actions is expanded so Search/Settings stay hittable.
     fn strip_bounds(&self) -> Rectangle {
         let edge = self.edge();
+        let thickness = if self.actions_open {
+            crate::bar_strip::actions_row_extent(
+                &self.settings.settings().bars,
+                self.entries().len(),
+                |i| self.magnification.scale(i),
+            )
+        } else {
+            STRIP_WIDTH
+        };
         edge.rect_to_window(
             LocalRect {
                 along: 0.0,
                 away: 0.0,
                 length: edge.edge_length(self.window_size),
-                thickness: STRIP_WIDTH,
+                thickness,
             },
             self.window_size,
         )
