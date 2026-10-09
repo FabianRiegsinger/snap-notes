@@ -1,6 +1,6 @@
 # Snap Notes
 
-**Sticky notes that live on the edge of your screen.** Each note is a thin colored bar docked to the right edge, always on top and never in the way. Hover to magnify the bars like the macOS Dock, rest on one to peek inside, and click to unfold it into a full sticky note.
+**Sticky notes that live on the edge of your screen.** Each note is a thin colored bar docked to a screen edge (right by default, or left or top), always on top and never in the way. Hover to magnify the bars like the macOS Dock, rest on one to peek inside, and click to unfold it into a full sticky note.
 
 ![Snap Notes: the bar strip on the right edge, a hover peek and an open note](docs/assets/overview.svg)
 
@@ -23,13 +23,14 @@
 - **Checklist progress:** a bar fills from the bottom by the share of done tasks, and is drawn faded once all are done. The peek shows done/total, summed over a stack.
 - **File drops:** drop a file on `+` or on empty space to create a note, or on a bar to append to that note (the top note of a stack). A `.txt` or `.md` file up to 1 MB adds its text, and a new note gets the file name as its title. An image file is added as an image, and any other file as its path. Dropping onto an open note inserts an image, as before.
 - **From the clipboard:** **New Note from Clipboard** in the tray menu, or Alt/Option-click on `+`, makes a note whose body is the clipboard's text or image.
+- **Screen edge:** the strip sits on the right edge by default. In Settings → Window → **Screen edge** choose **Right**, **Left** or **Top**; the change applies right away. On Left everything mirrors Right: the peek, notes, panels and hints open to the right of the strip. On Top the bars sit side by side along the top edge and grow downward, and everything opens below the strip. On macOS the strip then sits below the menu bar. Notes you dragged keep their place.
 - **Scroll:** with more notes than fit on screen, scroll the strip with the mouse wheel.
-- **Auto-hide:** on by default, switch it off in Settings → Window. The strip then slides off the right edge 0.8 s after the cursor leaves the strip, its peek or the undo toast. To bring it back, hold the cursor against the right screen edge where the strip sits for about 0.15 s. The setting is saved, but the strip is always shown when the app starts.
+- **Auto-hide:** on by default, switch it off in Settings → Window. The strip then slides off toward its edge 0.8 s after the cursor leaves the strip, its peek or the undo toast. To bring it back, hold the cursor against that edge where the strip sits for about 0.15 s. On Top with macOS, pushing the cursor up into the menu bar over the strip also reveals it. The setting is saved, but the strip is always shown when the app starts.
   - **Stays shown:** while a search, settings or export panel is open, during a bar or file drag, while the undo toast or the "Clipboard is empty" hint shows, and after a reminder fires. A fired reminder slides the strip in and it stays until you open that note.
   - **Open notes:** an open note does not keep the strip shown. The strip can slide away while the note stays open and usable.
   - **Other ways back:** the global hotkey, the tray's **New Note**, **New Note from Clipboard**, **Search…**, **Settings…** and **Export…**, and Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+,.
   - **Tray Hide:** **Hide Notes** still hides everything, and the edge does nothing until you choose **Show**.
-  - **On Linux:** while the strip is hidden, the window shrinks to a 2 px sliver at the screen edge. Move the cursor into it to reveal the strip.
+  - **On Linux:** while the strip is hidden, the window shrinks to a 2 px sliver on the chosen edge. Move the cursor into it to reveal the strip.
 
 ### Notes
 - **Unfold and fold:** a click morphs the bar into a sticky note. Esc, the close button, a click outside the note or a click on its bar folds it back.
@@ -113,7 +114,7 @@ The groups are split across two tabs, **Application** and **Styling**. Settings 
 | Tab | Group | What you can adjust |
 |---|---|---|
 | Application | App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey (Cmd/Ctrl+Shift+Space). If it can't be registered (for example, another app uses it), a red line under the toggle says why. On Linux, failures are only logged. |
-| Application | Window | How much of the screen height the strip may use, and **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)) |
+| Application | Window | **Strip length** (the share of the edge the strip may use, which is the width on Top), **Screen edge** (Right, Left or Top), and **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)) |
 | Application | Data | **Export…** your notes to one file (see [Export](#export)) |
 | Styling | Bars | Width, height and gap |
 | Styling | Hover | Magnification, how far it spreads, and the peek delay (0–3 s) |
