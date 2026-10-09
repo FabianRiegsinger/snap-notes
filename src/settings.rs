@@ -71,15 +71,65 @@ impl Default for NoteSettings {
     }
 }
 
+/// How a minimized bar shows that its reminder has fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReminderAlertStyle {
+    /// Dock-style hop away from the screen edge (default).
+    #[default]
+    Jump,
+    /// Soft glow halo around the bar.
+    Pulse,
+}
+
+impl ReminderAlertStyle {
+    pub const ALL: [ReminderAlertStyle; 2] =
+        [ReminderAlertStyle::Jump, ReminderAlertStyle::Pulse];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReminderAlertStyle::Jump => "jump",
+            ReminderAlertStyle::Pulse => "pulse",
+        }
+    }
+
+    /// The style named `s`; anything unknown is Jump.
+    pub fn parse(s: &str) -> ReminderAlertStyle {
+        match s {
+            "pulse" => ReminderAlertStyle::Pulse,
+            _ => ReminderAlertStyle::Jump,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ReminderAlertStyle::Jump => "Jump",
+            ReminderAlertStyle::Pulse => "Pulse",
+        }
+    }
+}
+
+fn serialize_reminder_alert<S: serde::Serializer>(
+    style: &ReminderAlertStyle,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.serialize_str(style.as_str())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MotionSettings {
     /// Divides the open/close/peek durations: 2 is twice as fast.
     pub speed: f32,
+    /// Jump (default) or Pulse when a reminder fires on a minimized bar.
+    #[serde(serialize_with = "serialize_reminder_alert")]
+    pub reminder_alert: ReminderAlertStyle,
 }
 
 impl Default for MotionSettings {
     fn default() -> Self {
-        Self { speed: 1.0 }
+        Self {
+            speed: 1.0,
+            reminder_alert: ReminderAlertStyle::Jump,
+        }
     }
 }
 
@@ -448,6 +498,12 @@ impl Settings {
         if let Some(v) = edge.and_then(|v| v.as_str()) {
             settings.window.edge = Edge::parse(v);
         }
+        let alert = value
+            .get("motion")
+            .and_then(|m| m.get("reminder_alert"));
+        if let Some(v) = alert.and_then(|v| v.as_str()) {
+            settings.motion.reminder_alert = ReminderAlertStyle::parse(v);
+        }
         settings
     }
 
@@ -748,6 +804,7 @@ mod tests {
             (500.0, 0.0, 0.7)
         );
         assert_eq!(s.motion.speed, 1.0);
+        assert_eq!(s.motion.reminder_alert, ReminderAlertStyle::Jump);
         assert_eq!((s.window.height_fraction, s.window.auto_hide), (0.9, true));
         assert_eq!(s.window.edge, Edge::Right);
         assert_eq!(s.palette, DEFAULT_PALETTE.to_vec());
@@ -1088,6 +1145,38 @@ mod tests {
         assert!(s.can_toggle(SettingToggle::GlobalHotkey));
         s.reset(SettingsGroup::App);
         assert!(s.app.global_hotkey);
+    }
+
+    #[test]
+    fn reminder_alert_defaults_to_jump_and_persists() {
+        let mut s = Settings::default();
+        assert_eq!(s.motion.reminder_alert, ReminderAlertStyle::Jump);
+        s.motion.reminder_alert = ReminderAlertStyle::Pulse;
+        let json = serde_json::to_string(&s).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["motion"]["reminder_alert"], "pulse");
+        assert_eq!(Settings::from_json(&json), s);
+        assert_eq!(
+            Settings::from_json(r#"{"motion":{"reminder_alert":"pulse"}}"#)
+                .motion
+                .reminder_alert,
+            ReminderAlertStyle::Pulse
+        );
+        assert_eq!(
+            Settings::from_json(r#"{"motion":{"reminder_alert":"nope"}}"#)
+                .motion
+                .reminder_alert,
+            ReminderAlertStyle::Jump
+        );
+        assert_eq!(
+            Settings::from_json("{}").motion.reminder_alert,
+            ReminderAlertStyle::Jump
+        );
+        s.reset(SettingsGroup::Motion);
+        assert_eq!(s.motion, MotionSettings::default());
+        for style in ReminderAlertStyle::ALL {
+            assert_eq!(ReminderAlertStyle::parse(style.as_str()), style);
+        }
     }
 
     #[test]

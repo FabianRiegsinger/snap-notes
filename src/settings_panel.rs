@@ -7,7 +7,9 @@ use crate::edge::Edge;
 use crate::icons::{icon, Icon};
 use crate::note_panel::pressable;
 use crate::settings::SettingToggle;
-use crate::settings::{SettingKey, Settings, SettingsGroup, SettingsTab, PRESETS};
+use crate::settings::{
+    ReminderAlertStyle, SettingKey, Settings, SettingsGroup, SettingsTab, PRESETS,
+};
 use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM, TEXT_XS};
 
 use iced::widget::{button, column, container, row, scrollable, slider, text, toggler, Space};
@@ -122,6 +124,9 @@ pub const AUTO_HIDE_LABEL: &str = "Auto-hide";
 /// The Window group's three-way screen edge control.
 pub const SCREEN_EDGE_LABEL: &str = "Screen edge";
 
+/// The Motion group's Jump / Pulse control for fired reminders.
+pub const REMINDER_ALERT_LABEL: &str = "Reminder alert";
+
 fn edge_label(edge: Edge) -> &'static str {
     match edge {
         Edge::Right => "Right",
@@ -130,13 +135,18 @@ fn edge_label(edge: Edge) -> &'static str {
     }
 }
 
-/// One side of the screen edge switch: an ink wash marks the chosen edge.
-fn edge_button<'a>(edge: Edge, chosen: Edge, theme: theme::Theme, a: f32) -> Element<'a, Message> {
-    let selected = edge == chosen;
+/// One side of a segmented switch: an ink wash marks the chosen option.
+fn segment_button<'a>(
+    label: &'static str,
+    selected: bool,
+    on_press: Message,
+    theme: theme::Theme,
+    a: f32,
+) -> Element<'a, Message> {
     pressable(
-        text(edge_label(edge)).size(TEXT_XS),
+        text(label).size(TEXT_XS),
         Padding::new(2.0).left(space(2)).right(space(2)),
-        Message::EdgeChosen(edge),
+        on_press,
     )
     .style(move |_theme: &Theme, status| button::Style {
         background: match status {
@@ -154,6 +164,16 @@ fn edge_button<'a>(edge: Edge, chosen: Edge, theme: theme::Theme, a: f32) -> Ele
     .into()
 }
 
+fn edge_button<'a>(edge: Edge, chosen: Edge, theme: theme::Theme, a: f32) -> Element<'a, Message> {
+    segment_button(
+        edge_label(edge),
+        edge == chosen,
+        Message::EdgeChosen(edge),
+        theme,
+        a,
+    )
+}
+
 fn edge_row<'a>(chosen: Edge, theme: theme::Theme, a: f32) -> Element<'a, Message> {
     let mut buttons = row![].spacing(space(1));
     for edge in Edge::ALL {
@@ -161,6 +181,32 @@ fn edge_row<'a>(chosen: Edge, theme: theme::Theme, a: f32) -> Element<'a, Messag
     }
     row![
         text(SCREEN_EDGE_LABEL)
+            .size(TEXT_XS)
+            .color(theme.ink(0.75 * a)),
+        Space::new().width(Fill),
+        buttons,
+    ]
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+fn reminder_alert_row<'a>(
+    chosen: ReminderAlertStyle,
+    theme: theme::Theme,
+    a: f32,
+) -> Element<'a, Message> {
+    let mut buttons = row![].spacing(space(1));
+    for style in ReminderAlertStyle::ALL {
+        buttons = buttons.push(segment_button(
+            style.label(),
+            style == chosen,
+            Message::ReminderAlertChosen(style),
+            theme,
+            a,
+        ));
+    }
+    row![
+        text(REMINDER_ALERT_LABEL)
             .size(TEXT_XS)
             .color(theme.ink(0.75 * a)),
         Space::new().width(Fill),
@@ -402,6 +448,13 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
                     let mut section = column![group_header(group, theme, a)].spacing(space(2));
                     for key in SettingKey::ALL.into_iter().filter(|k| k.group() == group) {
                         section = section.push(slider_row(settings, key, theme, a));
+                    }
+                    if group == SettingsGroup::Motion {
+                        section = section.push(reminder_alert_row(
+                            settings.motion.reminder_alert,
+                            theme,
+                            a,
+                        ));
                     }
                     if group == SettingsGroup::Window {
                         section = section.push(edge_row(settings.window.edge, theme, a));

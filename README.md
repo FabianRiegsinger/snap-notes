@@ -119,7 +119,7 @@ The groups are split across two tabs, **Application** and **Styling**. Settings 
 | Styling | Bars | Width, height and gap |
 | Styling | Hover | Magnification, how far it spreads, and the peek delay (0–3 s) |
 | Styling | Notes | Default size, paper tint (lighter/darker than the bar), and how faint the header controls are until you hover |
-| Styling | Motion | Animation speed (0.25–3×) |
+| Styling | Motion | Animation speed (0.25–3×); Reminder alert (Jump / Pulse) |
 | Styling | Palette | Replace any of the 6 note colors from 60 presets. Notes using the old color follow along. |
 
 ### Menu bar / tray

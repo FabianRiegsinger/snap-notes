@@ -133,6 +133,11 @@ pub fn hide_translation(edge: Edge, offset: f32) -> Vector {
     }
 }
 
+/// Away-from-edge offset for a reminder jump (into the screen).
+pub fn jump_translation(edge: Edge, amount: f32) -> Vector {
+    hide_translation(edge, -amount)
+}
+
 /// The `done` of `total` share of `rect` at its end along `edge` (the
 /// bottom on Right and Left, the right end on Top), the checklist progress.
 pub fn progress_fill(rect: Rectangle, done: usize, total: usize, edge: Edge) -> Rectangle {
@@ -1014,6 +1019,9 @@ pub struct BarStrip<'a> {
     /// How strongly each bar's fired reminder pulses (0..=1), by index.
     /// Empty when nothing pulses.
     pub pulse: Vec<f32>,
+    /// How far each bar jumps away from the screen edge (px), by index.
+    /// Empty when nothing jumps.
+    pub jump: Vec<f32>,
     /// How far the `+` slot is shaken sideways, after an empty clipboard.
     pub add_shake: f32,
     /// Shows "Clipboard is empty" beside the `+` slot.
@@ -1320,7 +1328,9 @@ impl<'a> BarStrip<'a> {
                 let fill_alpha = alpha;
                 let alpha = alpha * progress_alpha(progress);
                 let open = self.open.filter(|(o, _)| *o == i);
-                let rect = bar_rect_for(open.map_or(0.0, |(_, p)| p), *bar_rect, edge);
+                let jump = self.jump.get(i).copied().unwrap_or(0.0);
+                let rect = bar_rect_for(open.map_or(0.0, |(_, p)| p), *bar_rect, edge)
+                    + jump_translation(edge, jump);
                 let corner = CORNER_RADIUS;
                 let pulse = self.pulse.get(i).copied().unwrap_or(0.0);
                 if pulse > 0.0 {
@@ -2055,6 +2065,16 @@ mod tests {
     }
 
     #[test]
+    fn jump_translation_moves_into_the_screen() {
+        assert_eq!(
+            jump_translation(Edge::Right, 5.0),
+            Vector::new(-5.0, 0.0)
+        );
+        assert_eq!(jump_translation(Edge::Left, 5.0), Vector::new(5.0, 0.0));
+        assert_eq!(jump_translation(Edge::Top, 5.0), Vector::new(0.0, 5.0));
+    }
+
+    #[test]
     fn pulse_halo_grows_with_the_pulse() {
         let r = Rectangle::new(Point::new(10.0, 10.0), Size::new(6.0, 40.0));
         assert_eq!(pulse_halo(r, 0.0), r);
@@ -2383,6 +2403,7 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            jump: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2535,6 +2556,7 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            jump: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: true,
@@ -2601,6 +2623,7 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            jump: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2665,6 +2688,7 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            jump: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2723,6 +2747,7 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            jump: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2805,6 +2830,7 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            jump: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2850,6 +2876,7 @@ mod tests {
             collapse: None,
             dimmed: Vec::new(),
             pulse: Vec::new(),
+            jump: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,

@@ -60,8 +60,14 @@ const MODE_FADE_SECS: f32 = 0.12;
 const EXPORTED_FOR: Duration = Duration::from_secs(2);
 /// How often pending reminders are checked.
 const REMINDER_POLL: Duration = Duration::from_secs(30);
-/// One breath of a fired reminder's bar.
+/// One breath of a fired reminder's bar (Pulse alert style).
 const PULSE_SECS: f32 = 1.4;
+/// One hop of a fired reminder's bar (Jump alert style).
+const JUMP_SECS: f32 = 0.7;
+/// How far a jumping bar moves away from the screen edge, in pixels.
+const JUMP_REACH: f32 = 10.0;
+/// How long a jumping bar settles to rest when the cursor enters it.
+const JUMP_SETTLE_SECS: f32 = 0.15;
 /// How long "Clipboard is empty" shows beside `+`.
 const CLIPBOARD_HINT_FOR: Duration = Duration::from_millis(1500);
 /// How long the undo toast stays after a delete.
@@ -148,6 +154,26 @@ fn add_shake(t: f32) -> f32 {
     3.0 * (t * std::f32::consts::TAU * 10.0).sin() * (1.0 - t / SHAKE_SECS)
 }
 
+/// Away-from-edge displacement for a reminder jump at phase `t` seconds.
+fn jump_amount(t: f32) -> f32 {
+    let period = JUMP_SECS;
+    if period <= 0.0 {
+        return 0.0;
+    }
+    let phase = t.rem_euclid(period) / period;
+    JUMP_REACH * (std::f32::consts::PI * phase).sin().max(0.0)
+}
+
+/// Eases a paused jump from `from` down to rest over `JUMP_SETTLE_SECS`.
+fn jump_settle_offset(from: f32, elapsed: f32) -> f32 {
+    if !(0.0..JUMP_SETTLE_SECS).contains(&elapsed) {
+        return 0.0;
+    }
+    let t = (elapsed / JUMP_SETTLE_SECS).clamp(0.0, 1.0);
+    let s = t * t * (3.0 - 2.0 * t);
+    from * (1.0 - s)
+}
+
 /// A task that delivers `message` once `duration` has passed, so a timeout
 /// needs no frames running meanwhile.
 fn delayed(duration: Duration, message: Message) -> Task<Message> {
@@ -194,6 +220,7 @@ pub enum Message {
     SettingChanged(SettingKey, f32),
     SettingToggled(SettingToggle),
     EdgeChosen(Edge),
+    ReminderAlertChosen(crate::settings::ReminderAlertStyle),
     ResetGroup(SettingsGroup),
     SettingsTabSelected(SettingsTab),
     /// Palette slot whose preset grid is open (`None` closes it).
@@ -439,10 +466,12 @@ pub struct App {
     animating: bool,
     last_tick: Option<Instant>,
     /// Notes whose reminder fired and that haven't been opened since; their
-    /// bars pulse.
+    /// bars jump or pulse per the reminder-alert setting.
     pulsing: HashSet<Uuid>,
-    /// Seconds into the pulse, advanced by frames while anything pulses.
+    /// Seconds into the alert animation, advanced by frames while alerting.
     pulse_phase: f32,
+    /// Jump settle on hover: note id, when settle started, offset at pause.
+    jump_settle: Option<(Uuid, Instant, f32)>,
     visible: bool,
     window_id: Option<window::Id>,
     monitor: Option<Size>,
@@ -682,6 +711,7 @@ impl App {
             last_tick: None,
             pulsing: HashSet::new(),
             pulse_phase: 0.0,
+            jump_settle: None,
             visible: true,
             window_id: None,
             monitor: None,
@@ -868,6 +898,12 @@ impl App {
                 return self.apply_settings();
             }
             Message::EdgeChosen(edge) => return self.change_edge(edge),
+            Message::ReminderAlertChosen(style) => {
+                self.settings.settings_mut().motion.reminder_alert = style;
+                self.jump_settle = None;
+                self.animating |= self.pulse_running();
+                return self.apply_settings();
+            }
             Message::SettingToggled(toggle) => {
                 self.settings.settings_mut().toggle(toggle);
                 if toggle == SettingToggle::DockIcon {
@@ -1162,10 +1198,7 @@ impl App {
                     let id = last.deleted.note.id;
                     self.store.restore(last.deleted);
                     if last.pulsing {
-                        if self.pulsing.is_empty() {
-                            self.pulse_phase = 0.0;
-                        }
-                        self.pulsing.insert(id);
+                        self.begin_alert(id);
                         self.animating |= self.pulse_running();
                     }
                     self.store.mark_dirty();
@@ -1222,11 +1255,16 @@ impl App {
                 if export_closed {
                     self.export = None;
                 }
-                // Hidden notes don't pulse; they resume once shown.
+                // Hidden notes don't alert; they resume once shown.
                 let pulse_active = self.pulse_running();
                 if pulse_active {
-                    self.pulse_phase = (self.pulse_phase + dt) % PULSE_SECS;
+                    let period = match self.settings.settings().motion.reminder_alert {
+                        crate::settings::ReminderAlertStyle::Jump => JUMP_SECS,
+                        crate::settings::ReminderAlertStyle::Pulse => PULSE_SECS,
+                    };
+                    self.pulse_phase = (self.pulse_phase + dt) % period;
                 }
+                let settle_active = self.jump_settle_active();
                 let shake_active = self.shake_secs(now).is_some();
                 let auto_hide = self.drive_auto_hide(now, dt);
                 let slide_active = matches!(
@@ -1237,6 +1275,7 @@ impl App {
                     || morph_active
                     || collapse_active
                     || pulse_active
+                    || settle_active
                     || shake_active
                     || slide_active;
                 if !self.animating {
@@ -1743,6 +1782,7 @@ impl App {
             collapse: self.collapse(),
             dimmed: self.dimmed_bars(),
             pulse: self.bar_pulse(),
+            jump: self.bar_jump(),
             add_shake: self.shake_secs(Instant::now()).map_or(0.0, add_shake),
             clipboard_hint: self.clipboard_empty_at.is_some(),
             toast: self.toast_visible(),
@@ -1974,6 +2014,9 @@ impl App {
         };
         let note = &self.store.notes()[index];
         self.pulsing.remove(&id);
+        if self.jump_settle.is_some_and(|(sid, _, _)| sid == id) {
+            self.jump_settle = None;
+        }
         self.editor_content = Some(text_editor::Content::with_text(&note.content));
         self.history.clear();
         self.rendered_click = None;
@@ -2402,10 +2445,7 @@ impl App {
             notify::reminder(&reminder::display(&note.title));
             // The open note is already in view.
             if !(self.active_note == Some(id) && self.morph.is_opening()) {
-                if self.pulsing.is_empty() {
-                    self.pulse_phase = 0.0;
-                }
-                self.pulsing.insert(id);
+                self.begin_alert(id);
                 // A fired reminder is never missed: the strip slides in.
                 self.force_reveal = true;
             }
@@ -2415,7 +2455,20 @@ impl App {
         self.animating |= self.pulse_running();
     }
 
-    /// Some bar pulses and the notes are on screen.
+    /// Starts (or joins) the alert animation for `id`.
+    fn begin_alert(&mut self, id: Uuid) {
+        if self.pulsing.is_empty() {
+            // Jump starts mid-rise so the hop is visible immediately;
+            // Pulse's cosine is already lit at phase 0.
+            self.pulse_phase = match self.settings.settings().motion.reminder_alert {
+                crate::settings::ReminderAlertStyle::Jump => JUMP_SECS * 0.25,
+                crate::settings::ReminderAlertStyle::Pulse => 0.0,
+            };
+        }
+        self.pulsing.insert(id);
+    }
+
+    /// Some bar alerts and the notes are on screen.
     fn pulse_running(&self) -> bool {
         self.visible && !self.pulsing.is_empty()
     }
@@ -2428,10 +2481,14 @@ impl App {
             .any(|note| reminder::pending(note).is_some())
     }
 
-    /// How strongly each bar pulses (0..=1); empty while nothing pulses. A
-    /// stacked note's reminder pulses its stack's bar.
+    /// How strongly each bar pulses (0..=1); empty while nothing pulses or
+    /// when the alert style is Jump. A stacked note's reminder pulses its
+    /// stack's bar.
     fn bar_pulse(&self) -> Vec<f32> {
-        if self.pulsing.is_empty() {
+        use crate::settings::ReminderAlertStyle;
+        if self.pulsing.is_empty()
+            || self.settings.settings().motion.reminder_alert != ReminderAlertStyle::Pulse
+        {
             return Vec::new();
         }
         let wave = 0.5 - 0.5 * (std::f32::consts::TAU * self.pulse_phase / PULSE_SECS).cos();
@@ -2448,6 +2505,42 @@ impl App {
                 } else {
                     0.0
                 }
+            })
+            .collect()
+    }
+
+    /// Away-from-edge jump offset per bar; empty while nothing alerts or when
+    /// the alert style is Pulse. Hover settles that bar to rest.
+    fn bar_jump(&self) -> Vec<f32> {
+        use crate::settings::ReminderAlertStyle;
+        if self.pulsing.is_empty()
+            || self.settings.settings().motion.reminder_alert != ReminderAlertStyle::Jump
+        {
+            return Vec::new();
+        }
+        let amount = jump_amount(self.pulse_phase);
+        let notes = self.store.notes();
+        let hover_id = self.hover_bar.map(|(id, _)| id);
+        self.entries()
+            .iter()
+            .map(|entry| {
+                let ids: Vec<Uuid> = std::iter::once(entry.top)
+                    .chain(entry.members.iter().copied())
+                    .map(|i| notes[i].id)
+                    .collect();
+                let jumps = ids.iter().any(|id| self.pulsing.contains(id));
+                if !jumps {
+                    return 0.0;
+                }
+                if let Some((sid, since, from)) = self.jump_settle {
+                    if ids.contains(&sid) {
+                        return jump_settle_offset(from, since.elapsed().as_secs_f32());
+                    }
+                }
+                if hover_id.is_some_and(|id| ids.contains(&id) && self.pulsing.contains(&id)) {
+                    return 0.0;
+                }
+                amount
             })
             .collect()
     }
@@ -2908,6 +3001,7 @@ impl App {
             return;
         }
         self.hover_bar = hovered.map(|id| (id, Instant::now()));
+        self.sync_jump_settle(hovered);
         match hovered {
             Some(id) if self.peek.is_opening() => {
                 self.peek_note = Some(id);
@@ -2916,6 +3010,31 @@ impl App {
             _ => self.peek.close(),
         }
         self.animating = true;
+    }
+
+    /// Pauses a jumping alert when the cursor enters its bar: settle to rest
+    /// then hold; clearing hover resumes the hop.
+    fn sync_jump_settle(&mut self, hovered: Option<Uuid>) {
+        use crate::settings::ReminderAlertStyle;
+        if self.settings.settings().motion.reminder_alert != ReminderAlertStyle::Jump {
+            self.jump_settle = None;
+            return;
+        }
+        match hovered {
+            Some(id) if self.pulsing.contains(&id) => {
+                let from = jump_amount(self.pulse_phase);
+                self.jump_settle = Some((id, Instant::now(), from));
+            }
+            _ => self.jump_settle = None,
+        }
+    }
+
+    fn jump_settle_active(&self) -> bool {
+        self.jump_settle
+            .as_ref()
+            .is_some_and(|(_, since, from)| {
+                *from != 0.0 && since.elapsed().as_secs_f32() < JUMP_SETTLE_SECS
+            })
     }
 
     fn cursor_on_peek(&self) -> bool {
@@ -2955,6 +3074,7 @@ impl App {
 
     fn hide_peek(&mut self) {
         self.hover_bar = None;
+        self.jump_settle = None;
         self.peek_note = None;
         self.peek = Morph::peek(self.settings.settings().motion.speed);
     }
@@ -5155,9 +5275,9 @@ mod tests {
         assert!(app.pulsing.is_empty());
         let _ = app.update(Message::UndoDelete);
         assert!(app.pulsing.contains(&ids[1]));
-        assert!(app.bar_pulse()[1] > 0.0);
-        assert!(app.animating, "the pulse runs on frames again");
-        // A note that didn't pulse comes back without.
+        assert!(app.bar_jump()[1] > 0.0);
+        assert!(app.animating, "the alert runs on frames again");
+        // A note that didn't alert comes back without.
         delete_docked(&mut app, ids[0]);
         let _ = app.update(Message::UndoDelete);
         assert!(!app.pulsing.contains(&ids[0]));
@@ -5210,6 +5330,18 @@ mod tests {
         assert_eq!(note.size, Some([320.0, 240.0]));
         assert_eq!(note.reminder_set_at, Some(set_at));
         assert_eq!(note.reminder_fired, Some(set_at));
+    }
+
+    #[test]
+    fn jump_amount_hops_and_settles() {
+        assert_eq!(jump_amount(0.0), 0.0);
+        assert!(jump_amount(JUMP_SECS * 0.25) > JUMP_REACH * 0.5);
+        assert_eq!(jump_amount(JUMP_SECS), 0.0);
+        assert_eq!(jump_settle_offset(8.0, 0.0), 8.0);
+        assert_eq!(jump_settle_offset(8.0, JUMP_SETTLE_SECS), 0.0);
+        assert_eq!(jump_settle_offset(8.0, JUMP_SETTLE_SECS + 0.1), 0.0);
+        let mid = jump_settle_offset(8.0, JUMP_SETTLE_SECS * 0.5);
+        assert!(mid > 0.0 && mid < 8.0, "mid {mid}");
     }
 
     #[test]
@@ -6360,10 +6492,11 @@ mod tests {
         assert_eq!(app.store.notes()[1].reminder_fired, Some(due_time()));
         assert_eq!(app.store.notes()[0].reminder_fired, None);
         assert!(app.pulsing.contains(&ids[1]));
-        let pulse = app.bar_pulse();
-        assert_eq!(pulse[0], 0.0);
-        assert!(pulse[1] > 0.0);
-        assert!(app.animating, "the pulse runs on frames");
+        let jump = app.bar_jump();
+        assert_eq!(jump[0], 0.0);
+        assert!(jump[1] > 0.0);
+        assert!(app.bar_pulse().is_empty(), "Jump is the default alert");
+        assert!(app.animating, "the alert runs on frames");
         // Saved at once: a crash right after can't fire it again.
         assert!(!app.store.is_dirty());
         let saved = NoteStore::load(dir.path().join("notes.json"));
@@ -6374,6 +6507,47 @@ mod tests {
         app.pulsing.clear();
         let _ = app.update(Message::ReminderTick);
         assert!(app.pulsing.is_empty());
+    }
+
+    #[test]
+    fn reminder_pulse_style_uses_glow() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[("Plain", ""), (DUE_TITLE, "")]);
+        app.settings.settings_mut().motion.reminder_alert =
+            crate::settings::ReminderAlertStyle::Pulse;
+        let _ = app.update(Message::ReminderTick);
+        assert!(app.pulsing.contains(&ids[1]));
+        let pulse = app.bar_pulse();
+        assert_eq!(pulse[0], 0.0);
+        assert!(pulse[1] > 0.0);
+        assert!(app.bar_jump().is_empty());
+    }
+
+    #[test]
+    fn jump_settles_on_hover_and_resumes_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, ids) = app_with_notes(&dir, &[(DUE_TITLE, "")]);
+        app.settings
+            .settings_mut()
+            .set(crate::settings::SettingKey::PeekDelay, 1.0);
+        let _ = app.update(Message::ReminderTick);
+        assert!(app.bar_jump()[0] > 0.0);
+        let bar = app.strip_layout().bars[0];
+        let _ = app.update(Message::StripHover(Some(bar.center().y)));
+        assert_eq!(app.hover_bar.map(|(id, _)| id), Some(ids[0]));
+        assert!(app.jump_settle.is_some());
+        // Finish the settle instantly.
+        if let Some((id, _, from)) = app.jump_settle {
+            app.jump_settle = Some((
+                id,
+                Instant::now() - Duration::from_secs_f32(JUMP_SETTLE_SECS + 0.01),
+                from,
+            ));
+        }
+        assert_eq!(app.bar_jump()[0], 0.0);
+        let _ = app.update(Message::StripHover(None));
+        assert!(app.jump_settle.is_none());
+        assert!(app.bar_jump()[0] > 0.0, "leaving hover resumes the hop");
     }
 
     #[test]
@@ -6388,6 +6562,7 @@ mod tests {
         let mut app = app_in(&dir);
         let _ = app.update(Message::ReminderTick);
         assert!(app.pulsing.is_empty());
+        assert!(app.bar_jump().is_empty());
         assert!(app.bar_pulse().is_empty());
     }
 
@@ -6397,12 +6572,12 @@ mod tests {
         let (mut app, ids) = app_with_notes(&dir, &[(DUE_TITLE, "")]);
         let _ = app.update(Message::ReminderTick);
         settle(&mut app);
-        assert!(app.animating, "the pulse keeps frames running");
+        assert!(app.animating, "the alert keeps frames running");
         let _ = app.update(Message::BarClicked(0));
         assert!(!app.pulsing.contains(&ids[0]));
         let _ = app.update(Message::ClosePanel);
         settle(&mut app);
-        assert!(!app.animating, "no frames once nothing pulses");
+        assert!(!app.animating, "no frames once nothing alerts");
     }
 
     #[test]
@@ -6466,10 +6641,10 @@ mod tests {
         let (mut app, ids) = app_with_notes(&dir, &[("Top", ""), (DUE_TITLE, ""), ("Other", "")]);
         assert!(app.store.stack(ids[1], ids[0]));
         let _ = app.update(Message::ReminderTick);
-        let pulse = app.bar_pulse();
-        assert_eq!(pulse.len(), 2);
-        assert!(pulse[0] > 0.0);
-        assert_eq!(pulse[1], 0.0);
+        let jump = app.bar_jump();
+        assert_eq!(jump.len(), 2);
+        assert!(jump[0] > 0.0);
+        assert_eq!(jump[1], 0.0);
     }
 
     #[test]
