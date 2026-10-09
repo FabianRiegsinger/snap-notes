@@ -108,7 +108,7 @@ impl Frame {
 }
 
 /// Where `r` starts along `edge` and how long it is along it.
-fn along_span(r: Rectangle, edge: Edge) -> (f32, f32) {
+pub(crate) fn along_span(r: Rectangle, edge: Edge) -> (f32, f32) {
     match edge {
         Edge::Right | Edge::Left => (r.y, r.height),
         Edge::Top => (r.x, r.width),
@@ -116,7 +116,7 @@ fn along_span(r: Rectangle, edge: Edge) -> (f32, f32) {
 }
 
 /// The middle of `r` along `edge`.
-fn along_center(r: Rectangle, edge: Edge) -> f32 {
+pub(crate) fn along_center(r: Rectangle, edge: Edge) -> f32 {
     match edge {
         Edge::Right | Edge::Left => r.center_y(),
         Edge::Top => r.center_x(),

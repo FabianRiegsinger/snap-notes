@@ -1,9 +1,10 @@
 use crate::animation::{ease_out_cubic, morph_frame, MagnificationState, Morph, MorphFrame};
 use crate::autohide::{self, AutoHide};
 use crate::bar_strip::{
-    band, compute_layout, peek_target, stack_target, BarStrip, StripLayout, HIDE_SHIFT, STRIP_WIDTH,
+    along_center, along_span, band, compute_layout, hide_translation, peek_target, stack_target,
+    BarStrip, StripLayout, HIDE_SHIFT, STRIP_WIDTH,
 };
-use crate::edge::Edge;
+use crate::edge::{Edge, LocalRect};
 use crate::export::{self, ExportFormat};
 use crate::export_panel::{export_panel, ExportJob, ExportState, ExportStatus, ExportView};
 use crate::history::History;
@@ -68,19 +69,21 @@ const UNDO_FOR: Duration = Duration::from_secs(5);
 /// How long `+` shakes after an empty clipboard.
 const SHAKE_SECS: f32 = 0.3;
 
-/// Width of the edge zone at the window's right border that reveals a
-/// hidden strip.
+/// Depth of the edge zone at the window's border on the strip's edge that
+/// reveals a hidden strip.
 const EDGE_ZONE: f32 = 2.0;
 
-/// Without passthrough, the docked window's width while the strip is
-/// hidden: just enough to notice the cursor at the screen edge.
+/// Without passthrough, the docked window's thickness away from the edge
+/// while the strip is hidden: just enough to notice the cursor at the
+/// screen edge.
 const EDGE_SLIVER: f32 = 2.0;
 
-/// The strip's band, top and bottom: from the first bar (or the add slot
-/// without bars) less a bar gap, down to the last slot's hit area.
+/// The strip's band along its edge, start and end: from the first bar (or
+/// the add slot without bars) less a bar gap, to the last slot's hit area.
 fn strip_band(strip: &StripLayout, gap: f32) -> (f32, f32) {
-    let top = strip.bars.first().map_or(strip.add_hit_area.y, |b| b.y) - gap;
-    (top, strip.hit_bottom())
+    let first = strip.bars.first().unwrap_or(&strip.add_hit_area);
+    let start = along_span(*first, strip.edge).0 - gap;
+    (start, strip.hit_bottom())
 }
 
 /// Where a cursor that didn't move is, relative to a right-docked window
@@ -89,6 +92,43 @@ fn shifted_pointer(pointer: Option<Point>, old_width: f32, new_width: f32) -> Op
     pointer
         .map(|p| Point::new(p.x + new_width - old_width, p.y))
         .filter(|p| (0.0..=new_width).contains(&p.x))
+}
+
+/// Where a cursor that didn't move is, relative to a window docked to
+/// `edge` whose thickness changed from `old` to `new`: the side on the
+/// screen edge stays put. `None` once it is outside.
+fn pointer_after_resize(pointer: Option<Point>, edge: Edge, old: f32, new: f32) -> Option<Point> {
+    match edge {
+        Edge::Right => shifted_pointer(pointer, old, new),
+        Edge::Left => pointer.filter(|p| (0.0..=new).contains(&p.x)),
+        Edge::Top => pointer.filter(|p| (0.0..=new).contains(&p.y)),
+    }
+}
+
+/// The window docked to `edge` on `monitor`. With `passthrough` it covers
+/// the monitor, below the `top_inset` (the menu bar) on Top. Without, it is
+/// `thickness` away from the edge and the `fraction` of the edge long,
+/// flush to the edge and centred along it.
+fn dock_frame(
+    edge: Edge,
+    monitor: Size,
+    top_inset: f32,
+    passthrough: bool,
+    thickness: f32,
+    fraction: f32,
+) -> Rectangle {
+    let size = match (passthrough, edge) {
+        (true, Edge::Top) => Size::new(monitor.width, monitor.height - top_inset),
+        (true, _) => monitor,
+        (false, _) => edge.size((edge.edge_length(monitor) * fraction).round(), thickness),
+    };
+    let origin = edge.dock_origin(size, monitor, top_inset);
+    // Whole pixels along the edge, where the window is centred.
+    let origin = match edge {
+        Edge::Right | Edge::Left => Point::new(origin.x, origin.y.round()),
+        Edge::Top => Point::new(origin.x.round(), origin.y),
+    };
+    Rectangle::new(origin, size)
 }
 
 /// The `+` slot's sideways offset `t` seconds after an empty clipboard:
@@ -261,7 +301,9 @@ pub enum Message {
     TrayReady(bool),
     TrayMenu(String),
     Quit,
-    WindowReady(window::Id, Option<Size>),
+    /// The window exists: its monitor's size and how far the usable area
+    /// starts below the monitor's top (the menu bar).
+    WindowReady(window::Id, Option<Size>, f32),
     WindowResized(Size),
     Key(keyboard::Event),
     CursorMoved(Point),
@@ -396,7 +438,12 @@ pub struct App {
     visible: bool,
     window_id: Option<window::Id>,
     monitor: Option<Size>,
+    /// How far the usable area starts below the monitor's top (the macOS
+    /// menu bar); 0 when unknown.
+    top_inset: f32,
     window_size: Size,
+    /// Where `dock_window` last placed the window.
+    window_origin: Option<Point>,
     /// Clicks fall through the window to the apps behind it.
     passthrough: bool,
     mouse_down: bool,
@@ -563,7 +610,10 @@ impl App {
             Self::new(store, settings),
             Task::batch([
                 window::oldest().then(|id| match id {
-                    Some(id) => window::monitor_size(id).map(move |m| Message::WindowReady(id, m)),
+                    Some(id) => window::monitor_size(id).then(move |m| {
+                        window::run(id, platform::top_inset)
+                            .map(move |inset| Message::WindowReady(id, m, inset))
+                    }),
                     None => Task::none(),
                 }),
                 iced::system::theme().map(|m| Message::ThemeChanged(m.into())),
@@ -582,7 +632,10 @@ impl App {
         let search_morph = Morph::new(s.motion.speed);
         let export_morph = Morph::new(s.motion.speed);
         let mode_fade = Self::settled_fade(s.motion.speed);
-        let window_size = Size::new(Self::docked_width(s, SUPPORTS_PASSTHROUGH, false), 600.0);
+        let window_size = s
+            .window
+            .edge
+            .size(600.0, Self::docked_width(s, SUPPORTS_PASSTHROUGH, false));
         let data_dir = store.dir().to_path_buf();
         let strip_entries = strip_model::entries(store.notes());
         let strip_progress = strip_model::progress(store.notes(), &strip_entries);
@@ -624,7 +677,9 @@ impl App {
             visible: true,
             window_id: None,
             monitor: None,
+            top_inset: 0.0,
             window_size,
+            window_origin: None,
             passthrough: false,
             mouse_down: false,
             last_cursor: None,
@@ -669,6 +724,15 @@ impl App {
             pointer: None,
             file_hover: false,
         }
+    }
+
+    /// The screen edge saved in the settings, for the window's first
+    /// placement before the app boots.
+    pub fn saved_edge() -> Edge {
+        SettingsStore::load(data_dir().join("settings.json"))
+            .settings()
+            .window
+            .edge
     }
 
     pub fn theme_mode(&self) -> theme::Mode {
@@ -728,7 +792,7 @@ impl App {
                 // Still folding away: unfold again from where it is.
                 if !self.settings_open {
                     let gear = self.strip_layout().settings_anchor();
-                    self.settings_anchor_y = gear.y + gear.height / 2.0;
+                    self.settings_anchor_y = along_center(gear, self.edge());
                     self.settings_open = true;
                     self.settings_tab = SettingsTab::default();
                     self.palette_slot = None;
@@ -795,10 +859,7 @@ impl App {
                 self.settings.settings_mut().set(key, value);
                 return self.apply_settings();
             }
-            Message::EdgeChosen(edge) => {
-                self.settings.settings_mut().window.edge = edge;
-                return self.apply_settings();
-            }
+            Message::EdgeChosen(edge) => return self.change_edge(edge),
             Message::SettingToggled(toggle) => {
                 self.settings.settings_mut().toggle(toggle);
                 if toggle == SettingToggle::DockIcon {
@@ -1320,7 +1381,7 @@ impl App {
                                 &self.strip_layout().bars,
                                 drag.bar_index,
                                 drag.current_y,
-                                Edge::Right,
+                                self.edge(),
                             )
                         })
                         .flatten();
@@ -1476,9 +1537,10 @@ impl App {
                 let _ = self.settings.save();
                 std::process::exit(0);
             }
-            Message::WindowReady(id, monitor) => {
+            Message::WindowReady(id, monitor, top_inset) => {
                 self.window_id = Some(id);
                 self.monitor = monitor;
+                self.top_inset = top_inset;
                 let shadow = window::run(id, platform::disable_native_shadow).discard();
                 let dock = self.dock_window();
                 let show_icon = self.settings.settings().app.show_menu_bar_icon;
@@ -1585,7 +1647,7 @@ impl App {
                     resize.rect = resized(resize.start, resize.edges, position - resize.grab, room);
                 }
                 // Leaving the open peek (not toward the strip) closes it.
-                let in_strip = position.x >= self.window_size.width - STRIP_WIDTH;
+                let in_strip = self.near_edge(position, STRIP_WIDTH);
                 if self.cursor_y.is_some() && !in_strip && !self.cursor_on_peek() {
                     self.cursor_y = None;
                     self.animating = true;
@@ -1675,11 +1737,14 @@ impl App {
             panel_open: self.panel_open(),
             actions_expanded: self.actions_open,
             x_offset: self.strip_x_offset(),
-            edge: Edge::Right,
+            edge: self.edge(),
         })
         .width(Fill)
-        .height(Fill)
-        .align_x(iced::Alignment::End);
+        .height(Fill);
+        let strip = match self.edge() {
+            Edge::Right => strip.align_x(iced::Alignment::End),
+            Edge::Left | Edge::Top => strip,
+        };
 
         let mut layers: Vec<Element<'_, Message>> = Vec::new();
 
@@ -1916,7 +1981,7 @@ impl App {
             .note_entry(index)
             .and_then(|entry| self.strip_layout().bars.get(entry).copied())
         {
-            self.anchor_y = bar.y + bar.height / 2.0;
+            self.anchor_y = along_center(bar, self.edge());
         }
         if switching {
             self.morph.restart();
@@ -2443,7 +2508,8 @@ impl App {
         fade
     }
 
-    /// Window width: room for an open note when `wide` (see
+    /// Window thickness away from the edge (the width on Right and Left,
+    /// the height on Top): room for an open note when `wide` (see
     /// `needs_wide_window`), else the edge sliver when `sliver`, else just
     /// the strip. With passthrough the window is always wide, so opening and
     /// closing never resize it (a resize is a separate move + resize and
@@ -2467,10 +2533,10 @@ impl App {
 
     /// The window is currently the edge sliver.
     fn is_sliver(&self) -> bool {
-        self.window_size.width <= EDGE_SLIVER
+        self.edge().thickness(self.window_size) <= EDGE_SLIVER
     }
 
-    /// Whether the window needs room left of the strip: always with
+    /// Whether the window needs room on the strip's away side: always with
     /// `passthrough`, otherwise for an open note or panel, or a chip that
     /// stays up on its own, such as the undo toast (hover chips don't
     /// widen it).
@@ -2484,7 +2550,8 @@ impl App {
             || self.last_deleted.is_some()
     }
 
-    /// The docked window's width, with or without `passthrough`.
+    /// The docked window's thickness away from the edge (see
+    /// `docked_width`), with or without `passthrough`.
     fn window_width(&self, passthrough: bool) -> f32 {
         Self::docked_width(
             self.settings.settings(),
@@ -2493,39 +2560,44 @@ impl App {
         )
     }
 
-    /// Docks the window to the right screen edge, vertically centered. The
-    /// strip is centered inside, so it sits at the middle of the right screen
+    /// Docks the window to the chosen screen edge, centred along it. The
+    /// strip is centred inside, so it sits at the middle of that screen
     /// border. Does nothing if the window is already there.
     fn dock_window(&mut self) -> Task<Message> {
         let (Some(id), Some(monitor)) = (self.window_id, self.monitor) else {
             return Task::none();
         };
         // With passthrough the window covers the whole screen, so an open note
-        // can be dragged anywhere and the strip sits at the exact vertical
-        // center of the right edge.
-        let size = if SUPPORTS_PASSTHROUGH {
-            monitor
-        } else {
-            Size::new(
-                self.window_width(SUPPORTS_PASSTHROUGH),
-                (monitor.height * self.settings.settings().window.height_fraction).round(),
-            )
-        };
-        if size == self.window_size {
+        // can be dragged anywhere and the strip sits at the exact center of
+        // its edge.
+        let edge = self.edge();
+        let frame = dock_frame(
+            edge,
+            monitor,
+            self.top_inset,
+            SUPPORTS_PASSTHROUGH,
+            self.window_width(SUPPORTS_PASSTHROUGH),
+            self.settings.settings().window.height_fraction,
+        );
+        let (origin, size) = (frame.position(), frame.size());
+        if size == self.window_size && self.window_origin == Some(origin) {
             return Task::none();
         }
-        // The right edge stays put, so a cursor that doesn't move keeps its
-        // screen spot; e.g. on the strip after the sliver widens to reveal.
-        // A shrink can leave it outside, without a `CursorLeft`.
+        // The side on the screen edge stays put, so a cursor that doesn't
+        // move keeps its screen spot; e.g. on the strip after the sliver
+        // widens to reveal. A shrink can leave it outside, without a
+        // `CursorLeft`.
         if !SUPPORTS_PASSTHROUGH {
-            self.pointer = shifted_pointer(self.pointer, self.window_size.width, size.width);
+            self.pointer = pointer_after_resize(
+                self.pointer,
+                edge,
+                edge.thickness(self.window_size),
+                edge.thickness(size),
+            );
         }
-        let y = ((monitor.height - size.height) / 2.0).round();
         self.window_size = size;
-        Task::batch([
-            window::move_to(id, Point::new(monitor.width - size.width, y)),
-            window::resize(id, size),
-        ])
+        self.window_origin = Some(origin);
+        Task::batch([window::move_to(id, origin), window::resize(id, size)])
     }
 
     /// Whether the window should catch the mouse at `position`: over the bar
@@ -2558,27 +2630,54 @@ impl App {
             || over_panel(self.export_frame())
     }
 
-    /// Whether `y` is within the strip's band.
-    fn in_band(&self, y: f32) -> bool {
-        let (top, bottom) = strip_band(&self.strip_layout(), self.settings.settings().bars.gap);
-        (top..=bottom).contains(&y)
+    /// The screen edge the strip docks to.
+    fn edge(&self) -> Edge {
+        self.settings.settings().window.edge
     }
 
-    /// Whether `position` is over the strip's column within its band.
+    /// `position`'s coordinate along the edge.
+    fn along(&self, position: Point) -> f32 {
+        self.edge().to_local(position, self.window_size).along
+    }
+
+    /// Whether `position` is at most `depth` from the window's border on
+    /// the strip's edge (or beyond it).
+    fn near_edge(&self, position: Point, depth: f32) -> bool {
+        match self.edge() {
+            Edge::Right => position.x >= self.window_size.width - depth,
+            Edge::Left => position.x <= depth,
+            Edge::Top => position.y <= depth,
+        }
+    }
+
+    /// Whether `along` (a coordinate along the edge) is within the strip's
+    /// band.
+    fn in_band(&self, along: f32) -> bool {
+        let (start, end) = strip_band(&self.strip_layout(), self.settings.settings().bars.gap);
+        (start..=end).contains(&along)
+    }
+
+    /// Whether `position` is over the strip's column (its row on Top)
+    /// within its band.
     fn over_strip(&self, position: Point) -> bool {
-        position.x >= self.window_size.width - STRIP_WIDTH && self.in_band(position.y)
+        self.near_edge(position, STRIP_WIDTH) && self.in_band(self.along(position))
     }
 
-    /// Whether `position` is in the edge zone: the window's rightmost
-    /// `EDGE_ZONE` px within the strip's band.
+    /// Whether `position` is in the edge zone: the window's outermost
+    /// `EDGE_ZONE` px on the strip's edge, within the strip's band.
     ///
     /// In the edge sliver that is anywhere inside the window, within the band.
     fn in_edge(&self, position: Point) -> bool {
         if self.is_sliver() {
-            return (0.0..=self.window_size.width).contains(&position.x)
-                && self.in_band(position.y);
+            let edge = self.edge();
+            let across = match edge {
+                Edge::Right | Edge::Left => position.x,
+                Edge::Top => position.y,
+            };
+            return (0.0..=edge.thickness(self.window_size)).contains(&across)
+                && self.in_band(self.along(position));
         }
-        position.x >= self.window_size.width - EDGE_ZONE && self.over_strip(position)
+        self.near_edge(position, EDGE_ZONE) && self.over_strip(position)
     }
 
     /// Whether `position` is where the strip is in use: its column within
@@ -2652,9 +2751,15 @@ impl App {
         Task::batch(tasks)
     }
 
-    /// How far right the strip is drawn while auto-hide slides it away.
+    /// How far toward its screen edge the strip is drawn while auto-hide
+    /// slides it away (an away offset; see `hide_translation`).
     fn strip_x_offset(&self) -> f32 {
         self.auto_hide.offset() * HIDE_SHIFT
+    }
+
+    /// Where the strip's `rect` is drawn while auto-hide slides it away.
+    fn slid(&self, rect: Rectangle) -> Rectangle {
+        rect + hide_translation(self.edge(), self.strip_x_offset())
     }
 
     /// Search, settings or export is open.
@@ -2776,7 +2881,10 @@ impl App {
                 strip
                     .bars
                     .iter()
-                    .position(|bar| (bar.y..=bar.y + bar.height).contains(&y))
+                    .position(|bar| {
+                        let (start, length) = along_span(*bar, strip.edge);
+                        (start..=start + length).contains(&y)
+                    })
                     .filter(|i| !self.is_collapsing(*i))
                     .and_then(|i| self.entry_note(i))
                     .map(|i| self.store.notes()[i].id)
@@ -2812,25 +2920,23 @@ impl App {
         let id = self.peek_note?;
         let entry = self.id_entry(id)?;
         let bar = *self.strip_layout().bars.get(entry)?;
-        let strip = Rectangle::new(
-            Point::new(self.window_size.width - STRIP_WIDTH, 0.0),
-            Size::new(STRIP_WIDTH, self.window_size.height),
-        );
+        let strip = self.strip_bounds();
         let entries = self.entries();
         let entry = entries.get(entry)?;
         let notes = self.store.notes();
+        let edge = self.edge();
         let width = note_peek_width(
             &notes[entry.top],
             self.settings.settings().notes.size,
             bar,
-            Edge::Right,
+            edge,
         );
         Some(peek_target(
             bar,
             strip,
             &entry_peek_text(notes, entry, width),
             width,
-            Edge::Right,
+            edge,
         ))
     }
 
@@ -2867,23 +2973,42 @@ impl App {
     }
 
     /// A panel's frame on its way from the strip slot `source` to its place
-    /// left of the strip, centered on `anchor_y` where it fits.
+    /// on the strip's away side, centered on `anchor_y` (a coordinate along
+    /// the edge) where it fits.
     fn panel_frame(&self, source: Rectangle, anchor_y: f32, morph: &Morph) -> MorphFrame {
-        let height = (self.window_size.height - 2.0 * NOTE_MARGIN).min(PANEL_MAX_HEIGHT);
-        let right = self.window_size.width - STRIP_WIDTH - NOTE_GAP;
-        let min_center = NOTE_MARGIN + height / 2.0;
-        let max_center = self.window_size.height - NOTE_MARGIN - height / 2.0;
-        let center_y = if max_center > min_center {
-            anchor_y.clamp(min_center, max_center)
-        } else {
-            self.window_size.height / 2.0
+        let room = match self.edge() {
+            Edge::Right | Edge::Left => self.window_size.height - 2.0 * NOTE_MARGIN,
+            // Below the strip, its height is what is left under it.
+            Edge::Top => self.window_size.height - STRIP_WIDTH - NOTE_GAP - NOTE_MARGIN,
         };
-        let target = Rectangle::new(
-            Point::new(right - PANEL_WIDTH, center_y - height / 2.0),
-            Size::new(PANEL_WIDTH, height),
-        );
-        let source = source + Vector::new(self.strip_x_offset(), 0.0);
-        morph_frame(source, target, morph.progress())
+        let height = room.min(PANEL_MAX_HEIGHT);
+        let target = self.beside_strip(Size::new(PANEL_WIDTH, height), anchor_y);
+        morph_frame(self.slid(source), target, morph.progress())
+    }
+
+    /// A box of `size` on the strip's away side, `NOTE_GAP` from the strip,
+    /// centered along the edge on `anchor` where it fits within the
+    /// margins, else in the middle.
+    fn beside_strip(&self, size: Size, anchor: f32) -> Rectangle {
+        let edge = self.edge();
+        let length = edge.edge_length(size);
+        let extent = edge.edge_length(self.window_size);
+        let min_center = NOTE_MARGIN + length / 2.0;
+        let max_center = extent - NOTE_MARGIN - length / 2.0;
+        let center = if max_center > min_center {
+            anchor.clamp(min_center, max_center)
+        } else {
+            extent / 2.0
+        };
+        edge.rect_to_window(
+            LocalRect {
+                along: center - length / 2.0,
+                away: STRIP_WIDTH + NOTE_GAP,
+                length,
+                thickness: edge.thickness(size),
+            },
+            self.window_size,
+        )
     }
 
     /// Opens the search panel, or closes it while it is showing. It closes
@@ -2901,7 +3026,7 @@ impl App {
         // Still folding away: unfold again from where it is, query kept.
         if !self.search_open {
             let slot = self.strip_layout().search_anchor();
-            self.search_anchor_y = slot.y + slot.height / 2.0;
+            self.search_anchor_y = along_center(slot, self.edge());
             self.search_open = true;
             self.search_query.clear();
         }
@@ -2932,7 +3057,7 @@ impl App {
             Some(state) => state.status = None,
             None => {
                 let gear = self.strip_layout().settings_anchor();
-                self.export_anchor_y = gear.y + gear.height / 2.0;
+                self.export_anchor_y = along_center(gear, self.edge());
                 self.export_generation += 1;
                 self.export = Some(ExportState::new(self.store.notes(), self.export_generation));
             }
@@ -3158,8 +3283,7 @@ impl App {
         let id = self.active_note?;
         let entry = self.id_entry(id)?;
         // A note folding while the strip is away heads for its hidden bar.
-        let source =
-            *self.strip_layout().bars.get(entry)? + Vector::new(self.strip_x_offset(), 0.0);
+        let source = self.slid(*self.strip_layout().bars.get(entry)?);
         Some(morph_frame(
             source,
             self.note_target_rect(),
@@ -3167,30 +3291,39 @@ impl App {
         ))
     }
 
-    /// Where the strip widget sits in the window.
+    /// Where the strip widget sits in the window: `STRIP_WIDTH` thick along
+    /// the whole window border on its edge.
     fn strip_bounds(&self) -> Rectangle {
-        Rectangle::new(
-            Point::new(self.window_size.width - STRIP_WIDTH, 0.0),
-            Size::new(STRIP_WIDTH, self.window_size.height),
+        let edge = self.edge();
+        edge.rect_to_window(
+            LocalRect {
+                along: 0.0,
+                away: 0.0,
+                length: edge.edge_length(self.window_size),
+                thickness: STRIP_WIDTH,
+            },
+            self.window_size,
         )
     }
 
     fn strip_layout(&self) -> StripLayout {
         let bounds = self.strip_bounds();
+        let edge = self.edge();
         compute_layout(
             self.entries().len(),
             |i| self.magnification.scale(i),
-            band(bounds, self.strip_fraction(), Edge::Right),
+            band(bounds, self.strip_fraction(), edge),
             self.scroll_offset,
             &self.settings.settings().bars,
             self.actions_open,
             self.collapse(),
-            Edge::Right,
+            edge,
         )
     }
 
-    /// Share of the window height the strip uses. Without passthrough the
-    /// window itself is already sized to the configured fraction.
+    /// Share of the window's length along the edge the strip uses. Without
+    /// passthrough the window itself is already sized to the configured
+    /// fraction.
     fn strip_fraction(&self) -> f32 {
         if SUPPORTS_PASSTHROUGH {
             self.settings.settings().window.height_fraction
@@ -3247,6 +3380,39 @@ impl App {
         ])
     }
 
+    /// Docks the strip to `edge` right away (E10): the peek, the hover and
+    /// any chip close, a drag is cancelled, an open note or panel stays and
+    /// re-anchors on its bar or slot, and the window re-docks.
+    fn change_edge(&mut self, edge: Edge) -> Task<Message> {
+        if edge == self.edge() {
+            return Task::none();
+        }
+        self.settings.settings_mut().window.edge = edge;
+        self.hide_peek();
+        self.cursor_y = None;
+        self.drag = None;
+        self.clipboard_empty_at = None;
+        self.actions_open = false;
+        let (old_origin, pointer, last_cursor) =
+            (self.window_origin, self.pointer, self.last_cursor);
+        let dock = self.apply_settings();
+        // Positions seen before are in the old window's frame: the cursor
+        // keeps its screen spot.
+        let shift = old_origin
+            .zip(self.window_origin)
+            .map(|(old, new)| old - new);
+        let moved = |p: Option<Point>| shift.and_then(|shift| Some(p? + shift));
+        self.pointer = moved(pointer);
+        self.last_cursor = moved(last_cursor);
+        // Re-anchor in the docked window.
+        self.follow_open_bar();
+        let strip = self.strip_layout();
+        self.settings_anchor_y = along_center(strip.settings_anchor(), edge);
+        self.search_anchor_y = along_center(strip.search_anchor(), edge);
+        self.export_anchor_y = along_center(strip.settings_anchor(), edge);
+        Task::batch([dock, self.update_passthrough(self.pointer)])
+    }
+
     /// Applies changed settings to running state: animation speeds, scroll
     /// bounds and the docked window size.
     fn apply_settings(&mut self) -> Task<Message> {
@@ -3293,33 +3459,29 @@ impl App {
             );
         }
 
-        let right = self.window_size.width - STRIP_WIDTH - NOTE_GAP;
-
-        let min_center = NOTE_MARGIN + height / 2.0;
-        let max_center = self.window_size.height - NOTE_MARGIN - height / 2.0;
-        let center_y = if max_center > min_center {
-            self.anchor_y.clamp(min_center, max_center)
-        } else {
-            self.window_size.height / 2.0
+        // Below a Top strip, the note keeps to the room left under it.
+        let height = match self.edge() {
+            Edge::Right | Edge::Left => height,
+            Edge::Top => height.min(
+                (self.window_size.height - STRIP_WIDTH - NOTE_GAP - NOTE_MARGIN)
+                    .max(MIN_SIZE.height),
+            ),
         };
-
-        Rectangle::new(
-            Point::new(right - width, center_y - height / 2.0),
-            Size::new(width, height),
-        )
+        self.beside_strip(Size::new(width, height), self.anchor_y)
     }
 
     /// Bar centers plus the Actions slot(s), which magnify along with them.
     fn magnification_centers(&self) -> Vec<f32> {
         let strip = self.strip_layout();
-        let mut centers: Vec<f32> = strip.bars.iter().map(|r| r.y + r.height / 2.0).collect();
+        let edge = strip.edge;
+        let mut centers: Vec<f32> = strip.bars.iter().map(|r| along_center(*r, edge)).collect();
         if strip.actions_expanded {
             centers.extend(
                 [strip.add_button, strip.search_button, strip.settings_button]
-                    .map(|r| r.y + r.height / 2.0),
+                    .map(|r| along_center(r, edge)),
             );
         } else {
-            centers.push(strip.actions_button.y + strip.actions_button.height / 2.0);
+            centers.push(along_center(strip.actions_button, edge));
         }
         centers
     }
@@ -3383,7 +3545,7 @@ impl App {
             .and_then(|id| self.id_entry(id))
             .and_then(|entry| self.strip_layout().bars.get(entry).copied())
         {
-            self.anchor_y = bar.y + bar.height / 2.0;
+            self.anchor_y = along_center(bar, self.edge());
         }
     }
 
@@ -3422,10 +3584,11 @@ impl App {
     }
 
     fn bar_centers(&self) -> Vec<f32> {
-        self.strip_layout()
+        let strip = self.strip_layout();
+        strip
             .bars
             .iter()
-            .map(|bar| bar.y + bar.height / 2.0)
+            .map(|bar| along_center(*bar, strip.edge))
             .collect()
     }
 }
@@ -6902,5 +7065,273 @@ mod tests {
             p(STRIP_WIDTH - 1.0)
         );
         assert_eq!(shifted_pointer(None, EDGE_SLIVER, STRIP_WIDTH), None);
+    }
+
+    /// `app` docked to `edge`.
+    fn on_edge(mut app: App, edge: Edge) -> App {
+        app.settings.settings_mut().window.edge = edge;
+        app
+    }
+
+    /// The middle of the strip's band, along the edge.
+    fn band_middle(app: &App) -> f32 {
+        let (start, end) = strip_band(&app.strip_layout(), app.settings.settings().bars.gap);
+        (start + end) / 2.0
+    }
+
+    #[test]
+    fn dock_window_follows_edge() {
+        let monitor = Size::new(1440.0, 900.0);
+        let s = Settings::default();
+        let open = s.open_width();
+        let strip = App::docked_width(&s, false, false);
+        let wide = App::docked_width(&s, true, false);
+        assert_eq!((strip, wide), (STRIP_WIDTH, open));
+        let rect = |x, y, w, h| Rectangle::new(Point::new(x, y), Size::new(w, h));
+
+        // Without passthrough: the thickness away from the edge, the strip
+        // length along it, flush to the edge and centred along it.
+        let frame = |edge, thickness| dock_frame(edge, monitor, 25.0, false, thickness, 0.9);
+        assert_eq!(
+            frame(Edge::Right, strip),
+            rect(1440.0 - STRIP_WIDTH, 45.0, STRIP_WIDTH, 810.0)
+        );
+        assert_eq!(
+            frame(Edge::Right, wide),
+            rect(1440.0 - open, 45.0, open, 810.0)
+        );
+        assert_eq!(
+            frame(Edge::Left, strip),
+            rect(0.0, 45.0, STRIP_WIDTH, 810.0)
+        );
+        assert_eq!(frame(Edge::Left, wide), rect(0.0, 45.0, open, 810.0));
+        // Top: as tall as the thickness, below the menu bar.
+        assert_eq!(
+            frame(Edge::Top, strip),
+            rect(72.0, 25.0, 1296.0, STRIP_WIDTH)
+        );
+        assert_eq!(frame(Edge::Top, wide), rect(72.0, 25.0, 1296.0, open));
+
+        // With passthrough the window covers the monitor (below the menu
+        // bar on Top), whatever the thickness.
+        let covering = |edge| dock_frame(edge, monitor, 25.0, true, strip, 0.9);
+        assert_eq!(covering(Edge::Right), rect(0.0, 0.0, 1440.0, 900.0));
+        assert_eq!(covering(Edge::Left), rect(0.0, 0.0, 1440.0, 900.0));
+        assert_eq!(covering(Edge::Top), rect(0.0, 25.0, 1440.0, 875.0));
+    }
+
+    #[test]
+    fn strip_band_and_edge_zone_per_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = auto_hide_app(&dir);
+        app.settings.settings_mut().window.auto_hide = false;
+        let app = on_edge(app, Edge::Left);
+        assert_eq!(
+            app.strip_bounds(),
+            Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, 900.0))
+        );
+        let mid = band_middle(&app);
+        assert!(app.in_edge(Point::new(1.0, mid)));
+        assert!(!app.in_edge(Point::new(1399.0, mid)));
+        assert!(!app.in_edge(Point::new(3.0, mid)));
+        assert!(app.over_strip(Point::new(STRIP_WIDTH - 1.0, mid)));
+        assert!(!app.over_strip(Point::new(1399.0, mid)));
+        assert!(!app.in_edge(Point::new(1.0, 898.0)), "outside the band");
+
+        let app = on_edge(app, Edge::Top);
+        assert_eq!(
+            app.strip_bounds(),
+            Rectangle::new(Point::ORIGIN, Size::new(1400.0, STRIP_WIDTH))
+        );
+        let mid = band_middle(&app);
+        assert!(app.in_edge(Point::new(mid, 1.0)));
+        assert!(!app.in_edge(Point::new(mid, 899.0)));
+        assert!(!app.in_edge(Point::new(1399.0, 1.0)), "outside the band");
+        assert!(app.over_strip(Point::new(mid, STRIP_WIDTH - 1.0)));
+        assert!(!app.over_strip(Point::new(mid, STRIP_WIDTH + 1.0)));
+        assert!(app.is_interactive(Point::new(mid, 1.0)));
+    }
+
+    #[test]
+    fn auto_hide_edge_zone_follows_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = on_edge(auto_hide_app(&dir), Edge::Left);
+        hide_strip(&mut app, Instant::now());
+        let shift = crate::bar_strip::hide_translation(Edge::Left, app.strip_x_offset());
+        let strip = app.strip_layout();
+        for rect in strip.bars.iter().chain([&strip.actions_button]) {
+            let drawn = *rect + shift;
+            assert!(drawn.x + drawn.width < 0.0, "{drawn:?} still shows");
+        }
+
+        let mid = band_middle(&app);
+        let right = Point::new(1399.0, mid);
+        assert!(!app.is_interactive(right));
+        let _ = app.update(Message::CursorMoved(right));
+        assert_eq!(app.auto_hide.next_deadline(), None, "right edge dwells");
+
+        let left = Point::new(1.0, mid);
+        assert!(app.is_interactive(left));
+        let entered = Instant::now();
+        let _ = app.update(Message::CursorMoved(left));
+        assert!(app.auto_hide.next_deadline().is_some(), "no dwell started");
+        let _ = app.update(Message::Tick(
+            entered + REVEAL_DWELL + Duration::from_millis(5),
+        ));
+        assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
+    }
+
+    #[test]
+    fn linux_sliver_axis_per_edge() {
+        let monitor = Size::new(1440.0, 900.0);
+        let sliver = App::docked_width(&Settings::default(), false, true);
+        assert_eq!(sliver, EDGE_SLIVER);
+        let top = dock_frame(Edge::Top, monitor, 0.0, false, sliver, 0.9);
+        assert_eq!((top.y, top.width, top.height), (0.0, 1296.0, 2.0));
+        let left = dock_frame(Edge::Left, monitor, 0.0, false, sliver, 0.9);
+        assert_eq!((left.x, left.width, left.height), (0.0, 2.0, 810.0));
+
+        // The Top sliver's edge zone is its 2 px height, within the band.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = on_edge(auto_hide_app(&dir), Edge::Top);
+        hide_strip(&mut app, Instant::now());
+        assert_eq!(app.window_width(false), EDGE_SLIVER);
+        app.window_size = top.size();
+        assert!(app.is_sliver());
+        let mid = band_middle(&app);
+        assert!(app.in_edge(Point::new(mid, 1.0)));
+        assert!(!app.in_edge(Point::new(mid, 3.0)), "below the sliver");
+        assert!(!app.in_edge(Point::new(1.0, 1.0)), "outside the band");
+    }
+
+    #[test]
+    fn note_unfolds_away_from_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, ids) = app_with_notes(&dir, &[("a", "x"), ("b", "y")]);
+        let mut app = on_edge(app, Edge::Top);
+        let bar = app.strip_layout().bars[1];
+        let _ = app.update(Message::BarClicked(1));
+        assert_eq!(app.active_note, Some(ids[1]));
+        let source = app.note_frame().unwrap().rect;
+        assert!((source.x - bar.x).abs() < 0.01 && (source.y - bar.y).abs() < 0.01);
+        assert!((source.width - bar.width).abs() < 0.01);
+        assert!((source.height - bar.height).abs() < 0.01);
+        settle(&mut app);
+        let rect = app.note_frame().unwrap().rect;
+        assert_eq!(rect, app.note_target_rect());
+        assert_eq!(rect.y, STRIP_WIDTH + NOTE_GAP, "below the strip");
+        assert!(
+            (rect.center_x() - bar.center_x()).abs() < 0.01,
+            "centred on its bar"
+        );
+
+        // A note with a saved position keeps it.
+        app.store.note_mut(ids[0]).unwrap().position = Some([300.0, 200.0]);
+        let _ = app.update(Message::BarClicked(0));
+        assert_eq!(app.note_target_rect().position(), Point::new(300.0, 200.0));
+    }
+
+    #[test]
+    fn edge_change_keeps_note_open_and_closes_peek() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_peek(&dir);
+        app.store.add_note(&crate::note::PALETTE);
+        app.sync_entries();
+        let _ = app.update(Message::BarClicked(1));
+        let open = app.active_note.unwrap();
+        // The peek of the first bar shows beside the open note.
+        app.peek_note = Some(app.store.notes()[0].id);
+        app.peek.open();
+        app.drag = Some(DragState {
+            bar_index: 0,
+            origin_y: 10.0,
+            current_y: 40.0,
+        });
+        let monitor = Size::new(1440.0, 900.0);
+        app.window_id = Some(window::Id::unique());
+        app.monitor = Some(monitor);
+        app.top_inset = 25.0;
+
+        let task = app.update(Message::EdgeChosen(Edge::Top));
+        assert!(task.units() > 0, "no re-dock");
+        let expected = dock_frame(
+            Edge::Top,
+            monitor,
+            25.0,
+            SUPPORTS_PASSTHROUGH,
+            app.window_width(SUPPORTS_PASSTHROUGH),
+            app.settings.settings().window.height_fraction,
+        );
+        assert_eq!(app.window_size, expected.size(), "not re-docked");
+        assert_eq!(app.active_note, Some(open));
+        assert!(app.morph.is_opening(), "the note closed");
+        assert!(app.peek.is_closed() && app.peek_note.is_none(), "peek kept");
+        assert!(app.drag.is_none(), "drag kept");
+        let bar = app.strip_layout().bars[app.id_entry(open).unwrap()];
+        assert_eq!(app.anchor_y, bar.center_x(), "the note didn't re-anchor");
+
+        app.settings.save().unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["window"]["edge"], "top");
+    }
+
+    #[test]
+    fn drop_on_top_bar_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = app_with_notes(&dir, &[("a", "first"), ("b", "second")]);
+        let mut app = on_edge(app, Edge::Top);
+        let bars = app.strip_layout().bars;
+        assert!(bars[1].x > bars[0].x + bars[0].width, "bars side by side");
+        let _ = app.update(Message::FileHovered);
+        let _ = app.update(Message::CursorMoved(bars[1].center()));
+        let _ = app.update(Message::ImageDropped(file_in(&dir, "x.txt", b"more")));
+        assert_eq!(app.store.notes()[1].content, "second\n\nmore");
+        assert_eq!(app.store.notes()[0].content, "first");
+        assert_eq!(app.store.notes().len(), 2);
+    }
+
+    #[test]
+    fn panels_open_away_from_edge() {
+        for edge in [Edge::Left, Edge::Top] {
+            let dir = tempfile::tempdir().unwrap();
+            let (app, _) = app_with_notes(&dir, &[("a", "x")]);
+            let mut app = on_edge(app, edge);
+            let strip = app.strip_bounds();
+            let away = |rect: Rectangle| match edge {
+                Edge::Left => rect.x >= strip.x + strip.width + NOTE_GAP,
+                _ => rect.y >= strip.y + strip.height + NOTE_GAP,
+            };
+            let inside = |app: &App, rect: Rectangle| {
+                rect.x >= 0.0
+                    && rect.y >= 0.0
+                    && rect.x + rect.width <= app.window_size.width
+                    && rect.y + rect.height <= app.window_size.height
+            };
+
+            let _ = app.update(Message::ToggleSettings);
+            settle(&mut app);
+            let rect = app.settings_frame().unwrap().rect;
+            assert!(
+                away(rect) && inside(&app, rect),
+                "{edge:?} settings {rect:?}"
+            );
+            let _ = app.update(Message::CloseSettings);
+            settle(&mut app);
+
+            let _ = app.update(Message::ToggleSearch);
+            settle(&mut app);
+            let rect = app.search_frame().unwrap().rect;
+            assert!(away(rect) && inside(&app, rect), "{edge:?} search {rect:?}");
+            app.close_search();
+            settle(&mut app);
+
+            let _ = app.update(Message::ToggleExport);
+            settle(&mut app);
+            let rect = app.export_frame().unwrap().rect;
+            assert!(away(rect) && inside(&app, rect), "{edge:?} export {rect:?}");
+        }
     }
 }

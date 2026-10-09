@@ -183,6 +183,27 @@ fn set_taskbar_button(hwnd: windows_sys::Win32::Foundation::HWND, visible: bool)
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_dock_icon_visible(_window: &dyn iced::window::Window, _visible: bool) {}
 
+/// How far the usable area of the window's screen starts below its top:
+/// the menu bar's height (0 while it hides itself).
+#[cfg(target_os = "macos")]
+pub fn top_inset(window: &dyn iced::window::Window) -> f32 {
+    with_ns_window(window, |ns_window| {
+        ns_window.screen().map_or(0.0, |screen| {
+            let (full, usable) = (screen.frame(), screen.visibleFrame());
+            let full_top = full.origin.y + full.size.height;
+            let usable_top = usable.origin.y + usable.size.height;
+            (full_top - usable_top).max(0.0) as f32
+        })
+    })
+    .unwrap_or(0.0)
+}
+
+/// Not known here: the usable area starts at the screen's top.
+#[cfg(not(target_os = "macos"))]
+pub fn top_inset(_window: &dyn iced::window::Window) -> f32 {
+    0.0
+}
+
 /// Cursor position relative to the window's top-left corner in logical pixels,
 /// read from the OS so it also works while mouse passthrough is on.
 #[cfg(target_os = "macos")]

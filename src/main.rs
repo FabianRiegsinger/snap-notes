@@ -42,6 +42,7 @@ mod toolbar;
 mod tray;
 
 use app::App;
+use edge::Edge;
 use iced::window;
 use iced::{Color, Point, Size, Theme};
 
@@ -54,12 +55,20 @@ fn main() -> iced::Result {
         app = app.font(font);
     }
     let icon = window::icon::from_rgba(brand::icon_rgba(32), 32, 32).expect("brand icon");
+    // Placed on the saved edge from the start; the app re-docks it once the
+    // monitor is known.
+    let edge = App::saved_edge();
+    let docked: fn(Size, Size) -> Point = match edge {
+        Edge::Right => |window, monitor| dock(Edge::Right, window, monitor),
+        Edge::Left => |window, monitor| dock(Edge::Left, window, monitor),
+        Edge::Top => |window, monitor| dock(Edge::Top, window, monitor),
+    };
     app.default_font(icons::BODY_FONT)
         .subscription(App::subscription)
         .title("Snap Notes")
         .window(window::Settings {
-            size: Size::new(settings::Settings::default().open_width(), 600.0),
-            position: window::Position::SpecificWith(dock_right),
+            size: edge.size(600.0, settings::Settings::default().open_width()),
+            position: window::Position::SpecificWith(docked),
             transparent: true,
             decorations: false,
             resizable: false,
@@ -86,9 +95,33 @@ fn style(_app: &App, theme: &Theme) -> iced::theme::Style {
     }
 }
 
-fn dock_right(window: Size, monitor: Size) -> Point {
-    Point::new(
-        monitor.width - window.width,
-        ((monitor.height - window.height) / 2.0).max(0.0),
-    )
+/// Where a `window` docked to `edge` sits on a `monitor`: flush to the edge
+/// and centred along it, but never starting before the monitor.
+fn dock(edge: Edge, window: Size, monitor: Size) -> Point {
+    let origin = edge.dock_origin(window, monitor, 0.0);
+    match edge {
+        Edge::Right | Edge::Left => Point::new(origin.x, origin.y.max(0.0)),
+        Edge::Top => Point::new(origin.x.max(0.0), origin.y),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dock_hugs_each_edge() {
+        let monitor = Size::new(1440.0, 900.0);
+        let window = Size::new(400.0, 600.0);
+        assert_eq!(
+            dock(Edge::Right, window, monitor),
+            Point::new(1040.0, 150.0)
+        );
+        assert_eq!(dock(Edge::Left, window, monitor), Point::new(0.0, 150.0));
+        let wide = Size::new(600.0, 400.0);
+        assert_eq!(dock(Edge::Top, wide, monitor), Point::new(420.0, 0.0));
+        // Taller than the monitor: starts at its top, as before.
+        let tall = Size::new(400.0, 1000.0);
+        assert_eq!(dock(Edge::Right, tall, monitor), Point::new(1040.0, 0.0));
+    }
 }

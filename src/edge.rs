@@ -172,10 +172,25 @@ impl Edge {
         }
     }
 
+    /// The side of `size` that runs away from the edge: the width on Right
+    /// and Left, the height on Top.
+    pub fn thickness(self, size: Size) -> f32 {
+        match self {
+            Edge::Right | Edge::Left => size.width,
+            Edge::Top => size.height,
+        }
+    }
+
+    /// The size that is `length` along the edge and `thickness` away from it.
+    pub fn size(self, length: f32, thickness: f32) -> Size {
+        match self {
+            Edge::Right | Edge::Left => Size::new(thickness, length),
+            Edge::Top => Size::new(length, thickness),
+        }
+    }
+
     /// Where a `window` docks on a `monitor`: flush to the edge and centred
     /// along it. Top sits `top_inset` below the monitor's top.
-    // Used once the window docks to the edge (Task 3).
-    #[allow(dead_code)]
     pub fn dock_origin(self, window: Size, monitor: Size, top_inset: f32) -> Point {
         match self {
             Edge::Right => Point::new(
@@ -364,6 +379,20 @@ mod tests {
         assert_eq!(Edge::Right.edge_length(size), 810.0);
         assert_eq!(Edge::Left.edge_length(size), 810.0);
         assert_eq!(Edge::Top.edge_length(size), 64.0);
+    }
+
+    #[test]
+    fn thickness_and_size_each() {
+        let size = Size::new(64.0, 810.0);
+        assert_eq!(Edge::Right.thickness(size), 64.0);
+        assert_eq!(Edge::Left.thickness(size), 64.0);
+        assert_eq!(Edge::Top.thickness(size), 810.0);
+        for edge in Edge::ALL {
+            let s = edge.size(500.0, 40.0);
+            assert_eq!((edge.edge_length(s), edge.thickness(s)), (500.0, 40.0));
+        }
+        assert_eq!(Edge::Top.size(500.0, 40.0), Size::new(500.0, 40.0));
+        assert_eq!(Edge::Left.size(500.0, 40.0), Size::new(40.0, 500.0));
     }
 
     #[test]
