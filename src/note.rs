@@ -161,12 +161,22 @@ impl Note {
 
 /// What copying a note puts on the clipboard: the title, a blank line and
 /// the body, or just the body when the title is blank.
+/// The title leaves out its reminder tag; a set reminder follows it on its
+/// own line, as in an export.
 pub fn copy_text(note: &Note) -> String {
-    let title = note.title.trim();
-    if title.is_empty() {
+    let mut head = crate::reminder::display(&note.title);
+    if let Some(at) = crate::reminder::at(note) {
+        let line = format!("Reminder: {}", crate::reminder::export_label(at));
+        head = if head.is_empty() {
+            line
+        } else {
+            format!("{head}\n{line}")
+        };
+    }
+    if head.is_empty() {
         note.content.clone()
     } else {
-        format!("{title}\n\n{}", note.content)
+        format!("{head}\n\n{}", note.content)
     }
 }
 

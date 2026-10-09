@@ -275,6 +275,10 @@ pub enum Message {
     ToggleTask(usize),
     LinkClicked(String),
     TitleEdited(String),
+    /// Enter in the title field: its edit is done.
+    TitleCommitted,
+    /// Whether the title field still has the focus, after a click.
+    TitleBlurred(bool),
     NoteHovered(bool),
     NoteDragStart,
     NoteResetPosition,
@@ -464,6 +468,17 @@ fn read_text_file(path: &std::path::Path) -> Option<String> {
     Some(text.trim_end_matches(['\r', '\n']).to_string())
 }
 
+/// The title field while it is being edited: its text shows as typed, tag
+/// and all, until the edit is committed.
+struct TitleEdit {
+    id: Uuid,
+    /// The field's text.
+    draft: String,
+    /// The reminder tag hidden when the edit began, and its anchor.
+    hidden: Option<String>,
+    anchor: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 pub struct App {
     pub(crate) theme: theme::Theme,
     store: NoteStore,
@@ -560,6 +575,8 @@ pub struct App {
     /// Live top-left while dragging settings.
     settings_drag_pos: Option<Point>,
     settings_tab: SettingsTab,
+    /// The title field's edit in progress, if any.
+    title_edit: Option<TitleEdit>,
     /// The strip Actions slot shows New / Search / Settings side by side
     /// (the target; `actions_morph` animates toward it).
     actions_open: bool,
@@ -795,6 +812,7 @@ impl App {
             settings_drag: None,
             settings_drag_pos: None,
             settings_tab: SettingsTab::default(),
+            title_edit: None,
             actions_open: false,
             actions_morph,
             palette_slot: None,
@@ -1079,15 +1097,43 @@ impl App {
                     self.store.mark_dirty();
                 }
             }
-            Message::TitleEdited(title) => {
+            Message::TitleEdited(typed) => {
                 if let Some(id) = self.active_note {
+                    if self.title_edit.as_ref().is_none_or(|e| e.id != id) {
+                        let note = self.store.notes().iter().find(|n| n.id == id);
+                        self.title_edit = Some(TitleEdit {
+                            id,
+                            draft: String::new(),
+                            hidden: note
+                                .and_then(|n| reminder::tag_text(&n.title))
+                                .map(str::to_string),
+                            anchor: note.and_then(|n| n.reminder_set_at),
+                        });
+                    }
+                    let Some(edit) = self.title_edit.as_mut() else {
+                        return Task::none();
+                    };
+                    edit.draft = typed;
+                    // The tag hidden when the edit began stays, unless the
+                    // text has a valid tag of its own, which the header label
+                    // shows right away.
+                    let hidden = edit.hidden.as_deref();
+                    let title = reminder::edit_visible(hidden.unwrap_or(""), &edit.draft);
                     if let Some(note) = self.store.note_mut(id) {
-                        // The field shows the title without its tag.
-                        let title = reminder::edit_visible(&note.title, &title);
                         reminder::retitle(note, title, chrono::Local::now());
+                        // Back to the hidden tag: it counts from when it was set.
+                        if hidden.is_some() && reminder::tag_text(&note.title) == hidden {
+                            note.reminder_set_at = edit.anchor;
+                        }
                         note.updated_at = chrono::Utc::now();
                     }
                     self.store.mark_dirty();
+                }
+            }
+            Message::TitleCommitted => self.commit_title(),
+            Message::TitleBlurred(focused) => {
+                if !focused {
+                    self.commit_title();
                 }
             }
             Message::NoteEdited(
@@ -1146,6 +1192,7 @@ impl App {
                 }
             }
             Message::BodyPressed(offset) => {
+                self.commit_title();
                 if !self.editing && self.editor_content.is_some() {
                     self.restart_mode_fade();
                 }
@@ -1166,6 +1213,7 @@ impl App {
                 }
             }
             Message::BodyClicked(line) => {
+                self.commit_title();
                 if !self.editing && self.editor_content.is_some() {
                     self.restart_mode_fade();
                 }
@@ -1225,6 +1273,7 @@ impl App {
                 }
             }
             Message::ClosePanel => {
+                self.commit_title();
                 if self.active_note.is_some() {
                     self.morph.close();
                     self.animating = true;
@@ -1902,6 +1951,10 @@ impl App {
                 if !down {
                     self.finish_note_resize();
                 }
+                // A click elsewhere ends the title's edit.
+                if down && self.title_edit.is_some() {
+                    return crate::note_panel::title_focused().map(Message::TitleBlurred);
+                }
             }
             Message::WindowUnfocused
                 if self.keep_open_until.is_some_and(|t| Instant::now() < t) => {}
@@ -2000,6 +2053,7 @@ impl App {
                     );
                     let note_view = post_it(PostIt {
                         note,
+                        title_text: self.title_field_text().unwrap_or_default(),
                         theme: self.theme,
                         palette: &self.settings.settings().palette,
                         paper_tint: self.settings.settings().notes.paper_tint,
@@ -2189,6 +2243,7 @@ impl App {
 
         let switching = self.active_note.is_some_and(|active| active != id);
         if switching {
+            self.commit_title();
             // A drag or resize of the old note ends with it.
             if self.note_drag.is_some() {
                 self.finish_note_drag();
@@ -3760,15 +3815,13 @@ impl App {
     /// while Actions is expanded so Search/Settings stay hittable.
     fn strip_bounds(&self) -> Rectangle {
         let edge = self.edge();
-        let thickness = if self.actions_open {
-            crate::bar_strip::actions_row_extent(
-                &self.settings.settings().bars,
-                self.entries().len(),
-                |i| self.magnification.scale(i),
-            )
-        } else {
-            STRIP_WIDTH
-        };
+        let thickness = crate::bar_strip::strip_thickness(
+            &self.settings.settings().bars,
+            self.entries().len(),
+            |i| self.magnification.scale(i),
+            self.actions_open,
+            self.actions_progress(),
+        );
         edge.rect_to_window(
             LocalRect {
                 along: 0.0,
@@ -3778,6 +3831,23 @@ impl App {
             },
             self.window_size,
         )
+    }
+
+    /// Ends the title field's edit: the field shows the title without its
+    /// valid tag again, so a tag typed in becomes the reminder.
+    fn commit_title(&mut self) {
+        self.title_edit = None;
+    }
+
+    /// What the open note's title field shows: the text as typed while it is
+    /// being edited, otherwise the title without its reminder tag.
+    fn title_field_text(&self) -> Option<String> {
+        let id = self.active_note?;
+        if let Some(edit) = self.title_edit.as_ref().filter(|e| e.id == id) {
+            return Some(edit.draft.clone());
+        }
+        let note = self.store.notes().iter().find(|n| n.id == id)?;
+        Some(crate::note_panel::title_field_text(note))
     }
 
     /// Expands or collapses the Actions row, animated from where it is.
@@ -7212,9 +7282,11 @@ mod tests {
 
     /// The open note's title as its title field shows it.
     fn title_field(app: &App) -> String {
-        let id = app.active_note.unwrap();
-        let note = app.store.notes().iter().find(|n| n.id == id).unwrap();
-        crate::note_panel::title_field_text(note)
+        app.title_field_text().unwrap()
+    }
+
+    fn tag(app: &App) -> Option<String> {
+        reminder::tag_text(&app.store.notes()[0].title).map(str::to_string)
     }
 
     #[test]
@@ -7222,6 +7294,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_open_note(&dir);
         let _ = app.update(Message::TitleEdited("Call @2026-10-15 16:30".into()));
+        let _ = app.update(Message::TitleCommitted);
         assert_eq!(title_field(&app), "Call");
         let set = app.store.notes()[0].reminder_set_at;
         assert!(set.is_some());
@@ -7233,6 +7306,8 @@ mod tests {
                 "the field changed under the cursor"
             );
         }
+        let _ = app.update(Message::TitleCommitted);
+        assert_eq!(title_field(&app), "Call Bob");
         let note = &app.store.notes()[0];
         assert_eq!(reminder::tag_text(&note.title), Some("@2026-10-15 16:30"));
         assert_eq!(note.reminder_set_at, set, "an unchanged tag re-armed");
@@ -7244,15 +7319,82 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_open_note(&dir);
         let _ = app.update(Message::TitleEdited("Call @15:00".into()));
+        let _ = app.update(Message::TitleCommitted);
         assert_eq!(title_field(&app), "Call");
         let _ = app.update(Message::TitleEdited("Call @tue".into()));
-        assert_eq!(title_field(&app), "Call");
-        let note = &app.store.notes()[0];
-        assert_eq!(reminder::tag_text(&note.title), Some("@tue"));
+        // Shown as typed while editing, with the label already live.
+        assert_eq!(title_field(&app), "Call @tue");
+        assert_eq!(tag(&app).as_deref(), Some("@tue"));
         assert!(matches!(
-            reminder::status(note),
+            reminder::status(&app.store.notes()[0]),
             reminder::Status::Pending(_)
         ));
+        let _ = app.update(Message::TitleCommitted);
+        assert_eq!(title_field(&app), "Call");
+        assert_eq!(tag(&app).as_deref(), Some("@tue"));
+    }
+
+    #[test]
+    fn typing_a_partial_tag_is_not_captured() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        let _ = app.update(Message::TitleEdited("Call @15:00".into()));
+        let _ = app.update(Message::TitleCommitted);
+        let set = app.store.notes()[0].reminder_set_at;
+        for typed in ["Call @mon", "Call @mond", "Call @monday"] {
+            let _ = app.update(Message::TitleEdited(typed.into()));
+            assert_eq!(title_field(&app), typed, "captured while typing");
+        }
+        // Back to the hidden tag mid-way: its anchor is kept.
+        let _ = app.update(Message::TitleEdited("Call @mond".into()));
+        assert_eq!(tag(&app).as_deref(), Some("@15:00"));
+        assert_eq!(app.store.notes()[0].reminder_set_at, set);
+        let _ = app.update(Message::TitleEdited("Call @monday".into()));
+        let _ = app.update(Message::TitleCommitted);
+        assert_eq!(tag(&app).as_deref(), Some("@monday"));
+        assert_eq!(title_field(&app), "Call");
+    }
+
+    #[test]
+    fn date_then_time_captured_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        for typed in [
+            "Call @2026-10-15",
+            "Call @2026-10-15 ",
+            "Call @2026-10-15 16:30",
+        ] {
+            let _ = app.update(Message::TitleEdited(typed.into()));
+            assert_eq!(title_field(&app), typed);
+        }
+        let _ = app.update(Message::TitleCommitted);
+        assert_eq!(tag(&app).as_deref(), Some("@2026-10-15 16:30"));
+        assert_eq!(title_field(&app), "Call");
+    }
+
+    #[test]
+    fn tag_captured_on_enter_and_on_blur() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_open_note(&dir);
+        // Enter (the field's submit).
+        let _ = app.update(Message::TitleEdited("A @tue".into()));
+        let _ = app.update(Message::TitleCommitted);
+        assert_eq!(title_field(&app), "A");
+        // The body taking the focus.
+        let _ = app.update(Message::TitleEdited("B @wed".into()));
+        let _ = app.update(Message::BodyClicked(None));
+        assert_eq!(title_field(&app), "B");
+        // The field losing the focus some other way (the focus check).
+        let _ = app.update(Message::TitleEdited("C @thu".into()));
+        let _ = app.update(Message::TitleBlurred(true));
+        assert_eq!(title_field(&app), "C @thu", "still focused");
+        let _ = app.update(Message::TitleBlurred(false));
+        assert_eq!(title_field(&app), "C");
+        // The note closing.
+        let _ = app.update(Message::TitleEdited("D @fri".into()));
+        let _ = app.update(Message::ClosePanel);
+        assert!(app.title_edit.is_none());
+        assert_eq!(reminder::visible_title(&app.store.notes()[0].title), "D");
     }
 
     #[test]
@@ -7260,9 +7402,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with_open_note(&dir);
         let _ = app.update(Message::TitleEdited("Call @frx".into()));
+        let _ = app.update(Message::TitleCommitted);
         assert_eq!(title_field(&app), "Call @frx");
         let note = &app.store.notes()[0];
         assert_eq!(reminder::status(note), reminder::Status::Invalid);
+    }
+
+    #[test]
+    fn copy_omits_the_raw_tag() {
+        let mut note = crate::note::Note::new(crate::note::PALETTE[0]);
+        note.title = "Call @2026-10-15 16:30".into();
+        note.content = "body".into();
+        note.reminder_set_at = Some(chrono::Utc::now());
+        assert_eq!(
+            crate::note::copy_text(&note),
+            "Call\nReminder: Thu 15 Oct 16:30\n\nbody"
+        );
+        note.title = "@2026-10-15 16:30".into();
+        assert_eq!(
+            crate::note::copy_text(&note),
+            "Reminder: Thu 15 Oct 16:30\n\nbody"
+        );
+        note.title = "Call @frx".into();
+        assert_eq!(crate::note::copy_text(&note), "Call @frx\n\nbody");
     }
 
     #[test]

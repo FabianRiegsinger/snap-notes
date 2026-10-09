@@ -94,6 +94,9 @@ const GRIP_HEIGHT: f32 = 16.0;
 
 pub struct PostIt<'a> {
     pub note: &'a Note,
+    /// The title field's text: as typed while it is being edited, tag and
+    /// all, else the title without its tag (see `title_field_text`).
+    pub title_text: String,
     pub theme: theme::Theme,
     pub palette: &'a [NoteColor],
     /// How much lighter (negative) or darker than its bar the paper is.
@@ -361,6 +364,7 @@ pub(crate) fn morph_paper(
 pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     let PostIt {
         note,
+        title_text,
         theme,
         palette,
         paper_tint,
@@ -406,9 +410,10 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     let inner: Element<'_, Message> = if a < 0.01 {
         Space::new().width(Fill).height(Fill).into()
     } else {
-        let title = text_input(TITLE_PLACEHOLDER, &title_field_text(note))
+        let title = text_input(TITLE_PLACEHOLDER, &title_text)
             .id(TITLE_ID)
             .on_input(Message::TitleEdited)
+            .on_submit(Message::TitleCommitted)
             .size(TEXT_MD)
             .padding(Padding::new(2.0).left(4).right(4))
             .font(theme::TITLE_FONT)
@@ -970,6 +975,7 @@ mod tests {
         let doc = crate::rich::parse("hello", &crate::note::DEFAULT_PALETTE);
         let broken = HashSet::new();
         let view = post_it(PostIt {
+            title_text: String::new(),
             note: &note,
             theme: theme::Theme::default(),
             palette: &crate::note::DEFAULT_PALETTE,

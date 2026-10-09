@@ -98,13 +98,13 @@ fn parse_time(s: &str) -> Option<NaiveTime> {
 
 fn parse_weekday(s: &str) -> Option<Weekday> {
     Some(match s {
-        "mon" => Weekday::Mon,
-        "tue" => Weekday::Tue,
-        "wed" => Weekday::Wed,
-        "thu" => Weekday::Thu,
-        "fri" => Weekday::Fri,
-        "sat" => Weekday::Sat,
-        "sun" => Weekday::Sun,
+        "mon" | "monday" => Weekday::Mon,
+        "tue" | "tuesday" => Weekday::Tue,
+        "wed" | "wednesday" => Weekday::Wed,
+        "thu" | "thursday" => Weekday::Thu,
+        "fri" | "friday" => Weekday::Fri,
+        "sat" | "saturday" => Weekday::Sat,
+        "sun" | "sunday" => Weekday::Sun,
         _ => return None,
     })
 }
@@ -400,6 +400,15 @@ mod tests {
     }
 
     #[test]
+    fn full_weekday_names_parse() {
+        assert_eq!(tag_text("Call @monday"), Some("@monday"));
+        assert_eq!(
+            parse("@Friday 10:00", now()),
+            Some(local(2026, 10, 9, 10, 0))
+        );
+    }
+
+    #[test]
     fn export_label_has_the_date() {
         assert_eq!(
             export_label(local(2026, 10, 15, 16, 30)),
@@ -484,7 +493,7 @@ mod tests {
             "@noon",
             "@2026-02-30",
             "@2026-13-01",
-            "@monday",
+            "@mondays",
             "@15:00,",
             "@tomorrow25:00",
         ] {

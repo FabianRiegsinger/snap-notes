@@ -883,6 +883,24 @@ pub fn actions_row_extent(
         .max(STRIP_WIDTH)
 }
 
+/// The strip widget's thickness away from the edge: the expanded Actions
+/// row's extent while the row is open or any part of it is still out
+/// (`progress` > 0, folding back), so sliding pills aren't cut off; else
+/// [`STRIP_WIDTH`].
+pub fn strip_thickness(
+    bars: &BarSettings,
+    bar_count: usize,
+    scale: impl Fn(usize) -> f32,
+    expanded: bool,
+    progress: f32,
+) -> f32 {
+    if expanded || progress > 0.0 {
+        actions_row_extent(bars, bar_count, scale)
+    } else {
+        STRIP_WIDTH
+    }
+}
+
 /// Lays out the bars plus the Actions slot (collapsed or expanded into New /
 /// Search / Settings side by side away from the edge), centred along the
 /// `edge` in `bounds`. Centering on the *current* (magnified) length keeps
@@ -1009,10 +1027,12 @@ pub fn compute_layout(
     };
     // Expanded chips can reach past the strip band once they magnify; the
     // hit area must cover the whole row (plus pad) or hover collapses.
+    // Collapsed, it is the strip's column, even while the widget stays wide
+    // for pills folding back.
     let hit_thickness = if actions_expanded {
         (row_far + ACTIONS_HOVER_PAD).max(span.thickness)
     } else {
-        span.thickness
+        span.thickness.min(STRIP_WIDTH)
     };
     let hit = LocalRect {
         along: row_start - add_gap / 2.0,
@@ -1156,13 +1176,13 @@ impl<'a> BarStrip<'a> {
     /// Actions row when it sticks further into the screen (so hover/click
     /// still land on Search and Settings).
     fn widget_thickness(&self) -> f32 {
-        if self.actions_expanded {
-            actions_row_extent(self.bars, self.entries.len(), |i| {
-                self.magnification.scale(i)
-            })
-        } else {
-            STRIP_WIDTH
-        }
+        strip_thickness(
+            self.bars,
+            self.entries.len(),
+            |i| self.magnification.scale(i),
+            self.actions_expanded,
+            self.actions_progress,
+        )
     }
 
     fn is_alert(&self, i: usize) -> bool {
@@ -3627,6 +3647,44 @@ mod tests {
                 slot_style(false, &theme).fill,
                 "{mode:?} hover shows"
             );
+        }
+    }
+
+    #[test]
+    fn collapsing_pills_stay_inside_the_widget() {
+        let bars = BarSettings::default();
+        let scale = |_| 1.0;
+        let expanded = actions_row_extent(&bars, 3, scale);
+        assert!(expanded > STRIP_WIDTH, "precondition: the row sticks out");
+        for edge in Edge::ALL {
+            let window = Size::new(1400.0, 900.0);
+            for p in [0.95, 0.6, 0.3, 0.05] {
+                // Collapsing: the target is collapsed, the pills are still out.
+                let thickness = strip_thickness(&bars, 3, scale, false, p);
+                let bounds = edge.rect_to_window(
+                    LocalRect {
+                        along: 0.0,
+                        away: 0.0,
+                        length: edge.edge_length(window),
+                        thickness,
+                    },
+                    window,
+                );
+                let mut l = compute_layout(3, scale, bounds, 0.0, &bars, false, None, edge);
+                l.actions_progress = p;
+                for pill in l.pill_rects() {
+                    let inside = pill.x >= bounds.x - 0.01
+                        && pill.y >= bounds.y - 0.01
+                        && pill.x + pill.width <= bounds.x + bounds.width + 0.01
+                        && pill.y + pill.height <= bounds.y + bounds.height + 0.01;
+                    assert!(inside, "{edge:?} at {p}: {pill:?} outside {bounds:?}");
+                }
+                // The collapsed slot's hover area stays the strip's column.
+                assert!(edge.thickness(l.actions_hit_area.size()) <= STRIP_WIDTH + 0.01);
+            }
+            // Settled collapsed: back to the strip's width.
+            assert_eq!(strip_thickness(&bars, 3, scale, false, 0.0), STRIP_WIDTH);
+            assert_eq!(strip_thickness(&bars, 3, scale, true, 0.0), expanded);
         }
     }
 
