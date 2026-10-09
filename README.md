@@ -1,184 +1,49 @@
 # Snap Notes
 
-**Sticky notes that live on the edge of your screen.** Each note is a thin colored bar docked to a screen edge (right by default, or left or top), always on top and never in the way. Hover to magnify the bars like the macOS Dock, rest on one to peek inside, and click to unfold it into a full sticky note.
+**Your notes, one glance away — and never in the way.**
 
-![Snap Notes: the bar strip on the right edge, a hover peek and an open note](docs/assets/overview.svg)
+Snap Notes turns sticky notes into slim colored bars along the edge of your screen. Hover to make them grow like the macOS Dock, rest on one to peek inside, click to unfold a full note. Everywhere else, your clicks go straight to the apps behind it.
 
-- **Out of the way:** about 6 px of screen per note. Clicks anywhere else go straight to the apps behind it.
-- **One glance away:** peek at any note without opening it.
-- **Portable:** a single executable, no installer. Your notes are a JSON file next to it, with their images in an `images/` folder.
-- **Cross-platform:** macOS, Windows and Linux.
+![Snap Notes: the bar strip on the screen edge, a hover peek and an open note](docs/assets/overview.svg)
 
-## What it can do
+## Why you'll love it
 
-### The bar strip
-- **Dock-style magnification:** move the cursor along the strip and nearby bars grow with smooth spring physics.
-- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, scroll over it to read the rest of a longer note, and click it to open the note. Its trash button deletes the note at once, see [Notes](#notes) for undo.
-- **Actions:** hover the slot after the bars (on Top: to their right) to unfold **New (+)**, **Search** and **Settings** side by side; move away to fold it back. Alt/Option-click on **+** still makes a note from the clipboard (empty clipboard shakes the slot and shows "Clipboard is empty"). Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+, still work without hovering Actions.
-- **Search:** click the 🔍 slot after `+` (on Top: to its right), press Cmd/Ctrl+F or choose **Search…** in the tray menu. Hovering 🔍 shows "Search (Cmd+F)" (Ctrl+F elsewhere). See [Search](#search).
-- **Hints on Linux:** hover hints aren't shown there unless a note or panel is open (the window is wide then).
-- **Reorder:** drag a bar along the strip to move the note.
-- **Stacks:** drag a bar onto the middle of another bar to stack it. While you hover there, the bar shows "Stack". Dropping between bars still reorders. A stack's bar has card-edge lines. Its peek lists its notes (at most 8, then "+N more"), and clicking a title opens that note. **Unstack** in the peek splits the stack, and deleting the top note promotes the next one.
-- **Pinned notes:** the pin button in a note's header keeps it at the top of the strip, marked by a darker notch on its bar. The button has a filled background while pinned, and its tooltip reads "Pin to top" or "Unpin". Dragging stays within the pinned group, and pinning a stack pins all of it.
-- **Checklist progress:** a bar fills from its far end (on Top: from the right) by the share of done tasks; when every task is done the bar is fully tinted. The peek shows done/total, summed over a stack.
-- **File drops:** drop a file on `+` or on empty space to create a note, or on a bar to append to that note (the top note of a stack). A `.txt` or `.md` file up to 1 MB adds its text, and a new note gets the file name as its title. An image file is added as an image, and any other file as its path. Dropping onto an open note inserts an image, as before.
-- **From the clipboard:** **New Note from Clipboard** in the tray menu, or Alt/Option-click on `+`, makes a note whose body is the clipboard's text or image.
-- **Screen edge:** the strip sits on the right edge by default. In Settings → Window → **Screen edge** choose **Right**, **Left** or **Top**; the change applies right away. On Left everything mirrors Right: the peek, notes, panels and hints open to the right of the strip. On Top the bars sit side by side along the top edge and grow downward, and everything opens below the strip. On macOS the strip then sits below the menu bar. Notes you dragged keep their place.
-- **Scroll:** with more notes than fit on screen, scroll the strip with the mouse wheel.
-- **Auto-hide:** on by default, switch it off in Settings → Window. The strip then slides off toward its edge 0.8 s after the cursor leaves the strip, its peek or the undo toast. To bring it back, hold the cursor against that edge for about 0.15 s, anywhere along it. On Top with macOS, pushing the cursor up into the menu bar also reveals it. The setting is saved, but the strip is always shown when the app starts.
-  - **Stays shown:** while a search, settings or export panel is open, during a bar or file drag, and while the undo toast or the "Clipboard is empty" hint shows. A fired reminder does not slide the whole strip in: only that note's bar (or bars, if several are due) stays visible at the edge and jumps or pulses until you open it; other bars stay hidden.
-  - **Open notes:** an open note does not keep the strip shown. The strip can slide away while the note stays open and usable.
-  - **Other ways back:** the global hotkey, the tray's **New Note**, **New Note from Clipboard**, **Search…**, **Settings…** and **Export…**, and Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+,.
-  - **Tray Hide:** **Hide Notes** still hides everything, and the edge does nothing until you choose **Show**.
-  - **On Linux:** while the strip is hidden, the window shrinks to a 2 px sliver along the whole chosen edge. Move the cursor into it anywhere to reveal the strip.
+- **Always there, never in the way.** About 6 px per note, always on top. Turn on auto-hide and the strip disappears completely until you touch the screen edge.
+- **Capture in a second.** Cmd/Ctrl+Shift+Space creates a note from any app. Drop a file on the strip, or make a note straight from your clipboard.
+- **Peek before you open.** Rest on a bar to read the note without leaving what you're doing.
+- **Never miss a thing.** Write `@15:00` or `@friday` in a title, or pick a date in the calendar. When it's due you get a notification and the note's bar jumps to get your attention.
+- **Notes that look good.** Real formatting: bold, italic, headings, checklists, links, images, colors and highlights. Checklist bars fill up as you tick items off.
+- **Stay organized.** Color-code notes, pin important ones to the top, drag bars onto each other to stack related notes, and search everything as you type.
+- **Your screen, your way.** Dock the strip to the right, left or top edge. It adapts to light and dark mode on its own, and every look and motion detail is adjustable.
+- **Your data stays yours.** No account, no cloud, no installer. One executable and a plain JSON file next to it. Export everything to Markdown or text whenever you like.
 
-### Notes
-- **Unfold and fold:** a click morphs the bar into a sticky note. Esc, the close button, a click outside the note or a click on its bar folds it back.
-- **Title and body:** each note has a title header and a scrolling body. The scrollbar only appears once the text overflows.
-- **Move it anywhere:** drag the grip at the top. The note reopens where you left it, and double-clicking the grip docks it again.
-- **Resize it:** drag any edge or corner. Each note remembers its own size.
-- **Color code it:** the swatch in the header opens a color bubble: six presets, a color wheel you can drag (around for the hue, toward the rim for more vivid colors), a brightness slider, and a hex field.
-- **Delete and undo:** the trash button in the header deletes the note at once, with no confirmation. The toast "Note deleted · Undo" stays for 5 s, and clicking Undo restores the note. Cmd/Ctrl+Z also undoes it, but only while no note is open. Only the latest delete can be undone.
-- **Copy:** the copy button in the header copies the note's title and body. Its icon shows a ✓ for a moment afterwards.
-- **Images:** drop a png, jpg, gif or webp file (up to 20 MB) onto an open note, paste an image-only clipboard with Cmd/Ctrl+V, or use the image button in the toolbar.
-- **Clickable links:** `http`, `https` and `mailto` links in the formatted view open in your browser.
+## Works everywhere
 
-### Reminders
-Put a tag in a note's title:
+macOS, Windows and Linux, from a single small executable.
 
-| Tag | Due |
-|---|---|
-| `@HH:MM` | Today, or tomorrow if that time has passed |
-| `@tomorrow` or `@tomorrow HH:MM` | Tomorrow, default 09:00 |
-| `@mon` … `@sun` (or `@monday` … `@sunday`), optionally with `HH:MM` | The next such day, default 09:00. Before 09:00 on that day, `@weekday` means today. |
-| `@YYYY-MM-DD`, optionally with `HH:MM` | That date, default 09:00 |
+## Get it
 
-- **Local time:** times are local. Only the first tag counts.
-- **Shown as a date, not a tag:** while you type, the title field shows the tag as typed and the header already shows its due time. Once you press Enter, click elsewhere or close the note, an understood tag disappears from the title field and shows only as the header's due time. The peek, stack lists, search, and the export list and files show the title without it (exports add a "Reminder: Thu 15 Oct 16:30" line under the title), search doesn't match it, and Copy leaves it out, adding the same Reminder line. A tag that isn't understood stays visible as typed.
-- **Calendar:** the toolbar's Reminder (bell) button opens a date/time picker that sets the reminder to that date and time. Click the header's due time to open the same picker; Clear removes the tag.
-- **When it's due:** a system notification appears and the bar jumps (or pulses, per Settings → Motion) until you open the note. With auto-hide on, only alerting bars stay visible at the edge. Clicking a stack's bar opens the note whose reminder fired. Reminders missed while the app was closed fire at startup.
-- **Change it:** typing a new tag into the title or using the picker sets a new reminder. Editing the rest of the title keeps it.
-- **Hint:** the empty title's placeholder suggests "@15:00".
-- **Label:** while the note has a reminder, the note header shows a bell and the due time. A fired reminder shows them dimmed, and a tag that isn't understood shows "not a reminder". On notes narrower than 420 px only the bell shows, and its tooltip carries the text. The peek also shows a bell.
-
-### Look and feel
-- **Inter and Lucide:** the interface uses the Inter typeface and a Lucide icon set, so text and icons look the same on every platform.
-- **Dark mode:** follows the system appearance and switches live while the app runs.
-- **Paper notes:** a softer paper tone derived from the bar color, with layered shadows, a top highlight and an adhesive band. Text keeps WCAG AA contrast in light and dark.
-- **Tab-like bars:** bars have a gradient and a highlight, and the open note's bar is wider, like a tab.
-- **Motion:** a deleted note's bar collapses, the toolbar fades and slides in, the body fades when you switch modes, and buttons have pressed states.
-- **Details:** a focus ring on the title, a faint "…" in empty notes and slimmer scrollbars.
-
-### Search
-- **Open it:** Cmd/Ctrl+F, the 🔍 slot after `+` in the strip, or **Search…** in the tray menu. Esc closes the panel.
-- **As you type:** results update with every keystroke. Matching ignores case and covers titles and bodies.
-- **Results:** each one shows the title and a snippet with the match in bold. Click one to open that note with the match selected, or press Enter to open the first one.
-- **Dimmed bars:** while you type, the bars of notes that don't match dim.
-
-### Export
-- **Open it:** **Export…** in the Settings group "Data" (Application tab), or in the tray menu.
-- **Pick notes:** every note starts checked. The All and None buttons toggle them all.
-- **Format:** `.md` or `.txt`, saved as one file through a save dialog. The suggested name is `snap-notes-YYYY-MM-DD.<ext>`.
-- **Markdown:** each note becomes a `# Title` heading followed by its Markdown. The custom color, size and highlight tags are removed. Single line breaks stay line breaks (as a trailing double space), except in code blocks.
-- **Plain text:** each title is underlined with `=`.
-
-### Formatting
-Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. While editing, the editor already shows bold, italic, code, colored text and bold headings, with the Markdown markers drawn faint. Bold, italic and colors that span several lines of a paragraph show on each of those lines, as in the formatted view. Strikethrough, highlight backgrounds, sizes and images only show in the formatted view. In edit mode the toolbar's bold, italic, strikethrough, code, text color, highlight, size (small, normal, large, huge), link and image buttons apply the markup.
-
-| Effect | Syntax |
-|---|---|
-| Bold / italic / strikethrough | `**bold**`, `*italic*`, `~~struck~~` |
-| Inline code | `` `code` `` |
-| Heading | `# H1` … `### H3` (H4–H6 render as H3) |
-| Lists | `- item`, `1. item`, nested by indentation |
-| Task | `- [ ] open`, `- [x] done` (click the checkbox to toggle it) |
-| Quote / rule / code block | `> quote`, `---`, fenced ```` ``` ```` |
-| Link | `[text](https://example.com)` or `<https://example.com>` |
-| Image | `![alt](images/<uuid>.<ext>)` (PNG, JPEG, GIF or WebP) |
-| Text color | `{coral}text{/}` or `{#FF0000}text{/}` |
-| Highlight | `{bg:amber}text{/}` or `==text==` |
-| Font size | `{size:20}text{/}` (8–48) |
-| Literal brace | `\{` |
-
-- **Color names:** `coral`, `rose`, `blush`, `peach`, `tangerine`, `amber`, `lemon`, `sand`, `lime`, `sage`, `mint`, `teal`, `aqua`, `sky`, `cornflower`, `periwinkle`, `lavender`, `orchid`, `mocha`, `slate`. `coral`, `peach`, `amber`, `mint`, `sky` and `lavender` name your palette's six slots and follow it in Settings; the other names and hex colors stay fixed.
-- **Tags nest:** `{coral}{size:20}big red{/} red{/}`. `{/}` closes the innermost tag, and an unclosed tag ends with its paragraph.
-- **Highlight with `==`:** only when it hugs the text (`==word==`), so `a == b` stays as typed.
-- **Line breaks:** a single newline stays a line break.
-- **Raw HTML:** shows as typed and is never rendered.
-- **Older notes:** keep their text, but a line indented by 4 spaces now shows as a code block, and a line followed by `---` as a heading.
-- **Older palettes:** the palette now holds six colors. If you had customized it, `coral`, `peach`, `amber`, `mint`, `sky`, `lavender` and `==highlight==` keep your colors; the other 14 names go back to their fixed colors.
-
-### Settings
-Open them from the menu bar/tray icon, the Settings control in the strip's Actions slot, or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group except Data has a Reset button. There is no theme setting: dark mode follows the system.
-
-The groups are split across two tabs, **Application** and **Styling**. Settings always opens on Application.
-
-| Tab | Group | What you can adjust |
-|---|---|---|
-| Application | App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey (Cmd/Ctrl+Shift+Space). If it can't be registered (for example, another app uses it), a red line under the toggle says why. On Linux, failures are only logged. |
-| Application | Window | **Strip length** (the share of the edge the strip may use, which is the width on Top), **Screen edge** (Right, Left or Top), and **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)) |
-| Application | Data | **Export…** your notes to one file (see [Export](#export)) |
-| Styling | Bars | Width, height and gap |
-| Styling | Hover | Magnification, how far it spreads, and the peek delay (0–3 s) |
-| Styling | Notes | Default size, paper tint (lighter/darker than the bar), and how faint the header controls are until you hover |
-| Styling | Motion | Animation speed (0.25–3×); Reminder alert (Jump / Pulse) |
-| Styling | Palette | Replace any of the 6 note colors from 60 presets. Notes using the old color follow along. |
-
-### Menu bar / tray
-On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **New Note from Clipboard**, **Search…**, **Export…**, **Settings…** and **Quit**. Hiding the notes clears the screen completely until you show them again.
-
-## Keyboard shortcuts
-
-| Shortcut | Action |
-|---|---|
-| Cmd+Shift+Space (macOS), Ctrl+Shift+Space (elsewhere) | Global hotkey: show the notes and create a new note in edit mode, from any app. On Linux it is always on and needs X11 (Wayland is not supported). |
-| Cmd/Ctrl+N | New note |
-| Cmd/Ctrl+F | Open or close search |
-| Cmd/Ctrl+, | Open or close settings |
-| Cmd/Ctrl+V | Paste an image into the open note |
-| Cmd/Ctrl+Z | Undo the last delete (only while no note is open) |
-| Enter | Open the first search result (in the search field) |
-| Esc | Leave edit mode, close search, export or settings, or fold the open note |
-
-The Cmd/Ctrl shortcuts also work while you type in a note's title or body or in the search field.
-
-## Platform support
-
-| | macOS | Windows | Linux |
-|---|---|---|---|
-| Bar strip, peek, notes, settings | ✓ | ✓ | ✓ |
-| Click-through around the strip | ✓ | ✓ | The window shrinks to the strip instead |
-| Menu bar / tray icon | ✓ | ✓ | – |
-| Actions slot in the strip (New / Search / Settings) | ✓ | ✓ | ✓ |
-| Hide Dock icon / taskbar button | ✓ | ✓ | – |
-| Single instance | – | ✓ | – |
-
-## Your data
-
-Notes are stored in `notes.json` and settings in `settings.json`, next to the executable. Images added to notes live in an `images/` folder next to them. Edits save automatically, with a 500 ms debounce and atomic writes, so a crash never leaves a half-written file. A hand-edited `settings.json` with a typo keeps every valid value and falls back to defaults only for the broken ones. At startup, images that no note references are deleted from `images/`, except when `notes.json` fails to load.
-
-To move Snap Notes to another machine, copy the executable together with both JSON files and the `images/` folder.
-
-## Install
-
-Every push to `main` builds Snap Notes for **Windows x64, macOS arm64, Linux x64 and Linux arm64**. Download the binary from the build artifacts in [Actions](https://github.com/FabianRiegsinger/snap-notes/actions), or build it yourself:
+Download the latest build for **Windows, macOS (Apple silicon) or Linux** from [Actions](https://github.com/FabianRiegsinger/snap-notes/actions), or build it yourself:
 
 ```bash
 cargo build --release
 ./target/release/snap-notes
 ```
 
-The release binary is optimized for size (`opt-level = "z"`, LTO, stripped). Linux builds need `pkg-config`, `libxkbcommon-dev`, `libwayland-dev` and `libfontconfig1-dev`.
+Linux builds need `pkg-config`, `libxkbcommon-dev`, `libwayland-dev` and `libfontconfig1-dev`.
 
-## Under the hood
+## Shortcuts worth knowing
 
-- **Rust** with [iced](https://iced.rs) 0.14 (wgpu rendering)
-- A custom bar-strip widget with Gaussian magnification and critically damped springs
-- [`tray-icon`](https://crates.io/crates/tray-icon) for the menu bar/tray icon, plus native calls for click-through and Dock/taskbar visibility (AppKit on macOS, Win32 on Windows)
-- [`pulldown-cmark`](https://crates.io/crates/pulldown-cmark) for Markdown, with a small tag layer on top for color, highlight and size
-- [Inter](https://rsms.me/inter/) 4.1 (SIL OFL 1.1) and [Lucide](https://lucide.dev) icons (ISC), both bundled as subsets. `assets/fonts/subset.sh` regenerates the subsets.
-- JSON persistence with lenient loading and atomic writes
+| Shortcut | Does |
+|---|---|
+| Cmd/Ctrl+Shift+Space | New note, from any app |
+| Cmd/Ctrl+N | New note |
+| Cmd/Ctrl+F | Search |
+| Cmd/Ctrl+, | Settings |
+| Esc | Close what's open |
 
-## License
+## Learn more
 
-MIT
+Every feature, the formatting and reminder syntax, all settings and where your data lives are covered in the **[full guide](docs/GUIDE.md)**.
+
+Built in Rust with [iced](https://iced.rs). MIT licensed.
