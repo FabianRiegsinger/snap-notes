@@ -26,7 +26,7 @@
 - **Screen edge:** the strip sits on the right edge by default. In Settings → Window → **Screen edge** choose **Right**, **Left** or **Top**; the change applies right away. On Left everything mirrors Right: the peek, notes, panels and hints open to the right of the strip. On Top the bars sit side by side along the top edge and grow downward, and everything opens below the strip. On macOS the strip then sits below the menu bar. Notes you dragged keep their place.
 - **Scroll:** with more notes than fit on screen, scroll the strip with the mouse wheel.
 - **Auto-hide:** on by default, switch it off in Settings → Window. The strip then slides off toward its edge 0.8 s after the cursor leaves the strip, its peek or the undo toast. To bring it back, hold the cursor against that edge where the strip sits for about 0.15 s. On Top with macOS, pushing the cursor up into the menu bar over the strip also reveals it. The setting is saved, but the strip is always shown when the app starts.
-  - **Stays shown:** while a search, settings or export panel is open, during a bar or file drag, while the undo toast or the "Clipboard is empty" hint shows, and after a reminder fires. A fired reminder slides the strip in and it stays until you open that note.
+  - **Stays shown:** while a search, settings or export panel is open, during a bar or file drag, and while the undo toast or the "Clipboard is empty" hint shows. A fired reminder does not slide the whole strip in: only that note's bar (or bars, if several are due) stays visible at the edge and jumps or pulses until you open it; other bars stay hidden.
   - **Open notes:** an open note does not keep the strip shown. The strip can slide away while the note stays open and usable.
   - **Other ways back:** the global hotkey, the tray's **New Note**, **New Note from Clipboard**, **Search…**, **Settings…** and **Export…**, and Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+,.
   - **Tray Hide:** **Hide Notes** still hides everything, and the edge does nothing until you choose **Show**.
@@ -54,7 +54,7 @@ Put a tag in a note's title:
 | `@YYYY-MM-DD`, optionally with `HH:MM` | That date, default 09:00 |
 
 - **Local time:** times are local. Only the first tag counts, and it stays in the title.
-- **When it's due:** a system notification appears and the bar pulses until you open the note. Clicking a stack's bar opens the note whose reminder fired. Reminders missed while the app was closed fire at startup.
+- **When it's due:** a system notification appears and the bar jumps (or pulses, per Settings → Motion) until you open the note. With auto-hide on, only alerting bars stay visible at the edge. Clicking a stack's bar opens the note whose reminder fired. Reminders missed while the app was closed fire at startup.
 - **Change it:** editing the tag sets a new reminder.
 - **Hint:** the empty title's placeholder suggests "@15:00".
 - **Label:** while the title has a tag, the note header shows a bell and the due time. A fired reminder shows them dimmed, and a tag that isn't understood shows "not a reminder". On notes narrower than 420 px only the bell shows, and its tooltip carries the text. The peek also shows a bell.

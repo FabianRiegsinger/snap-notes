@@ -1292,7 +1292,7 @@ impl App {
                 }
                 return focus;
             }
-            Message::ReminderTick => self.fire_reminders(chrono::Local::now()),
+            Message::ReminderTick => return self.fire_reminders(chrono::Local::now()),
             Message::SaveTick => {
                 if self.store.should_save() {
                     let _ = self.store.save();
@@ -1783,6 +1783,7 @@ impl App {
             dimmed: self.dimmed_bars(),
             pulse: self.bar_pulse(),
             jump: self.bar_jump(),
+            alert: self.bar_alert(),
             add_shake: self.shake_secs(Instant::now()).map_or(0.0, add_shake),
             clipboard_hint: self.clipboard_empty_at.is_some(),
             toast: self.toast_visible(),
@@ -2425,9 +2426,10 @@ impl App {
         finished
     }
 
-    /// Fires every reminder due at `now`: a notification, a pulsing bar, and
-    /// the fired time saved at once so it never fires twice.
-    fn fire_reminders(&mut self, now: chrono::DateTime<chrono::Local>) {
+    /// Fires every reminder due at `now`: a notification, an alerting bar,
+    /// and the fired time saved at once so it never fires twice. Alerting
+    /// bars stay visible while the strip may remain auto-hidden.
+    fn fire_reminders(&mut self, now: chrono::DateTime<chrono::Local>) -> Task<Message> {
         let due: Vec<_> = self
             .store
             .notes()
@@ -2435,8 +2437,9 @@ impl App {
             .filter_map(|note| Some((note.id, reminder::due(note, now)?)))
             .collect();
         if due.is_empty() {
-            return;
+            return Task::none();
         }
+        let had_alert = !self.pulsing.is_empty();
         for (id, time) in due {
             let Some(note) = self.store.note_mut(id) else {
                 continue;
@@ -2446,13 +2449,16 @@ impl App {
             // The open note is already in view.
             if !(self.active_note == Some(id) && self.morph.is_opening()) {
                 self.begin_alert(id);
-                // A fired reminder is never missed: the strip slides in.
-                self.force_reveal = true;
             }
         }
         let _ = self.store.save();
         self.store.did_save();
         self.animating |= self.pulse_running();
+        // Widen off the edge sliver so alerting bars have room to draw.
+        if !had_alert && !self.pulsing.is_empty() {
+            return self.dock_window();
+        }
+        Task::none()
     }
 
     /// Starts (or joins) the alert animation for `id`.
@@ -2505,6 +2511,23 @@ impl App {
                 } else {
                     0.0
                 }
+            })
+            .collect()
+    }
+
+    /// Which bars have an uncleared fired reminder (for alert-only draw/hit
+    /// while the strip is auto-hidden).
+    fn bar_alert(&self) -> Vec<bool> {
+        if self.pulsing.is_empty() {
+            return Vec::new();
+        }
+        let notes = self.store.notes();
+        self.entries()
+            .iter()
+            .map(|entry| {
+                std::iter::once(entry.top)
+                    .chain(entry.members.iter().copied())
+                    .any(|i| self.pulsing.contains(&notes[i].id))
             })
             .collect()
     }
@@ -2642,9 +2665,10 @@ impl App {
     }
 
     /// Whether the window needs room on the strip's away side: always with
-    /// `passthrough`, otherwise for an open note or panel, or a chip that
+    /// `passthrough`, otherwise for an open note or panel, a chip that
     /// stays up on its own, such as the undo toast (hover chips don't
-    /// widen it).
+    /// widen it), or an alerting bar that must stay visible while the
+    /// strip is otherwise auto-hidden.
     fn needs_wide_window(&self, passthrough: bool) -> bool {
         passthrough
             || self.active_note.is_some()
@@ -2653,6 +2677,7 @@ impl App {
             || self.export.is_some()
             || self.clipboard_empty_at.is_some()
             || self.last_deleted.is_some()
+            || !self.pulsing.is_empty()
     }
 
     /// The docked window's thickness away from the edge (see
@@ -2709,7 +2734,8 @@ impl App {
     /// stack, the open note, the settings or the undo toast. Everywhere else
     /// clicks go to the apps behind.
     /// While auto-hide has the strip (partly) slid away, only the edge
-    /// zone and an open note or panel count.
+    /// zone, alerting bars (and their peek), and an open note or panel
+    /// count.
     fn is_interactive(&self, position: Point) -> bool {
         if !self.visible {
             return false;
@@ -2718,7 +2744,7 @@ impl App {
             frame.is_some_and(|frame| frame.rect.expand(8.0).contains(position))
         };
         let strip_used = if self.strip_x_offset() > 0.0 {
-            self.in_edge(position)
+            self.in_edge(position) || self.over_alerting_ui(position)
         } else {
             self.in_use_area(position)
         };
@@ -2796,6 +2822,28 @@ impl App {
                 .is_some_and(|rect| rect.contains(position))
     }
 
+    /// Whether `position` is over a bar (or its peek) that is alerting
+    /// while the strip is otherwise slid away.
+    fn over_alerting_ui(&self, position: Point) -> bool {
+        if self.pulsing.is_empty() {
+            return false;
+        }
+        if self
+            .peek_rect()
+            .is_some_and(|rect| rect.contains(position))
+        {
+            return self
+                .peek_note
+                .is_some_and(|id| self.pulsing.contains(&id));
+        }
+        let alerts = self.bar_alert();
+        self.strip_layout()
+            .bars
+            .iter()
+            .enumerate()
+            .any(|(i, bar)| alerts.get(i).copied().unwrap_or(false) && bar.contains(position))
+    }
+
     /// What auto-hide goes by now. An open note doesn't block hiding.
     fn auto_hide_inputs(&self) -> autohide::Inputs {
         let at = |test: fn(&Self, Point) -> bool| self.pointer.is_some_and(|p| test(self, p));
@@ -2808,7 +2856,6 @@ impl App {
                 || self.file_hover
                 || self.last_deleted.is_some()
                 || self.clipboard_empty_at.is_some()
-                || !self.pulsing.is_empty()
                 || self.export_dialog_open,
             force_reveal: self.force_reveal,
         }
@@ -6994,23 +7041,27 @@ mod tests {
     }
 
     #[test]
-    fn reminder_fire_reveals_and_pulse_keeps_shown() {
+    fn reminder_fire_keeps_strip_hidden_with_alert_only() {
         let dir = tempfile::tempdir().unwrap();
         let (app, ids) = app_with_notes(&dir, &[("Plain", ""), (DUE_TITLE, "")]);
         let mut app = with_auto_hide(app);
         hide_strip(&mut app, Instant::now());
         let _ = app.update(Message::ReminderTick);
         assert!(app.pulsing.contains(&ids[1]));
-        assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
-        assert!(app.animating);
-        let t = run_for(&mut app, Instant::now(), 300);
-        assert_eq!(app.auto_hide.offset(), 0.0);
-        let t = run_for(&mut app, t, 3000);
-        assert_eq!(app.auto_hide.offset(), 0.0, "hid while pulsing");
-        // Once nothing pulses, the grace applies again.
+        assert!(app.auto_hide.is_hidden(), "the strip stays auto-hidden");
+        assert!(app.animating, "the alert still runs frames");
+        let alerts = app.bar_alert();
+        assert_eq!(alerts, vec![false, true]);
+        // Edge dwell still reveals the full strip.
+        let before = Instant::now();
+        let _ = app.update(Message::CursorMoved(edge_point(&app)));
+        let t = run_for(&mut app, before + REVEAL_DWELL, 300);
+        assert_eq!(app.auto_hide.offset(), 0.0, "edge dwell should reveal");
+        // Opening the alerting note clears it; leave the strip so it can hide.
         let _ = app.update(Message::BarClicked(1));
         let _ = app.update(Message::ClosePanel);
         assert!(app.pulsing.is_empty());
+        let _ = app.update(Message::CursorMoved(Point::new(100.0, 100.0)));
         run_for(&mut app, t.max(Instant::now()), 1500);
         assert!(app.auto_hide.is_hidden());
     }

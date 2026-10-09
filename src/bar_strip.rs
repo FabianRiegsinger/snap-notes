@@ -33,9 +33,15 @@ pub const HIDE_SHIFT: f32 = STRIP_WIDTH + HIDE_MARGIN;
 const ADD_BUTTON_GAP: f32 = 20.0;
 /// Gap between the three Actions children when the slot is expanded.
 const ACTION_GAP: f32 = 4.0;
-/// The add button is shaped like a bar and magnifies with them, but its
-/// height grows less so it stays a compact "slot" rather than a tall note.
+/// Slots magnify with the bars, but their length along the edge grows less
+/// so they stay compact chips rather than tall notes.
 const ADD_MAX_HEIGHT_SCALE: f32 = 1.4;
+/// Slot thickness away from the edge, as a multiple of bar width. 1.5× fits
+/// three expanded chips inside the strip with gaps; taller than a bar so
+/// they read as controls.
+const SLOT_AWAY_SCALE: f32 = 1.5;
+/// Slot length along the edge, as a fraction of bar height (half → squat).
+const SLOT_ALONG_SCALE: f32 = 0.5;
 /// Magnification at which the "+" inside the add bar is fully visible.
 const ADD_PLUS_SCALE: f32 = 3.0;
 const EDGE_PADDING: f32 = 16.0;
@@ -801,12 +807,12 @@ pub fn band(bounds: Rectangle, fraction: f32, edge: Edge) -> Rectangle {
 }
 
 /// Size of a slot (add, search or settings button) at magnification `scale`,
-/// as Right lays it out (width away from the edge, height along it): it
-/// widens like a bar but its length grows less, so it stays compact.
+/// as Right lays it out (width away from the edge, height along it): a squat
+/// chip, wider than a note bar and half as tall along the edge.
 fn slot_size(bars: &BarSettings, scale: f32) -> Size {
     Size::new(
-        bars.width * scale,
-        bars.height * scale.min(ADD_MAX_HEIGHT_SCALE),
+        bars.width * SLOT_AWAY_SCALE * scale,
+        bars.height * SLOT_ALONG_SCALE * scale.min(ADD_MAX_HEIGHT_SCALE),
     )
 }
 
@@ -1022,6 +1028,9 @@ pub struct BarStrip<'a> {
     /// How far each bar jumps away from the screen edge (px), by index.
     /// Empty when nothing jumps.
     pub jump: Vec<f32>,
+    /// Bars with an uncleared fired reminder. While the strip is slid away
+    /// these stay drawn and clickable at the edge; others stay hidden.
+    pub alert: Vec<bool>,
     /// How far the `+` slot is shaken sideways, after an empty clipboard.
     pub add_shake: f32,
     /// Shows "Clipboard is empty" beside the `+` slot.
@@ -1046,6 +1055,24 @@ impl<'a> BarStrip<'a> {
     /// Whether the strip is (partly) slid away and so ignores the mouse.
     fn slid(&self) -> bool {
         self.x_offset > 0.0
+    }
+
+    fn is_alert(&self, i: usize) -> bool {
+        self.alert.get(i).copied().unwrap_or(false)
+    }
+
+    fn any_alert(&self) -> bool {
+        self.alert.iter().any(|&a| a)
+    }
+
+    /// Hide offset for bar `i`: alerting bars stay on-screen while the strip
+    /// is otherwise slid away.
+    fn bar_slide(&self, i: usize) -> f32 {
+        if self.is_alert(i) {
+            0.0
+        } else {
+            self.x_offset
+        }
     }
 
     /// The note bar `i` shows: its entry's top.
@@ -1101,10 +1128,25 @@ impl<'a> BarStrip<'a> {
     /// The hover update for a cursor at `pos`: magnify around it inside the
     /// strip, end the hover outside. None over the open peek, so the bars
     /// (and the peek centered on its bar) hold still while it's in use.
+    /// While slid away, only alerting bars keep hover (for peek / settle).
     fn hover_message(&self, bounds: Rectangle, pos: Point) -> Option<Message> {
-        if self.slid() || self.peek_hit(bounds, pos).is_some() {
-            None
-        } else if bounds.contains(pos) {
+        if self.peek_hit(bounds, pos).is_some() {
+            return None;
+        }
+        if self.slid() {
+            let strip = self.layout_in(bounds);
+            let over_alert = strip
+                .bars
+                .iter()
+                .enumerate()
+                .any(|(i, bar)| self.is_alert(i) && bar.contains(pos));
+            return if over_alert {
+                Some(Message::StripHover(Some(self.along(bounds, pos))))
+            } else {
+                Some(Message::StripHover(None))
+            };
+        }
+        if bounds.contains(pos) {
             Some(Message::StripHover(Some(self.along(bounds, pos))))
         } else {
             Some(Message::StripHover(None))
@@ -1112,8 +1154,8 @@ impl<'a> BarStrip<'a> {
     }
 
     /// What a left press at `pos` does: `None` when the strip doesn't take
-    /// it, `Some(None)` when it takes it without a message. Nothing while
-    /// slid away.
+    /// it, `Some(None)` when it takes it without a message. While slid away,
+    /// only alerting bars (and their peek) take presses.
     fn left_press(
         &self,
         bounds: Rectangle,
@@ -1121,6 +1163,22 @@ impl<'a> BarStrip<'a> {
         modifiers: keyboard::Modifiers,
     ) -> Option<Option<Message>> {
         if self.slid() {
+            if let Some(action) = self.peek_press(bounds, pos) {
+                if self.peek.is_some_and(|(i, _)| self.is_alert(i)) {
+                    return Some(action);
+                }
+                return None;
+            }
+            let strip = self.layout_in(bounds);
+            if let Some(i) = strip
+                .bars
+                .iter()
+                .position(|bar| bar.contains(pos))
+                .filter(|&i| self.is_alert(i))
+            {
+                // Open directly: no drag while the strip is slid away.
+                return Some(Some(Message::BarClicked(i)));
+            }
             return None;
         }
         if let Some(message) = self.toast_press(bounds, pos) {
@@ -1292,11 +1350,13 @@ impl<'a> BarStrip<'a> {
             if let Some((peek_index, progress)) = self.peek {
                 if peek_index == i && progress > 0.0 {
                     if let Some((note, width, text)) = self.peek_parts(i, *bar_rect) {
+                        let peek_bar =
+                            *bar_rect + hide_translation(edge, self.bar_slide(i));
                         draw_peek(
                             renderer,
                             note,
                             &text,
-                            *bar_rect,
+                            peek_bar,
                             bounds,
                             &self.theme,
                             CORNER_RADIUS,
@@ -1330,6 +1390,7 @@ impl<'a> BarStrip<'a> {
                 let open = self.open.filter(|(o, _)| *o == i);
                 let jump = self.jump.get(i).copied().unwrap_or(0.0);
                 let rect = bar_rect_for(open.map_or(0.0, |(_, p)| p), *bar_rect, edge)
+                    + hide_translation(edge, self.bar_slide(i))
                     + jump_translation(edge, jump);
                 let corner = CORNER_RADIUS;
                 let pulse = self.pulse.get(i).copied().unwrap_or(0.0);
@@ -1440,6 +1501,12 @@ impl<'a> BarStrip<'a> {
                     }
                 }
             }
+        }
+
+        // Slots, drag ghost and chips stay off-screen while the strip is
+        // slid; only alerting bars (above) remain visible.
+        if self.slid() {
+            return;
         }
 
         // Actions slot: collapsed brand mark, or New / Search / Settings in a row.
@@ -1680,19 +1747,24 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
     ) {
-        if !self.slid() {
-            self.draw_strip(tree, renderer, layout.bounds(), cursor);
+        if self.slid() && !self.any_alert() {
+            // Fully hidden: slide everything off-screen together.
+            renderer::Renderer::with_translation(
+                renderer,
+                hide_translation(self.edge, self.x_offset),
+                |renderer| {
+                    self.draw_strip(
+                        tree,
+                        renderer,
+                        layout.bounds(),
+                        mouse::Cursor::Unavailable,
+                    );
+                },
+            );
             return;
         }
-        // Slid away: everything moves toward the screen edge together, and
-        // nothing shows a hover.
-        renderer::Renderer::with_translation(
-            renderer,
-            hide_translation(self.edge, self.x_offset),
-            |renderer| {
-                self.draw_strip(tree, renderer, layout.bounds(), mouse::Cursor::Unavailable);
-            },
-        );
+        // In place, or alert-only: per-bar slide keeps alerting bars visible.
+        self.draw_strip(tree, renderer, layout.bounds(), cursor);
     }
 
     fn update(
@@ -1803,6 +1875,19 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
             return mouse::Interaction::Grabbing;
         }
         if self.slid() {
+            if let Some(pos) = cursor.position() {
+                let strip = self.layout_in(layout.bounds());
+                let over_alert = self.peek_hit(layout.bounds(), pos).is_some_and(|i| {
+                    self.is_alert(i)
+                }) || strip
+                    .bars
+                    .iter()
+                    .enumerate()
+                    .any(|(i, bar)| self.is_alert(i) && bar.contains(pos));
+                if over_alert {
+                    return mouse::Interaction::Pointer;
+                }
+            }
             return mouse::Interaction::None;
         }
         if let Some(pos) = cursor.position() {
@@ -2207,9 +2292,19 @@ mod tests {
     }
 
     #[test]
-    fn actions_slot_is_bar_shaped_at_rest() {
+    fn actions_slot_is_a_squat_chip_at_rest() {
+        let d = BarSettings::default();
         let l = layout(3, |_| 1.0, 900.0, 0.0);
-        assert_eq!(l.actions_button.size(), l.bars[0].size());
+        assert!((l.actions_button.width - d.width * SLOT_AWAY_SCALE).abs() < 0.01);
+        assert!((l.actions_button.height - d.height * SLOT_ALONG_SCALE).abs() < 0.01);
+        assert!(
+            l.actions_button.width > l.bars[0].width,
+            "wider than a note bar"
+        );
+        assert!(
+            l.actions_button.height < l.bars[0].height,
+            "shorter along the edge than a note bar"
+        );
         assert!(!l.actions_expanded);
     }
 
@@ -2217,8 +2312,11 @@ mod tests {
     fn magnified_actions_slot_widens_but_stays_compact() {
         let d = BarSettings::default();
         let l = layout(3, |i| if i == 3 { 5.0 } else { 1.0 }, 900.0, 0.0);
-        assert!((l.actions_button.width - d.width * 5.0).abs() < 0.01);
-        assert!((l.actions_button.height - d.height * ADD_MAX_HEIGHT_SCALE).abs() < 0.01);
+        assert!((l.actions_button.width - d.width * SLOT_AWAY_SCALE * 5.0).abs() < 0.01);
+        assert!(
+            (l.actions_button.height - d.height * SLOT_ALONG_SCALE * ADD_MAX_HEIGHT_SCALE).abs()
+                < 0.01
+        );
     }
 
     #[test]
@@ -2404,6 +2502,7 @@ mod tests {
             dimmed: Vec::new(),
             pulse: Vec::new(),
             jump: Vec::new(),
+            alert: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2557,6 +2656,7 @@ mod tests {
             dimmed: Vec::new(),
             pulse: Vec::new(),
             jump: Vec::new(),
+            alert: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: true,
@@ -2624,6 +2724,7 @@ mod tests {
             dimmed: Vec::new(),
             pulse: Vec::new(),
             jump: Vec::new(),
+            alert: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2689,6 +2790,7 @@ mod tests {
             dimmed: Vec::new(),
             pulse: Vec::new(),
             jump: Vec::new(),
+            alert: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2748,6 +2850,7 @@ mod tests {
             dimmed: Vec::new(),
             pulse: Vec::new(),
             jump: Vec::new(),
+            alert: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2831,6 +2934,7 @@ mod tests {
             dimmed: Vec::new(),
             pulse: Vec::new(),
             jump: Vec::new(),
+            alert: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2877,6 +2981,7 @@ mod tests {
             dimmed: Vec::new(),
             pulse: Vec::new(),
             jump: Vec::new(),
+            alert: Vec::new(),
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
@@ -2961,9 +3066,13 @@ mod tests {
     fn magnified_gear_uses_its_own_scale() {
         let d = BarSettings::default();
         let l = layout_expanded(2, |i| if i == 4 { 4.0 } else { 1.0 }, 900.0, 0.0);
-        assert!((l.settings_button.width - d.width * 4.0).abs() < 0.01);
-        assert_eq!(l.add_button.size(), l.bars[0].size());
-        assert_eq!(l.search_button.size(), l.bars[0].size());
+        assert!((l.settings_button.width - d.width * SLOT_AWAY_SCALE * 4.0).abs() < 0.01);
+        let chip = Size::new(
+            d.width * SLOT_AWAY_SCALE,
+            d.height * SLOT_ALONG_SCALE,
+        );
+        assert_eq!(l.add_button.size(), chip);
+        assert_eq!(l.search_button.size(), chip);
     }
 
     #[test]
@@ -3015,8 +3124,11 @@ mod tests {
     fn magnified_search_slot_uses_its_own_scale() {
         let d = BarSettings::default();
         let l = layout_expanded(2, |i| if i == 3 { 4.0 } else { 1.0 }, 900.0, 0.0);
-        assert!((l.search_button.width - d.width * 4.0).abs() < 0.01);
-        assert_eq!(l.add_button.size(), l.bars[0].size());
+        assert!((l.search_button.width - d.width * SLOT_AWAY_SCALE * 4.0).abs() < 0.01);
+        assert_eq!(
+            l.add_button.size(),
+            Size::new(d.width * SLOT_AWAY_SCALE, d.height * SLOT_ALONG_SCALE)
+        );
     }
 
     #[test]
@@ -3045,22 +3157,27 @@ mod tests {
         strip.toast = true;
         let layout = strip.layout_in(STRIP_BOUNDS);
         let bar = layout.bars[0].center();
-        let actions = layout.actions_hit_area.center();
+        let actions = layout.actions_button.center();
         let toast = toast_rect(&layout, STRIP_BOUNDS).center();
         let none = keyboard::Modifiers::default();
         assert!(matches!(
             strip.left_press(STRIP_BOUNDS, bar, none),
             Some(Some(Message::DragStart(0, _)))
         ));
-        assert!(strip.left_press(STRIP_BOUNDS, actions, none).is_some());
+        // Collapsed Actions only expands on hover; presses do nothing.
+        assert!(strip.left_press(STRIP_BOUNDS, actions, none).is_none());
         assert!(strip.left_press(STRIP_BOUNDS, toast, none).is_some());
 
-        // Sliding away (or back), nothing takes a click or a hover.
+        // Sliding away (or back), nothing takes a click; hover clears so an
+        // alerting bar's settle can resume when the cursor leaves it.
         for x_offset in [0.5, HIDE_SHIFT] {
             strip.x_offset = x_offset;
             for pos in [bar, actions, toast] {
                 assert!(strip.left_press(STRIP_BOUNDS, pos, none).is_none());
-                assert!(strip.hover_message(STRIP_BOUNDS, pos).is_none());
+                assert!(matches!(
+                    strip.hover_message(STRIP_BOUNDS, pos),
+                    Some(Message::StripHover(None))
+                ));
             }
         }
 
@@ -3158,38 +3275,38 @@ mod tests {
                 (x, y, w, h)
             );
         };
-        // Recorded with the strip before it knew about edges.
+        // Recorded for squat action chips (1.5× bar width, half bar height).
         let bars = [
-            (1044.0, 247.6, 10.0, 42.0),
-            (1031.0, 305.6, 23.0, 96.6),
-            (1017.0, 418.2, 37.0, 155.40001),
+            (1044.0, 262.3, 10.0, 42.0),
+            (1031.0, 320.3, 23.0, 96.6),
+            (1017.0, 432.9, 37.0, 155.40001),
         ];
         let collapsed = edge_layout(Edge::Right, false);
         for (bar, want) in collapsed.bars.iter().zip(bars) {
             close(*bar, want);
         }
-        close(collapsed.actions_button, (1038.0, 593.60004, 16.0, 58.8));
-        close(collapsed.actions_hit_area, (1000.0, 583.60004, 64.0, 84.8));
-        close(collapsed.add_hit_area, (1000.0, 583.60004, 64.0, 84.8));
+        close(collapsed.actions_button, (1030.0, 608.3, 24.0, 29.4));
+        close(collapsed.actions_hit_area, (1000.0, 598.3, 64.0, 55.4));
+        close(collapsed.add_hit_area, (1000.0, 598.3, 64.0, 55.4));
         assert_eq!(collapsed.max_scroll, 0.0);
 
         let expanded = edge_layout(Edge::Right, true);
         for (bar, want) in expanded.bars.iter().zip(bars) {
             close(*bar, want);
         }
-        close(expanded.actions_button, (989.5, 593.60004, 64.5, 58.8));
-        close(expanded.actions_hit_area, (1000.0, 583.60004, 64.0, 84.8));
-        close(expanded.add_button, (1038.0, 593.60004, 16.0, 58.8));
-        close(expanded.add_hit_area, (1036.0, 583.60004, 28.0, 84.79999));
-        close(expanded.search_button, (1005.0, 593.60004, 29.0, 58.8));
+        close(expanded.actions_button, (961.25, 608.3, 92.75, 29.4));
+        close(expanded.actions_hit_area, (1000.0, 598.3, 64.0, 55.4));
+        close(expanded.add_button, (1030.0, 608.3, 24.0, 29.4));
+        close(expanded.add_hit_area, (1028.0, 598.3, 36.0, 55.400024));
+        close(expanded.search_button, (982.5, 608.3, 43.5, 29.4));
         close(
             expanded.search_hit_area,
-            (1003.0, 583.60004, 33.0, 84.79999),
+            (1000.0, 598.3, 28.0, 55.400024),
         );
-        close(expanded.settings_button, (989.5, 598.85004, 11.5, 48.3));
+        close(expanded.settings_button, (961.25, 610.925, 17.25, 24.15));
         close(
             expanded.settings_hit_area,
-            (1000.0, 583.60004, 3.0, 84.79999),
+            (961.25, 610.925, 17.25, 24.15),
         );
 
         // Overflowing, scrolled and with a bar collapsing.
@@ -3206,8 +3323,8 @@ mod tests {
         close(over.bars[0], (1044.0, 191.0, 10.0, 42.0));
         close(over.bars[4], (1040.0, 448.2, 14.0, 29.4));
         close(over.bars[11], (1033.0, 1022.6, 21.0, 88.2));
-        close(over.actions_button, (1032.0, 1130.7999, 22.0, 58.8));
-        assert!((over.max_scroll - 580.60004).abs() < 1e-3);
+        close(over.actions_button, (1021.0, 1130.7999, 33.0, 29.4));
+        assert!((over.max_scroll - 551.2001).abs() < 1e-3);
     }
 
     fn three_notes() -> [Note; 3] {
