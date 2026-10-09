@@ -10,6 +10,7 @@ mod color_bubble;
 mod color_picker;
 mod color_wheel;
 mod command_passthrough;
+mod edge;
 mod export;
 mod export_panel;
 mod history;

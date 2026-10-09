@@ -3,6 +3,7 @@ use crate::autohide::{self, AutoHide};
 use crate::bar_strip::{
     band, compute_layout, peek_target, stack_target, BarStrip, StripLayout, HIDE_SHIFT, STRIP_WIDTH,
 };
+use crate::edge::Edge;
 use crate::export::{self, ExportFormat};
 use crate::export_panel::{export_panel, ExportJob, ExportState, ExportStatus, ExportView};
 use crate::history::History;
@@ -144,6 +145,7 @@ pub enum Message {
     ExportStatusExpired(u64, Instant),
     SettingChanged(SettingKey, f32),
     SettingToggled(SettingToggle),
+    EdgeChosen(Edge),
     ResetGroup(SettingsGroup),
     SettingsTabSelected(SettingsTab),
     /// Palette slot whose preset grid is open (`None` closes it).
@@ -791,6 +793,10 @@ impl App {
             }
             Message::SettingChanged(key, value) => {
                 self.settings.settings_mut().set(key, value);
+                return self.apply_settings();
+            }
+            Message::EdgeChosen(edge) => {
+                self.settings.settings_mut().window.edge = edge;
                 return self.apply_settings();
             }
             Message::SettingToggled(toggle) => {

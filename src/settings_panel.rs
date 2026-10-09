@@ -3,6 +3,7 @@
 
 use crate::app::Message;
 use crate::color_picker::swatch;
+use crate::edge::Edge;
 use crate::icons::{icon, Icon};
 use crate::note_panel::pressable;
 use crate::settings::SettingToggle;
@@ -117,6 +118,57 @@ fn slider_row<'a>(
 
 /// The Window group's toggle, on every platform.
 pub const AUTO_HIDE_LABEL: &str = "Auto-hide";
+
+/// The Window group's three-way screen edge control.
+pub const SCREEN_EDGE_LABEL: &str = "Screen edge";
+
+fn edge_label(edge: Edge) -> &'static str {
+    match edge {
+        Edge::Right => "Right",
+        Edge::Left => "Left",
+        Edge::Top => "Top",
+    }
+}
+
+/// One side of the screen edge switch: an ink wash marks the chosen edge.
+fn edge_button<'a>(edge: Edge, chosen: Edge, theme: theme::Theme, a: f32) -> Element<'a, Message> {
+    let selected = edge == chosen;
+    pressable(
+        text(edge_label(edge)).size(TEXT_XS),
+        Padding::new(2.0).left(space(2)).right(space(2)),
+        Message::EdgeChosen(edge),
+    )
+    .style(move |_theme: &Theme, status| button::Style {
+        background: match status {
+            button::Status::Pressed => Some(theme.ink(0.24 * a).into()),
+            button::Status::Hovered => {
+                Some(theme.ink(if selected { 0.18 } else { 0.1 } * a).into())
+            }
+            _ if selected => Some(theme.ink(0.14 * a).into()),
+            _ => None,
+        },
+        text_color: theme.ink(if selected { 0.9 } else { 0.6 } * a),
+        border: border::rounded(RADIUS_CONTROL),
+        ..Default::default()
+    })
+    .into()
+}
+
+fn edge_row<'a>(chosen: Edge, theme: theme::Theme, a: f32) -> Element<'a, Message> {
+    let mut buttons = row![].spacing(space(1));
+    for edge in Edge::ALL {
+        buttons = buttons.push(edge_button(edge, chosen, theme, a));
+    }
+    row![
+        text(SCREEN_EDGE_LABEL)
+            .size(TEXT_XS)
+            .color(theme.ink(0.75 * a)),
+        Space::new().width(Fill),
+        buttons,
+    ]
+    .align_y(iced::Alignment::Center)
+    .into()
+}
 
 /// A labelled switch in the panel's text style, showing `on`.
 fn switch<'a>(
@@ -352,6 +404,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
                         section = section.push(slider_row(settings, key, theme, a));
                     }
                     if group == SettingsGroup::Window {
+                        section = section.push(edge_row(settings.window.edge, theme, a));
                         let t = SettingToggle::AutoHide;
                         section = section.push(
                             switch(settings.is_on(t), AUTO_HIDE_LABEL, theme, a)
@@ -482,6 +535,15 @@ mod tests {
         assert_eq!(AUTO_HIDE_LABEL, "Auto-hide");
         let s = Settings::default();
         assert!(toggle_enabled(&s, SettingToggle::AutoHide, false));
+    }
+
+    #[test]
+    fn window_group_shows_screen_edge_and_strip_length() {
+        assert_eq!(SCREEN_EDGE_LABEL, "Screen edge");
+        let labels: Vec<_> = Edge::ALL.into_iter().map(edge_label).collect();
+        assert_eq!(labels, ["Right", "Left", "Top"]);
+        assert_eq!(SettingKey::HeightFraction.label(), "Strip length");
+        assert_eq!(SettingKey::HeightFraction.group(), SettingsGroup::Window);
     }
 
     #[test]

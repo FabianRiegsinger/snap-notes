@@ -2,6 +2,7 @@
 
 use crate::app::{NOTE_GAP, NOTE_MARGIN};
 use crate::bar_strip::STRIP_WIDTH;
+use crate::edge::Edge;
 use crate::note::{NoteColor, DEFAULT_PALETTE, DEFAULT_SLOTS, PALETTE};
 use crate::resize::MAX_NOTE_WIDTH;
 
@@ -88,6 +89,13 @@ pub struct WindowSettings {
     pub height_fraction: f32,
     /// The strip slides off the screen edge while not in use.
     pub auto_hide: bool,
+    /// The screen edge the strip docks to.
+    #[serde(serialize_with = "serialize_edge")]
+    pub edge: Edge,
+}
+
+fn serialize_edge<S: serde::Serializer>(edge: &Edge, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(edge.as_str())
 }
 
 impl Default for WindowSettings {
@@ -95,6 +103,7 @@ impl Default for WindowSettings {
         Self {
             height_fraction: 0.9,
             auto_hide: true,
+            edge: Edge::default(),
         }
     }
 }
@@ -354,7 +363,7 @@ impl SettingKey {
             SettingKey::PaperTint => "Paper tint",
             SettingKey::IdleControlAlpha => "Idle control opacity",
             SettingKey::Speed => "Animation speed",
-            SettingKey::HeightFraction => "Strip height",
+            SettingKey::HeightFraction => "Strip length",
         }
     }
 
@@ -434,6 +443,10 @@ impl Settings {
         let auto_hide = value.get("window").and_then(|w| w.get("auto_hide"));
         if let Some(v) = auto_hide.and_then(|v| v.as_bool()) {
             settings.window.auto_hide = v;
+        }
+        let edge = value.get("window").and_then(|w| w.get("edge"));
+        if let Some(v) = edge.and_then(|v| v.as_str()) {
+            settings.window.edge = Edge::parse(v);
         }
         settings
     }
@@ -736,7 +749,33 @@ mod tests {
         );
         assert_eq!(s.motion.speed, 1.0);
         assert_eq!((s.window.height_fraction, s.window.auto_hide), (0.9, true));
+        assert_eq!(s.window.edge, Edge::Right);
         assert_eq!(s.palette, DEFAULT_PALETTE.to_vec());
+    }
+
+    #[test]
+    fn edge_defaults_to_right_and_round_trips() {
+        assert_eq!(Settings::default().window.edge, Edge::Right);
+        for edge in [Edge::Left, Edge::Top] {
+            let mut s = Settings::default();
+            s.window.edge = edge;
+            let json = serde_json::to_string(&s).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["window"]["edge"], edge.as_str());
+            assert_eq!(Settings::from_json(&json).window.edge, edge);
+        }
+        for bad in [r#""bottom""#, r#""garbage""#, "7", "null"] {
+            let json = format!(r#"{{"window": {{"edge": {bad}}}}}"#);
+            assert_eq!(Settings::from_json(&json).window.edge, Edge::Right, "{bad}");
+        }
+        assert_eq!(Settings::from_json("{}").window.edge, Edge::Right);
+        let mut s = Settings::default();
+        s.window.edge = Edge::Top;
+        s.reset(SettingsGroup::Window);
+        assert_eq!(s.window.edge, Edge::Right);
+        s.window.edge = Edge::Left;
+        s.reset(SettingsGroup::Bars);
+        assert_eq!(s.window.edge, Edge::Left, "other groups leave the edge");
     }
 
     #[test]
