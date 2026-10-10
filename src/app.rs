@@ -3453,10 +3453,7 @@ impl App {
 
     /// Where the settings panel sits: a dragged position, or beside the strip.
     fn settings_target_rect(&self) -> Rectangle {
-        let room = match self.edge() {
-            Edge::Right | Edge::Left => self.window_size.height - 2.0 * NOTE_MARGIN,
-            Edge::Top => self.window_size.height - STRIP_WIDTH - NOTE_GAP - NOTE_MARGIN,
-        };
+        let room = self.panel_room();
         let height = room.min(PANEL_MAX_HEIGHT);
         let size = Size::new(PANEL_WIDTH, height);
         let top_left = self.settings_drag_pos.or(self.settings_pos);
@@ -3495,14 +3492,19 @@ impl App {
     /// on the strip's away side, centered on `anchor_y` (a coordinate along
     /// the edge) where it fits.
     fn panel_frame(&self, source: Rectangle, anchor_y: f32, morph: &Morph) -> MorphFrame {
-        let room = match self.edge() {
-            Edge::Right | Edge::Left => self.window_size.height - 2.0 * NOTE_MARGIN,
-            // Below the strip, its height is what is left under it.
-            Edge::Top => self.window_size.height - STRIP_WIDTH - NOTE_GAP - NOTE_MARGIN,
-        };
+        let room = self.panel_room();
         let height = room.min(PANEL_MAX_HEIGHT);
         let target = self.beside_strip(Size::new(PANEL_WIDTH, height), anchor_y);
         morph_frame(self.slid(source), target, morph.progress())
+    }
+
+    /// Height available to a panel, leaving `NOTE_MARGIN` at the window
+    /// edges. Below a Top strip it is what is left under [`Self::panel_away`].
+    fn panel_room(&self) -> f32 {
+        match self.edge() {
+            Edge::Right | Edge::Left => self.window_size.height - 2.0 * NOTE_MARGIN,
+            Edge::Top => self.window_size.height - self.panel_away() - NOTE_MARGIN,
+        }
     }
 
     /// Distance from the screen edge to a panel: clears the strip band and
@@ -4060,10 +4062,7 @@ impl App {
         // Below a Top strip, the note keeps to the room left under it.
         let height = match self.edge() {
             Edge::Right | Edge::Left => height,
-            Edge::Top => height.min(
-                (self.window_size.height - STRIP_WIDTH - NOTE_GAP - NOTE_MARGIN)
-                    .max(MIN_SIZE.height),
-            ),
+            Edge::Top => height.min(self.panel_room().max(MIN_SIZE.height)),
         };
         self.beside_strip(Size::new(width, height), self.anchor_y)
     }
@@ -6264,6 +6263,16 @@ mod tests {
         assert!(app.settings_pos.is_none());
         let reset = app.settings_frame().unwrap().rect.position();
         assert!((reset.x - start.x).abs() < 1.0 && (reset.y - start.y).abs() < 1.0);
+    }
+
+    #[test]
+    fn top_panel_keeps_its_bottom_margin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = on_edge(app_in(&dir), Edge::Top);
+        app.window_size = Size::new(1400.0, 500.0);
+        let rect = app.settings_target_rect();
+        assert!(rect.height < PANEL_MAX_HEIGHT, "must be height-limited");
+        assert_eq!(rect.y + rect.height, app.window_size.height - NOTE_MARGIN);
     }
 
     #[test]
