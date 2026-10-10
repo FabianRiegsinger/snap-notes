@@ -268,9 +268,9 @@ pub enum Message {
     BodyClicked(Option<usize>),
     /// A press on rendered text: the source offset of the character under it.
     BodyPressed(usize),
-    /// The trash button on the open peek of the note at this index:
-    /// deletes its note at once.
-    PeekDelete(usize),
+    /// The trash button on the open peek of the note at this index: the
+    /// peek asks whether to delete it.
+    PeekDeleteRequest(usize),
     /// Leave edit mode and show the note rendered again.
     EditorBlurred,
     /// Flip the task checkbox on this source line.
@@ -291,8 +291,13 @@ pub enum Message {
     /// A press on the open note's border starts resizing it.
     ResizeStart(Edges),
     ClosePanel,
-    /// The open note's trash button: it folds away, then is deleted.
-    DeleteNote(Uuid),
+    /// The open note's trash button: its header asks whether to delete it.
+    RequestDelete(Uuid),
+    /// "Delete" in the header's or the peek's question: the note folds or
+    /// collapses away, then is deleted (and can be undone).
+    ConfirmDelete,
+    /// "Cancel" in the delete question, or anything else that drops it.
+    CancelDelete,
     CopyNote,
     TogglePin,
     /// `COPIED_FOR` after the copy of this note with this number: the copy
@@ -505,6 +510,8 @@ pub struct App {
     morph: Morph,
     anchor_along: f32,
     pending_delete: Option<Uuid>,
+    /// The header or the peek asks whether to delete this note.
+    delete_ask: Option<DeleteAsk>,
     /// A deleted note whose bar is shrinking away; it is removed from the
     /// store once the bar is gone.
     collapsing: Option<(Uuid, Morph)>,
@@ -663,6 +670,15 @@ struct NoteResize {
     rect: Rectangle,
 }
 
+/// Where a trash button asks "Delete?" about a note.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DeleteAsk {
+    /// In the open note's header.
+    Header(Uuid),
+    /// On the open peek.
+    Peek(Uuid),
+}
+
 /// A finished delete that can still be undone.
 struct LastDelete {
     deleted: Deleted,
@@ -766,6 +782,7 @@ impl App {
             morph,
             anchor_along: 0.0,
             pending_delete: None,
+            delete_ask: None,
             collapsing: None,
             mode_fade,
             color_picker_open: false,
@@ -878,7 +895,7 @@ impl App {
             Message::StripHover(..)
             | Message::BarClicked(..)
             | Message::ActionsHovered(..)
-            | Message::PeekDelete(..)
+            | Message::PeekDeleteRequest(..)
             | Message::StripFileDropped(..)
             | Message::FileHovered
             | Message::FileHoverEnded
@@ -931,7 +948,9 @@ impl App {
             | Message::NoteResetPosition
             | Message::ResizeStart(..)
             | Message::ClosePanel
-            | Message::DeleteNote(..)
+            | Message::RequestDelete(..)
+            | Message::ConfirmDelete
+            | Message::CancelDelete
             | Message::CopyNote
             | Message::TogglePin
             | Message::CopiedExpired(..)
@@ -1007,6 +1026,7 @@ impl App {
             add_shake: self.shake_secs(Instant::now()).map_or(0.0, add_shake),
             clipboard_hint: self.clipboard_empty_at.is_some(),
             toast: self.toast_visible(),
+            peek_confirm: self.peek_confirming(),
             panel_open: self.panel_open(),
             actions_expanded: self.actions_open,
             actions_progress: self.actions_progress(),
@@ -1051,6 +1071,7 @@ impl App {
                         morph_progress: self.morph.progress(),
                         content_alpha: frame.content_alpha,
                         copied: self.copied_for(note.id),
+                        confirm_delete: self.delete_ask == Some(DeleteAsk::Header(note.id)),
                         pinned: self.top_pinned(note),
                         color_picker_open: self.color_picker_open,
                         color_hex: &self.color_hex,

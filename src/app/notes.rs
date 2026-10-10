@@ -5,6 +5,27 @@ use super::*;
 
 impl App {
     pub(super) fn handle_notes(&mut self, message: Message) -> Task<Message> {
+        // Working on the note anywhere else drops the header's delete question.
+        if matches!(
+            message,
+            Message::AddNote
+                | Message::NoteEdited(..)
+                | Message::BodyClicked(..)
+                | Message::BodyPressed(..)
+                | Message::ToggleTask(..)
+                | Message::TitleEdited(..)
+                | Message::NoteDragStart
+                | Message::ResizeStart(..)
+                | Message::ClosePanel
+                | Message::CopyNote
+                | Message::TogglePin
+                | Message::ToggleColorPicker
+                | Message::ToggleTextColorPicker
+                | Message::FormatApplied(..)
+                | Message::PickImage
+        ) {
+            self.drop_header_ask();
+        }
         match message {
             Message::AddNote => {
                 self.force_reveal = true;
@@ -241,16 +262,17 @@ impl App {
                     self.reminder_picker = None;
                 }
             }
-            Message::DeleteNote(id) => {
-                if self.active_note == Some(id) {
-                    // Fold the note back into its bar first, then delete it.
-                    // Only the latest delete can be undone.
-                    self.last_deleted = None;
-                    self.pending_delete = Some(id);
-                    self.morph.close();
-                    self.animating = true;
+            Message::RequestDelete(id) => {
+                if self.active_note == Some(id) && self.pending_delete.is_none() {
+                    self.delete_ask = Some(DeleteAsk::Header(id));
                 }
             }
+            Message::ConfirmDelete => match self.delete_ask.take() {
+                Some(DeleteAsk::Header(id)) => self.delete_open(id),
+                Some(DeleteAsk::Peek(id)) => return self.delete_peeked(id),
+                None => {}
+            },
+            Message::CancelDelete => self.delete_ask = None,
             Message::CopyNote => {
                 let note = self
                     .active_note
@@ -414,6 +436,24 @@ impl App {
         Task::none()
     }
 
+    /// Deletes the open note `id`: it folds back into its bar first, then
+    /// its bar collapses away. Only the latest delete can be undone.
+    pub(super) fn delete_open(&mut self, id: Uuid) {
+        if self.active_note == Some(id) {
+            self.last_deleted = None;
+            self.pending_delete = Some(id);
+            self.morph.close();
+            self.animating = true;
+        }
+    }
+
+    /// Drops the header's delete question, if it asks one.
+    pub(super) fn drop_header_ask(&mut self) {
+        if matches!(self.delete_ask, Some(DeleteAsk::Header(_))) {
+            self.delete_ask = None;
+        }
+    }
+
     pub(super) fn open_note(&mut self, index: usize) -> Task<Message> {
         let Some(id) = self.store.notes().get(index).map(|note| note.id) else {
             return Task::none();
@@ -432,6 +472,7 @@ impl App {
 
     /// Opens the note `id`, or closes it when it is the open one.
     pub(super) fn open_note_id(&mut self, id: Uuid) -> Task<Message> {
+        self.drop_header_ask();
         // A deleted note can't be opened while its bar collapses.
         if self.dying(id) {
             return Task::none();
@@ -797,6 +838,7 @@ impl App {
     }
 
     pub(super) fn finish_close(&mut self) -> Task<Message> {
+        self.drop_header_ask();
         if self.note_drag.is_some() {
             self.finish_note_drag();
         }

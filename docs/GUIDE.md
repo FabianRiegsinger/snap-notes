@@ -13,7 +13,7 @@
 
 ### The bar strip
 - **Dock-style magnification:** move the cursor along the strip and nearby bars grow with smooth spring physics.
-- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, scroll over it to read the rest of a longer note, and click it to open the note. Its trash button deletes the note at once, see [Notes](#notes) for undo.
+- **Hover peek:** rest on a bar and it widens into a small preview with the title, a divider and the first lines. The preview is as wide as the note (its saved width, or the default size), never narrower than 260 px. Move onto the preview to keep it open, scroll over it to read the rest of a longer note, and click it to open the note. Its trash button asks "Delete this note?" in the preview, with **Delete** and **Cancel**. Esc, Cancel or moving off the preview cancels; see [Notes](#notes) for undo.
 - **Actions:** hover the slot after the bars (on Top: to their right) to unfold **New (+)**, **Search** and **Settings** side by side; move away to fold it back. Alt/Option-click on **+** still makes a note from the clipboard (empty clipboard shakes the slot and shows "Clipboard is empty"). Cmd/Ctrl+N, Cmd/Ctrl+F and Cmd/Ctrl+, still work without hovering Actions. Resting on a button shows its hint past the whole row, so it never covers the other buttons; where the window has no room for that, the hint sits after the row along the edge instead.
 - **Search:** click the 🔍 slot after `+` (on Top: to its right), press Cmd/Ctrl+F or choose **Search…** in the tray menu. Hovering 🔍 shows "Search (Cmd+F)" (Ctrl+F elsewhere). See [Search](#search).
 - **Hints on Linux:** hover hints aren't shown there unless a note or panel is open (the window is wide then).
@@ -38,7 +38,7 @@
 - **Move it anywhere:** drag the grip at the top. The note reopens where you left it, and double-clicking the grip docks it again.
 - **Resize it:** drag any edge or corner. Each note remembers its own size.
 - **Color code it:** the swatch in the header opens a color bubble: six presets, a color wheel you can drag (around for the hue, toward the rim for more vivid colors), a brightness slider, and a hex field.
-- **Delete and undo:** the trash button in the header deletes the note at once, with no confirmation. The toast "Note deleted · Undo" stays for 5 s, and clicking Undo restores the note. Cmd/Ctrl+Z also undoes it, but only while no note is open. Only the latest delete can be undone.
+- **Delete and undo:** the trash button in the header first asks inline, "Delete? Delete Cancel", in its place. **Delete** folds the note away and deletes it; Cancel, Esc, clicking elsewhere in the note or closing it keeps it. The toast "Note deleted · Undo" stays for 5 s, and clicking Undo restores the note. Cmd/Ctrl+Z also undoes it, but only while no note is open. Only the latest delete can be undone.
 - **Copy:** the copy button in the header copies the note's title and body. Its icon shows a ✓ for a moment afterwards.
 - **Images:** drop a png, jpg, gif or webp file (up to 20 MB) onto an open note, paste an image-only clipboard with Cmd/Ctrl+V, or use the image button in the toolbar.
 - **Clickable links:** `http`, `https` and `mailto` links in the formatted view open in your browser.
@@ -140,7 +140,7 @@ On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Ne
 | Cmd/Ctrl+V | Paste an image into the open note |
 | Cmd/Ctrl+Z | Undo the last delete (only while no note is open) |
 | Enter | Open the first search result (in the search field) |
-| Esc | Leave edit mode, close search, export or settings, or fold the open note |
+| Esc | Cancel a delete question, leave edit mode, close search, export or settings, or fold the open note |
 
 The Cmd/Ctrl shortcuts also work while you type in a note's title or body or in the search field.
 

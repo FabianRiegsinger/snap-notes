@@ -116,6 +116,8 @@ pub struct PostIt<'a> {
     pub content_alpha: f32,
     /// The note was just copied; the copy button shows a check.
     pub copied: bool,
+    /// The header asks "Delete?" in place of its trash button.
+    pub confirm_delete: bool,
     /// The note (its stack's top) is pinned; the pin button draws at full ink.
     pub pinned: bool,
     pub color_picker_open: bool,
@@ -181,6 +183,50 @@ fn header_button<'a>(
         message,
     )
     .style(move |_theme: &Theme, status| header_button_style(theme, alpha, active, status))
+    .into()
+}
+
+/// The header's inline delete question, in place of its trash button:
+/// "Delete?" then a danger "Delete" and a plain "Cancel".
+fn delete_question<'a>(theme: theme::Theme, alpha: f32) -> Element<'a, Message> {
+    let fade = move |c: Color| Color {
+        a: c.a * alpha,
+        ..c
+    };
+    let choice = |label: &'static str, message: Message, danger: bool| {
+        pressable(
+            text(label).size(TEXT_SM).font(theme::BODY_FONT),
+            Padding::new(2.0).left(space(2)).right(space(2)),
+            message,
+        )
+        .style(move |_theme: &Theme, status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            let (background, text_color) = if danger {
+                let (fill, label) = theme.danger_button(hovered);
+                (fade(fill), fade(label))
+            } else {
+                let wash = if hovered { 0.18 } else { 0.10 };
+                (theme.ink(wash * alpha), theme.ink(alpha))
+            };
+            button::Style {
+                background: Some(background.into()),
+                text_color,
+                border: border::rounded(RADIUS_CONTROL),
+                ..Default::default()
+            }
+        })
+    };
+    row![
+        text("Delete?")
+            .size(TEXT_SM)
+            .font(theme::BODY_FONT)
+            .color(theme.ink(alpha))
+            .wrapping(text::Wrapping::None),
+        choice("Delete", Message::ConfirmDelete, true),
+        choice("Cancel", Message::CancelDelete, false),
+    ]
+    .spacing(space(1))
+    .align_y(iced::Alignment::Center)
     .into()
 }
 
@@ -378,6 +424,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
         morph_progress,
         content_alpha: a,
         copied,
+        confirm_delete,
         pinned,
         color_picker_open,
         color_hex,
@@ -398,7 +445,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
     } else {
         0.0
     };
-    let controls = if hovered || dragging || color_picker_open {
+    let controls = if hovered || dragging || color_picker_open || confirm_delete {
         a
     } else {
         a * idle_control_alpha
@@ -532,13 +579,17 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                         theme,
                         controls
                     ),
-                    header_button(
-                        Icon::Trash,
-                        Message::DeleteNote(note.id),
-                        false,
-                        theme,
-                        controls
-                    ),
+                    if confirm_delete {
+                        delete_question(theme, a)
+                    } else {
+                        header_button(
+                            Icon::Trash,
+                            Message::RequestDelete(note.id),
+                            false,
+                            theme,
+                            controls,
+                        )
+                    },
                     header_button(Icon::Close, Message::ClosePanel, false, theme, controls),
                 ]
                 .spacing(2)
@@ -990,6 +1041,7 @@ mod tests {
             morph_progress,
             content_alpha: 1.0,
             copied: false,
+            confirm_delete: false,
             pinned: false,
             color_picker_open: bubble_open,
             color_hex: "#FF6B6B",

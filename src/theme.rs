@@ -120,6 +120,18 @@ impl Theme {
         }
     }
 
+    /// A "Delete" button's fill (danger, deepened while hovered or
+    /// pressed) and its label, which stays readable (4.5:1) on it.
+    pub fn danger_button(&self, hovered: bool) -> (Color, Color) {
+        let base = self.danger(1.0);
+        let fill = if hovered {
+            mix(base, Color::BLACK, 0.12)
+        } else {
+            base
+        };
+        (fill, self.text_on(fill, 1.0))
+    }
+
     pub fn focus_ring(&self) -> Color {
         self.ink(0.25)
     }
@@ -265,6 +277,18 @@ mod tests {
                 let bg = Color::from_rgb(r, g, b);
                 let ratio = contrast(theme.text_on(bg, 1.0), bg);
                 assert!(ratio >= 4.5, "{mode:?} {:?}: {ratio}", c.rgba);
+            }
+        }
+    }
+
+    #[test]
+    fn danger_button_label_meets_aa() {
+        for mode in MODES {
+            let theme = Theme::new(mode);
+            for hovered in [false, true] {
+                let (fill, label) = theme.danger_button(hovered);
+                let ratio = contrast(label, fill);
+                assert!(ratio >= 4.5, "{mode:?} hovered {hovered}: {ratio}");
             }
         }
     }

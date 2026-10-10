@@ -62,12 +62,19 @@ fn theme_change_updates_app_theme() {
 }
 
 #[test]
-fn peek_trash_deletes_at_once() {
+fn peek_trash_asks_then_deletes() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_open_peek(&dir);
     let id = app.store.notes()[0].id;
-    let _ = app.update(Message::PeekDelete(0));
-    // No question first: the bar starts collapsing right away.
+    let _ = app.update(Message::PeekDeleteRequest(0));
+    // The peek asks first; nothing goes until the answer.
+    assert_eq!(app.delete_ask, Some(DeleteAsk::Peek(id)));
+    assert!(app.collapsing.is_none());
+    assert_eq!(app.peek_note, Some(id));
+    settle(&mut app);
+    assert_eq!(app.store.notes().len(), 1);
+    let _ = app.update(Message::ConfirmDelete);
+    assert_eq!(app.delete_ask, None);
     assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(id));
     assert_eq!(app.peek_note, None);
     settle(&mut app);
@@ -80,12 +87,127 @@ fn peek_trash_deletes_at_once() {
     );
 }
 
+/// The open note's header trash, answered "Delete".
+fn trash_note(app: &mut App, id: Uuid) {
+    let _ = app.update(Message::RequestDelete(id));
+    let _ = app.update(Message::ConfirmDelete);
+}
+
+/// The peek's trash on bar `entry`, answered "Delete".
+fn trash_peek(app: &mut App, entry: usize) {
+    let _ = app.update(Message::PeekDeleteRequest(entry));
+    let _ = app.update(Message::ConfirmDelete);
+}
+
+#[test]
+fn peek_delete_cancel_keeps_the_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_peek(&dir);
+    let id = app.store.notes()[0].id;
+    let _ = app.update(Message::PeekDeleteRequest(0));
+    let _ = app.update(Message::CancelDelete);
+    assert_eq!(app.delete_ask, None);
+    assert_eq!(app.peek_note, Some(id));
+    // A late "Delete" does nothing.
+    let _ = app.update(Message::ConfirmDelete);
+    settle(&mut app);
+    assert_eq!(app.store.notes().len(), 1);
+    assert!(app.last_deleted.is_none());
+}
+
+#[test]
+fn closing_the_peek_drops_its_delete_question() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_peek(&dir);
+    let _ = app.update(Message::PeekDeleteRequest(0));
+    // The cursor leaves the bar and the peek: the peek folds away.
+    let peek = app.peek_rect().expect("open peek has a rect");
+    let outside = Point::new(peek.x - 20.0, peek.center().y);
+    let _ = app.update(Message::CursorMoved(outside));
+    let _ = app.update(Message::StripHover(None));
+    assert!(!app.peek.is_opening());
+    assert_eq!(app.delete_ask, None);
+    let _ = app.update(Message::ConfirmDelete);
+    settle(&mut app);
+    assert_eq!(app.store.notes().len(), 1);
+
+    let mut app = app_with_open_peek(&dir);
+    let _ = app.update(Message::PeekDeleteRequest(0));
+    app.hide_peek();
+    assert_eq!(app.delete_ask, None);
+}
+
+#[test]
+fn peek_confirm_shows_undo_toast_and_undo_restores() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_peek(&dir);
+    let id = app.store.notes()[0].id;
+    trash_peek(&mut app, 0);
+    settle(&mut app);
+    assert!(app.store.notes().is_empty());
+    assert!(app.toast_visible());
+    let _ = app.update(Message::UndoDelete);
+    assert_eq!(order(&app), vec![id]);
+}
+
+#[test]
+fn esc_cancels_the_delete_question() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "first");
+    let id = app.active_note.unwrap();
+    let _ = app.update(Message::RequestDelete(id));
+    let _ = app.update(escape());
+    assert_eq!(app.delete_ask, None);
+    // Esc only drops the question; the note stays open.
+    assert!(app.morph.is_opening());
+    assert_eq!(app.active_note, Some(id));
+
+    let mut app = app_with_open_peek(&dir);
+    let _ = app.update(Message::PeekDeleteRequest(0));
+    let _ = app.update(escape());
+    assert_eq!(app.delete_ask, None);
+    assert!(app.peek_note.is_some());
+}
+
+#[test]
+fn header_delete_cancel_keeps_the_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "first");
+    let id = app.active_note.unwrap();
+    let _ = app.update(Message::RequestDelete(id));
+    let _ = app.update(Message::CancelDelete);
+    assert_eq!(app.delete_ask, None);
+    let _ = app.update(Message::ConfirmDelete);
+    settle(&mut app);
+    assert_eq!(app.active_note, Some(id));
+    assert_eq!(app.store.notes().len(), 1);
+    assert!(app.last_deleted.is_none());
+}
+
+#[test]
+fn closing_or_clicking_elsewhere_drops_the_header_question() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "first");
+    let id = app.active_note.unwrap();
+    let _ = app.update(Message::RequestDelete(id));
+    let _ = app.update(Message::BodyClicked(Some(0)));
+    assert_eq!(app.delete_ask, None);
+
+    let _ = app.update(Message::RequestDelete(id));
+    let _ = app.update(Message::ClosePanel);
+    assert_eq!(app.delete_ask, None);
+    let _ = app.update(Message::ConfirmDelete);
+    settle(&mut app);
+    assert_eq!(app.store.notes().len(), 1);
+}
+
 #[test]
 fn peek_delete_only_for_the_peeked_note() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_open_peek(&dir);
     app.store.add_note(&crate::note::PALETTE);
-    let _ = app.update(Message::PeekDelete(1));
+    trash_peek(&mut app, 1);
+    assert_eq!(app.delete_ask, None);
     assert!(app.collapsing.is_none());
     settle(&mut app);
     assert_eq!(app.store.notes().len(), 2);
@@ -96,7 +218,7 @@ fn peek_delete_needs_the_open_peek() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_open_peek(&dir);
     app.hide_peek();
-    let _ = app.update(Message::PeekDelete(0));
+    trash_peek(&mut app, 0);
     settle(&mut app);
     assert_eq!(app.store.notes().len(), 1);
 }
@@ -156,13 +278,22 @@ fn tick_until(app: &mut App, done: impl Fn(&App) -> bool) {
 }
 
 #[test]
-fn header_trash_deletes_without_confirm() {
+fn header_trash_asks_then_deletes() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_note(&dir, "first");
     app.store.add_note(&crate::note::PALETTE);
     let id = app.store.notes()[0].id;
-    let _ = app.update(Message::DeleteNote(id));
-    // The note folds into its bar first; nothing asks.
+    let _ = app.update(Message::RequestDelete(id));
+    // The header asks first; the note stays open and whole.
+    assert_eq!(app.delete_ask, Some(DeleteAsk::Header(id)));
+    assert_eq!(app.pending_delete, None);
+    assert!(app.morph.is_opening());
+    settle(&mut app);
+    assert_eq!(app.active_note, Some(id));
+    assert_eq!(app.store.notes().len(), 2);
+    let _ = app.update(Message::ConfirmDelete);
+    assert_eq!(app.delete_ask, None);
+    // The note folds into its bar first.
     assert_eq!(app.pending_delete, Some(id));
     assert!(!app.morph.is_opening());
     tick_until(&mut app, |a| a.active_note.is_none());
@@ -184,7 +315,9 @@ fn header_trash_ignores_another_note() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_note(&dir, "first");
     let other = app.store.add_note(&crate::note::PALETTE);
-    let _ = app.update(Message::DeleteNote(other));
+    let _ = app.update(Message::RequestDelete(other));
+    assert_eq!(app.delete_ask, None);
+    let _ = app.update(Message::ConfirmDelete);
     assert_eq!(app.pending_delete, None);
     assert!(app.morph.is_opening());
 }
@@ -194,7 +327,7 @@ fn peek_delete_collapses_too() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_open_peek(&dir);
     let id = app.store.notes()[0].id;
-    let _ = app.update(Message::PeekDelete(0));
+    trash_peek(&mut app, 0);
     assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(id));
     assert_eq!(app.store.notes().len(), 1);
     assert!(app.animating);
@@ -209,11 +342,11 @@ fn second_delete_finishes_running_collapse() {
     let mut app = app_with_open_peek(&dir);
     let b = app.store.add_note(&crate::note::PALETTE);
     let a = app.store.notes()[0].id;
-    let _ = app.update(Message::PeekDelete(0));
+    trash_peek(&mut app, 0);
     assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(a));
 
     app.peek_note = Some(b);
-    let _ = app.update(Message::PeekDelete(1));
+    trash_peek(&mut app, 1);
     assert!(app.store.notes().iter().all(|n| n.id != a));
     assert_eq!(app.collapsing.as_ref().map(|(c, _)| *c), Some(b));
     assert_eq!(app.store.notes().len(), 1);
@@ -224,7 +357,7 @@ fn collapsing_bar_ignores_clicks() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_open_peek(&dir);
     app.store.add_note(&crate::note::PALETTE);
-    let _ = app.update(Message::PeekDelete(0));
+    trash_peek(&mut app, 0);
     let bar = app.strip_layout().bars[0];
     let _ = app.update(Message::BarClicked(0));
     assert_eq!(app.active_note, None);
@@ -403,7 +536,7 @@ fn deleting_stack_top_promotes_member() {
     assert!(app.store.stack(a1, a));
     assert!(app.store.stack(a2, a));
     app.sync_entries();
-    let _ = app.update(Message::PeekDelete(0));
+    trash_peek(&mut app, 0);
     // The stack's bar stays while its top goes.
     assert_eq!(app.collapse(), None);
     settle(&mut app);
@@ -414,7 +547,7 @@ fn deleting_stack_top_promotes_member() {
     // Deleting a member just removes it.
     let _ = app.update(Message::OpenStackMember(a2));
     settle(&mut app);
-    let _ = app.update(Message::DeleteNote(a2));
+    trash_note(&mut app, a2);
     settle(&mut app);
     assert_eq!(order(&app), vec![a1, b]);
     assert!(app.store.notes().iter().all(|n| n.stack.is_none()));
@@ -1606,7 +1739,7 @@ fn undo_during_second_delete_does_not_restore_first() {
     let _ = app.update(Message::BarClicked(0));
     settle(&mut app);
     assert_eq!(app.active_note, Some(ids[2]));
-    let _ = app.update(Message::DeleteNote(ids[2]));
+    trash_note(&mut app, ids[2]);
     let _ = app.update(Message::UndoDelete);
     settle(&mut app);
     assert_eq!(order(&app), vec![ids[3]]);
@@ -3417,7 +3550,7 @@ fn delete_mid_edit_then_undo_shows_no_raw_tag() {
     let mut app = app_with_open_note(&dir);
     let id = app.active_note.unwrap();
     let _ = app.update(Message::TitleEdited("Call @tue".into()));
-    let _ = app.update(Message::DeleteNote(id));
+    trash_note(&mut app, id);
     settle(&mut app);
     assert!(app.active_note.is_none());
     let _ = app.update(Message::UndoDelete);
@@ -3610,7 +3743,7 @@ fn delete_survives_hotkey_mid_fold() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_note(&dir, "first");
     let id = app.store.notes()[0].id;
-    let _ = app.update(Message::DeleteNote(id));
+    trash_note(&mut app, id);
     tick_a_little(&mut app);
     assert_eq!(app.active_note, Some(id));
     let _ = app.update(Message::HotkeyPressed);

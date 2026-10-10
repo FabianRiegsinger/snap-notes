@@ -37,6 +37,10 @@ impl App {
                     _ => {}
                 }
                 match key.as_ref() {
+                    // Esc first drops a delete question, and only that.
+                    keyboard::Key::Named(Named::Escape) if self.delete_ask.is_some() => {
+                        self.delete_ask = None
+                    }
                     keyboard::Key::Named(Named::Escape) if self.color_picker_open => {
                         self.color_picker_open = false
                     }

@@ -1223,6 +1223,8 @@ pub struct BarStrip<'a> {
     pub clipboard_hint: bool,
     /// Shows the undo toast after a delete beside the `+` slot.
     pub toast: bool,
+    /// The open peek asks whether to delete its note.
+    pub peek_confirm: bool,
     /// A panel (search, settings or export) is open: the slots show no
     /// tooltips.
     pub panel_open: bool,
@@ -1306,7 +1308,8 @@ impl<'a> BarStrip<'a> {
     fn peek_parts(&self, i: usize, bar: Rectangle) -> Option<(&'a Note, f32, PeekText)> {
         let note = self.note(i)?;
         let width = note_peek_width(note, self.default_note_width, bar, self.edge);
-        let text = entry_peek_text(self.notes, self.entries.get(i)?, width);
+        let mut text = entry_peek_text(self.notes, self.entries.get(i)?, width);
+        text.confirming = self.peek_confirm;
         Some((note, width, text))
     }
 
@@ -1401,7 +1404,8 @@ impl<'a> BarStrip<'a> {
 
     /// What a press at `pos` on the open peek does: its trash button and a
     /// stack's rows and Unstack button once it is fully open, otherwise
-    /// opening the note.
+    /// opening the note. While the delete question shows, only its two
+    /// buttons answer; other presses on the peek do nothing.
     fn peek_press(&self, bounds: Rectangle, pos: Point) -> Option<Option<Message>> {
         let i = self.peek_hit(bounds, pos)?;
         let (_, progress) = self.peek?;
@@ -1410,8 +1414,16 @@ impl<'a> BarStrip<'a> {
         let parts = peek_layout(bar, bounds, 1.0, &text, width, self.edge);
         let row = parts.stack_rows.iter().position(|r| r.contains(pos));
         let open = progress >= 0.99;
-        Some(if open && parts.trash.contains(pos) {
-            Some(Message::PeekDelete(i))
+        Some(if text.confirming {
+            if parts.delete.contains(pos) {
+                Some(Message::ConfirmDelete)
+            } else if parts.cancel.contains(pos) {
+                Some(Message::CancelDelete)
+            } else {
+                None
+            }
+        } else if open && parts.trash.contains(pos) {
+            Some(Message::PeekDeleteRequest(i))
         } else if open && parts.unstack.is_some_and(|u| u.contains(pos)) {
             Some(Message::Unstack(i))
         } else if let Some(row) = row.filter(|_| open) {
@@ -2667,6 +2679,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            peek_confirm: false,
             panel_open: false,
             actions_expanded: false,
             actions_progress: 0.0,
@@ -2893,6 +2906,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: true,
+            peek_confirm: false,
             panel_open: false,
             actions_expanded: false,
             actions_progress: 0.0,
@@ -2962,6 +2976,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            peek_confirm: false,
             panel_open: false,
             actions_expanded: false,
             actions_progress: 0.0,
@@ -2992,6 +3007,68 @@ mod tests {
             press(parts.title),
             Some(Some(Message::BarClicked(0)))
         ));
+        assert!(matches!(
+            press(parts.trash.center()),
+            Some(Some(Message::PeekDeleteRequest(0)))
+        ));
+    }
+
+    #[test]
+    fn peek_question_answers_only_on_its_buttons() {
+        let notes = [crate::note::Note::new(crate::note::PALETTE[0])];
+        let entries = crate::strip_model::entries(&notes);
+        let magnification = MagnificationState::new();
+        let drag = None;
+        let bars = BarSettings::default();
+        let strip = BarStrip {
+            notes: &notes,
+            entries: &entries,
+            progress: &[],
+            magnification: &magnification,
+            drag: &drag,
+            scroll_offset: 0.0,
+            peek: Some((0, 1.0)),
+            bars: &bars,
+            height_fraction: 1.0,
+            paper_tint: 0.0,
+            default_note_width: 260.0,
+            theme: theme::Theme::default(),
+            open: None,
+            collapse: None,
+            dimmed: Vec::new(),
+            pulse: Vec::new(),
+            jump: Vec::new(),
+            alert: Vec::new(),
+            add_shake: 0.0,
+            clipboard_hint: false,
+            toast: false,
+            peek_confirm: true,
+            panel_open: false,
+            actions_expanded: false,
+            actions_progress: 0.0,
+            x_offset: 0.0,
+            peek_scroll: 0.0,
+            edge: Edge::Right,
+        };
+        let bounds = Rectangle::new(Point::new(1000.0, 0.0), Size::new(STRIP_WIDTH, 900.0));
+        let bar = strip.layout_in(bounds).bars[0];
+        let (_, width, text) = strip.peek_parts(0, bar).unwrap();
+        assert!(text.confirming);
+        let parts = peek_layout(bar, bounds, 1.0, &text, width, Edge::Right);
+        let press = |pos| strip.peek_press(bounds, pos);
+        assert!(matches!(
+            press(parts.delete.center()),
+            Some(Some(Message::ConfirmDelete))
+        ));
+        assert!(matches!(
+            press(parts.cancel.center()),
+            Some(Some(Message::CancelDelete))
+        ));
+        // The rest of the peek, its trash and title included, does nothing.
+        assert!(matches!(press(parts.trash.center()), Some(None)));
+        assert!(matches!(press(parts.title), Some(None)));
+        // Its whole area, buttons included, keeps the peek open.
+        assert!(strip.peek_hit(bounds, parts.cancel.center()).is_some());
     }
 
     #[test]
@@ -3029,6 +3106,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            peek_confirm: false,
             panel_open: false,
             actions_expanded: false,
             actions_progress: 0.0,
@@ -3090,6 +3168,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            peek_confirm: false,
             panel_open: false,
             actions_expanded: false,
             actions_progress: 0.0,
@@ -3175,6 +3254,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            peek_confirm: false,
             panel_open: false,
             actions_expanded: false,
             actions_progress: 0.0,
@@ -3223,6 +3303,7 @@ mod tests {
             add_shake: 0.0,
             clipboard_hint: false,
             toast: false,
+            peek_confirm: false,
             panel_open: false,
             actions_expanded: false,
             actions_progress: 0.0,

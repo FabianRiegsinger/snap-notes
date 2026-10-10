@@ -50,6 +50,11 @@ const TRASH_INSET: f32 = 8.0;
 /// The stack peek's "Unstack" button below its list, this far below it.
 const UNSTACK_GAP: f32 = 8.0;
 const UNSTACK_BUTTON: Size = Size::new(76.0, 24.0);
+/// The "Delete this note?" question and its two buttons below it.
+const CONFIRM_QUESTION: &str = "Delete this note?";
+const CONFIRM_BUTTON: Size = Size::new(68.0, 24.0);
+const CONFIRM_GAP: f32 = 8.0;
+const CONFIRM_HEIGHT: f32 = BODY_LINE + CONFIRM_GAP + CONFIRM_BUTTON.height;
 /// Shown in a stack's list for a note without a title.
 const UNTITLED: &str = "Untitled";
 /// A stack's list shows at most this many notes, then "+N more".
@@ -74,6 +79,8 @@ pub struct PeekText {
     pub stack: Vec<(Uuid, String)>,
     /// How many of the stack's notes the list leaves out (`+N more`).
     pub stack_more: usize,
+    /// The body asks "Delete this note?" with Delete and Cancel buttons.
+    pub confirming: bool,
 }
 
 /// Where the peek and its parts are. Text and button positions are those of
@@ -97,6 +104,9 @@ pub struct PeekLayout {
     pub stack_more: Option<Rectangle>,
     /// A stack's "Unstack" button below its list, kept inside the peek.
     pub unstack: Option<Rectangle>,
+    /// The delete question's buttons, used while it shows.
+    pub delete: Rectangle,
+    pub cancel: Rectangle,
 }
 
 /// The width the peek of `note` asks for: the open note's, or the default
@@ -207,6 +217,7 @@ pub fn peek_text(note: &Note, width: f32) -> PeekText {
         reminder: reminder::at(note).map(reminder::label),
         stack: Vec::new(),
         stack_more: 0,
+        confirming: false,
     }
 }
 
@@ -300,14 +311,18 @@ pub fn scrollbar(
 }
 
 /// Height of the open peek: header, divider and body (at least one line,
-/// which shows a placeholder for an empty body).
+/// which shows a placeholder for an empty body, and room for the delete
+/// question while it shows).
 pub fn peek_height(text: &PeekText) -> f32 {
-    let body = if text.stack.is_empty() {
+    let mut body = if text.stack.is_empty() {
         shown_rows(text) as f32 * BODY_LINE
     } else {
         let rows = text.stack.len() + usize::from(text.stack_more > 0);
         rows as f32 * BODY_LINE + UNSTACK_GAP + UNSTACK_BUTTON.height
     };
+    if text.confirming {
+        body = body.max(CONFIRM_HEIGHT);
+    }
     PADDING_TOP + title_height(text) + DIVIDER_GAP + 1.0 + BODY_GAP + body + PADDING_BOTTOM
 }
 
@@ -383,6 +398,7 @@ pub fn peek_layout(
             UNSTACK_BUTTON,
         )
     });
+    let buttons_y = body.y + BODY_LINE + CONFIRM_GAP;
     PeekLayout {
         rect: rect_at(ease_out_cubic(progress)),
         title,
@@ -404,6 +420,11 @@ pub fn peek_layout(
         stack_rows,
         stack_more,
         unstack,
+        delete: Rectangle::new(Point::new(body.x, buttons_y), CONFIRM_BUTTON),
+        cancel: Rectangle::new(
+            Point::new(body.x + CONFIRM_BUTTON.width + CONFIRM_GAP, buttons_y),
+            CONFIRM_BUTTON,
+        ),
     }
 }
 
@@ -582,8 +603,13 @@ pub fn draw_peek(renderer: &mut iced::Renderer, theme: &Theme, peek: PeekDraw) {
     }
 
     let hovered = |r: Rectangle| cursor.is_some_and(|c| r.contains(c));
+    let confirming = text.confirming;
     // The stack row under the cursor is shaded, before any text draws.
-    if let Some(row) = layout.stack_rows.iter().find(|r| hovered(**r)) {
+    if let Some(row) = layout
+        .stack_rows
+        .iter()
+        .find(|r| !confirming && hovered(**r))
+    {
         renderer::Renderer::fill_quad(
             renderer,
             Quad {
@@ -598,7 +624,7 @@ pub fn draw_peek(renderer: &mut iced::Renderer, theme: &Theme, peek: PeekDraw) {
             theme.ink(0.06 * alpha),
         );
     }
-    if let Some((track, thumb)) = scrollbar(text, &layout, scroll) {
+    if let Some((track, thumb)) = scrollbar(text, &layout, scroll).filter(|_| !confirming) {
         for (bounds, ink) in [(track, 0.08), (thumb, 0.35)] {
             renderer::Renderer::fill_quad(
                 renderer,
@@ -679,8 +705,21 @@ pub fn draw_peek(renderer: &mut iced::Renderer, theme: &Theme, peek: PeekDraw) {
         ),
     }
 
-    // Body: the lines scrolled into the shown rows, or the placeholder.
-    if text.lines.is_empty() && text.stack.is_empty() {
+    // Body: the delete question, the lines scrolled into the shown rows,
+    // or the placeholder.
+    if confirming {
+        draw_text(
+            CONFIRM_QUESTION.into(),
+            layout.body,
+            BODY_FONT,
+            BODY_SIZE,
+            BODY_LINE,
+            LineHeight::Relative(theme::BODY_LINE_HEIGHT),
+            1,
+            theme.ink(alpha),
+            rect,
+        );
+    } else if text.lines.is_empty() && text.stack.is_empty() {
         draw_text(
             PLACEHOLDER.into(),
             layout.body,
@@ -701,7 +740,7 @@ pub fn draw_peek(renderer: &mut iced::Renderer, theme: &Theme, peek: PeekDraw) {
         .iter()
         .enumerate()
         .skip(first)
-        .take(MAX_LINES + 1)
+        .take(if confirming { 0 } else { MAX_LINES + 1 })
     {
         let at = Point::new(layout.body.x, layout.body.y + i as f32 * BODY_LINE - scroll);
         draw_text(
@@ -719,7 +758,12 @@ pub fn draw_peek(renderer: &mut iced::Renderer, theme: &Theme, peek: PeekDraw) {
 
     // A stack: its notes' titles, each opening its note, then "Unstack".
     let shade_if = |r: Rectangle, base: f32| if hovered(r) { base + 0.08 } else { base };
-    for ((_, title), row) in text.stack.iter().zip(&layout.stack_rows) {
+    for ((_, title), row) in text
+        .stack
+        .iter()
+        .zip(&layout.stack_rows)
+        .take_while(|_| !confirming)
+    {
         let faint = if title == UNTITLED { 0.35 } else { 0.8 };
         draw_text(
             title.clone(),
@@ -733,7 +777,7 @@ pub fn draw_peek(renderer: &mut iced::Renderer, theme: &Theme, peek: PeekDraw) {
             rect,
         );
     }
-    if let Some(more) = layout.stack_more {
+    if let Some(more) = layout.stack_more.filter(|_| !confirming) {
         draw_text(
             format!("+{} more", text.stack_more),
             more.position(),
@@ -746,7 +790,7 @@ pub fn draw_peek(renderer: &mut iced::Renderer, theme: &Theme, peek: PeekDraw) {
             rect,
         );
     }
-    if let Some(unstack) = layout.unstack {
+    if let Some(unstack) = layout.unstack.filter(|_| !confirming) {
         draw_button(
             renderer,
             "Unstack",
@@ -797,7 +841,35 @@ pub fn draw_peek(renderer: &mut iced::Renderer, theme: &Theme, peek: PeekDraw) {
         draw_label(renderer, when, label, BODY_FONT, BODY_SIZE, color, rect);
     }
 
-    let trash_alpha = if hovered(layout.trash) { 0.9 } else { 0.45 };
+    if confirming {
+        let (fill, label) = theme.danger_button(hovered(layout.delete));
+        let faded = |c: Color| Color {
+            a: c.a * alpha,
+            ..c
+        };
+        draw_button(
+            renderer,
+            "Delete",
+            layout.delete,
+            faded(fill),
+            faded(label),
+            rect,
+        );
+        draw_button(
+            renderer,
+            "Cancel",
+            layout.cancel,
+            theme.ink(shade_if(layout.cancel, 0.12) * alpha),
+            theme.ink(alpha),
+            rect,
+        );
+    }
+
+    let trash_alpha = if hovered(layout.trash) || confirming {
+        0.9
+    } else {
+        0.45
+    };
     draw_label(
         renderer,
         &Icon::Trash.codepoint().to_string(),
@@ -981,6 +1053,23 @@ mod tests {
         assert!(l.divider_y >= l.title.y + TITLE_LINE);
         assert!(l.body.y > l.divider_y);
         assert!(l.body.y + 2.0 * BODY_LINE <= l.rect.y + l.rect.height);
+    }
+
+    #[test]
+    fn confirmation_buttons_fit_below_the_divider() {
+        let bar = Rectangle::new(Point::new(960.0, 400.0), Size::new(30.0, 40.0));
+        // An empty body is one line tall; the question needs more.
+        let mut text = peek_text(&note("T", ""), PEEK_WIDTH);
+        let open = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
+        text.confirming = true;
+        let l = peek_layout(bar, screen(), 1.0, &text, PEEK_WIDTH, Edge::Right);
+        assert!(l.rect.height > open.rect.height);
+        for button in [l.delete, l.cancel] {
+            assert!(inside(l.rect, button));
+            assert!(button.y > l.divider_y);
+        }
+        assert!(!l.delete.intersects(&l.cancel));
+        assert!(!l.delete.intersects(&l.trash));
     }
 
     fn inside(outer: Rectangle, inner: Rectangle) -> bool {

@@ -37,15 +37,10 @@ impl App {
                     return self.dock_window();
                 }
             }
-            Message::PeekDelete(entry) => {
+            Message::PeekDeleteRequest(entry) => {
                 let id = self.entry_note(entry).map(|i| self.store.notes()[i].id);
                 if let Some(id) = id.filter(|id| self.peek_note == Some(*id)) {
-                    self.hide_peek();
-                    if self.active_note == Some(id) {
-                        // The note is open too: fold it away like its own trash button does.
-                        return self.update(Message::DeleteNote(id));
-                    }
-                    return self.start_collapse(id);
+                    self.delete_ask = Some(DeleteAsk::Peek(id));
                 }
             }
             Message::StripFileDropped(entry, path) => return self.drop_on_strip(entry, &path),
@@ -240,6 +235,8 @@ impl App {
         if hovered == self.hover_bar.map(|(id, _)| id) {
             return;
         }
+        // Another bar, or none: the peek's delete question goes.
+        self.drop_peek_ask();
         self.hover_bar = hovered.map(|id| (id, Instant::now()));
         self.sync_jump_settle(hovered);
         match hovered {
@@ -278,16 +275,39 @@ impl App {
             bar,
             edge,
         );
-        Some(peek_target(
-            bar,
-            strip,
-            &entry_peek_text(notes, entry, width),
-            width,
-            edge,
-        ))
+        let mut text = entry_peek_text(notes, entry, width);
+        text.confirming = self.peek_confirming();
+        Some(peek_target(bar, strip, &text, width, edge))
+    }
+
+    /// Deletes the peeked note `id`: its bar collapses away (an open note
+    /// folds first, like its own trash button does).
+    pub(super) fn delete_peeked(&mut self, id: Uuid) -> Task<Message> {
+        if self.peek_note != Some(id) {
+            return Task::none();
+        }
+        self.hide_peek();
+        if self.active_note == Some(id) {
+            self.delete_open(id);
+            return Task::none();
+        }
+        self.start_collapse(id)
+    }
+
+    /// Drops the peek's delete question, if it asks one.
+    pub(super) fn drop_peek_ask(&mut self) {
+        if matches!(self.delete_ask, Some(DeleteAsk::Peek(_))) {
+            self.delete_ask = None;
+        }
+    }
+
+    /// The peek asks whether to delete its note.
+    pub(super) fn peek_confirming(&self) -> bool {
+        matches!(self.delete_ask, Some(DeleteAsk::Peek(id)) if self.peek_note == Some(id))
     }
 
     pub(super) fn hide_peek(&mut self) {
+        self.drop_peek_ask();
         self.hover_bar = None;
         self.jump_settle = None;
         self.peek_note = None;
