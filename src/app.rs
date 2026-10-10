@@ -501,7 +501,7 @@ pub struct App {
     /// on the editor it opened) select the word, then the line, around it.
     rendered_click: Option<RenderedClick>,
     morph: Morph,
-    anchor_y: f32,
+    anchor_along: f32,
     pending_delete: Option<Uuid>,
     /// A deleted note whose bar is shrinking away; it is removed from the
     /// store once the bar is gone.
@@ -567,7 +567,7 @@ pub struct App {
     settings_open: bool,
     settings_morph: Morph,
     /// Gear center when the panel opened; the panel stays centered on it.
-    settings_anchor_y: f32,
+    settings_anchor_along: f32,
     /// Top-left of the settings panel after a drag (cleared on reset).
     settings_pos: Option<Point>,
     /// Grab offset (cursor minus panel top-left) while dragging settings.
@@ -586,7 +586,7 @@ pub struct App {
     search_open: bool,
     search_morph: Morph,
     /// Search slot center when the panel opened.
-    search_anchor_y: f32,
+    search_anchor_along: f32,
     search_query: String,
     /// Results for `search_query`, and the ids of every matching note (for
     /// dimming), as of `search_synced`: the store revision and query they
@@ -604,7 +604,7 @@ pub struct App {
     export: Option<ExportState>,
     export_morph: Morph,
     /// Gear center when the export panel opened.
-    export_anchor_y: f32,
+    export_anchor_along: f32,
     /// Counts fresh openings of the export panel; see
     /// [`ExportState::generation`].
     export_generation: u64,
@@ -745,10 +745,10 @@ impl App {
         let search_morph = Morph::new(s.motion.speed);
         let export_morph = Morph::new(s.motion.speed);
         let mode_fade = Self::settled_fade(s.motion.speed);
-        let window_size = s
-            .window
-            .edge
-            .size(600.0, Self::docked_width(s, SUPPORTS_PASSTHROUGH, false));
+        let window_size = s.window.edge.size(
+            600.0,
+            Self::docked_thickness(s, SUPPORTS_PASSTHROUGH, false),
+        );
         let data_dir = store.dir().to_path_buf();
         let strip_entries = strip_model::entries(store.notes());
         let strip_progress = strip_model::progress(store.notes(), &strip_entries);
@@ -768,7 +768,7 @@ impl App {
             history: History::default(),
             rendered_click: None,
             morph,
-            anchor_y: 0.0,
+            anchor_along: 0.0,
             pending_delete: None,
             collapsing: None,
             mode_fade,
@@ -807,7 +807,7 @@ impl App {
             peek,
             settings_open: false,
             settings_morph,
-            settings_anchor_y: 0.0,
+            settings_anchor_along: 0.0,
             settings_pos: None,
             settings_drag: None,
             settings_drag_pos: None,
@@ -820,10 +820,10 @@ impl App {
             search_morph,
             export: None,
             export_morph,
-            export_anchor_y: 0.0,
+            export_anchor_along: 0.0,
             export_generation: 0,
             export_dialog_open: false,
-            search_anchor_y: 0.0,
+            search_anchor_along: 0.0,
             search_query: String::new(),
             search_results: Vec::new(),
             search_matches: HashSet::new(),
@@ -921,7 +921,7 @@ impl App {
                 // Still folding away: unfold again from where it is.
                 if !self.settings_open {
                     let gear = self.strip_layout().settings_anchor();
-                    self.settings_anchor_y = along_center(gear, self.edge());
+                    self.settings_anchor_along = along_center(gear, self.edge());
                     self.settings_open = true;
                     self.settings_tab = SettingsTab::default();
                     self.palette_slot = None;
@@ -2033,7 +2033,7 @@ impl App {
             panel_open: self.panel_open(),
             actions_expanded: self.actions_open,
             actions_progress: self.actions_progress(),
-            x_offset: self.strip_x_offset(),
+            x_offset: self.strip_away_offset(),
             edge: self.edge(),
         })
         .width(Fill)
@@ -2286,7 +2286,7 @@ impl App {
             .note_entry(index)
             .and_then(|entry| self.strip_layout().bars.get(entry).copied())
         {
-            self.anchor_y = along_center(bar, self.edge());
+            self.anchor_along = along_center(bar, self.edge());
         }
         if switching {
             self.morph.restart();
@@ -2917,7 +2917,7 @@ impl App {
     /// the strip. With passthrough the window is always wide, so opening and
     /// closing never resize it (a resize is a separate move + resize and
     /// flickers for a frame).
-    fn docked_width(settings: &Settings, wide: bool, sliver: bool) -> f32 {
+    fn docked_thickness(settings: &Settings, wide: bool, sliver: bool) -> f32 {
         if wide {
             settings.open_width()
         } else if sliver {
@@ -2958,9 +2958,9 @@ impl App {
     }
 
     /// The docked window's thickness away from the edge (see
-    /// `docked_width`), with or without `passthrough`.
-    fn window_width(&self, passthrough: bool) -> f32 {
-        Self::docked_width(
+    /// `docked_thickness`), with or without `passthrough`.
+    fn window_thickness(&self, passthrough: bool) -> f32 {
+        Self::docked_thickness(
             self.settings.settings(),
             self.needs_wide_window(passthrough),
             self.wants_sliver(passthrough),
@@ -2994,7 +2994,7 @@ impl App {
             monitor,
             self.top_inset,
             SUPPORTS_PASSTHROUGH,
-            self.window_width(SUPPORTS_PASSTHROUGH),
+            self.window_thickness(SUPPORTS_PASSTHROUGH),
             self.dock_fraction(SUPPORTS_PASSTHROUGH),
         );
         let (origin, size) = (frame.position(), frame.size());
@@ -3039,7 +3039,7 @@ impl App {
         let over_panel = |frame: Option<MorphFrame>| {
             frame.is_some_and(|frame| frame.rect.expand(8.0).contains(position))
         };
-        let strip_used = if self.strip_x_offset() > 0.0 {
+        let strip_used = if self.strip_away_offset() > 0.0 {
             self.in_edge(position) || self.over_alerting_ui(position)
         } else {
             self.in_use_area(position)
@@ -3172,7 +3172,7 @@ impl App {
     /// once the strip starts or stops being in place. Keeps frames running
     /// while it slides.
     fn drive_auto_hide(&mut self, now: Instant, dt: f32) -> Task<Message> {
-        let was_in_place = self.strip_x_offset() == 0.0;
+        let was_in_place = self.strip_away_offset() == 0.0;
         let was = self.auto_hide.phase();
         let inputs = self.auto_hide_inputs();
         self.force_reveal = false;
@@ -3204,7 +3204,7 @@ impl App {
                 ));
             }
         }
-        if was_in_place != (self.strip_x_offset() == 0.0) {
+        if was_in_place != (self.strip_away_offset() == 0.0) {
             tasks.push(self.update_passthrough(self.pointer));
         }
         Task::batch(tasks)
@@ -3212,13 +3212,13 @@ impl App {
 
     /// How far toward its screen edge the strip is drawn while auto-hide
     /// slides it away (an away offset; see `hide_translation`).
-    fn strip_x_offset(&self) -> f32 {
+    fn strip_away_offset(&self) -> f32 {
         self.auto_hide.offset() * HIDE_SHIFT
     }
 
     /// Where the strip's `rect` is drawn while auto-hide slides it away.
     fn slid(&self, rect: Rectangle) -> Rectangle {
-        rect + hide_translation(self.edge(), self.strip_x_offset())
+        rect + hide_translation(self.edge(), self.strip_away_offset())
     }
 
     /// Search, settings or export is open.
@@ -3468,7 +3468,7 @@ impl App {
                 size,
             );
         }
-        self.beside_strip(size, self.settings_anchor_y)
+        self.beside_strip(size, self.settings_anchor_along)
     }
 
     /// The search panel's current frame, morphing out of the search slot.
@@ -3477,7 +3477,7 @@ impl App {
             return None;
         }
         let source = self.strip_layout().search_anchor();
-        Some(self.panel_frame(source, self.search_anchor_y, &self.search_morph))
+        Some(self.panel_frame(source, self.search_anchor_along, &self.search_morph))
     }
 
     /// The export panel's current frame, morphing out of the gear slot like
@@ -3485,16 +3485,16 @@ impl App {
     fn export_frame(&self) -> Option<MorphFrame> {
         self.export.as_ref()?;
         let source = self.strip_layout().settings_anchor();
-        Some(self.panel_frame(source, self.export_anchor_y, &self.export_morph))
+        Some(self.panel_frame(source, self.export_anchor_along, &self.export_morph))
     }
 
     /// A panel's frame on its way from the strip slot `source` to its place
-    /// on the strip's away side, centered on `anchor_y` (a coordinate along
+    /// on the strip's away side, centered on `anchor_along` (a coordinate along
     /// the edge) where it fits.
-    fn panel_frame(&self, source: Rectangle, anchor_y: f32, morph: &Morph) -> MorphFrame {
+    fn panel_frame(&self, source: Rectangle, anchor_along: f32, morph: &Morph) -> MorphFrame {
         let room = self.panel_room();
         let height = room.min(PANEL_MAX_HEIGHT);
-        let target = self.beside_strip(Size::new(PANEL_WIDTH, height), anchor_y);
+        let target = self.beside_strip(Size::new(PANEL_WIDTH, height), anchor_along);
         morph_frame(self.slid(source), target, morph.progress())
     }
 
@@ -3559,7 +3559,7 @@ impl App {
         // Still folding away: unfold again from where it is, query kept.
         if !self.search_open {
             let slot = self.strip_layout().search_anchor();
-            self.search_anchor_y = along_center(slot, self.edge());
+            self.search_anchor_along = along_center(slot, self.edge());
             self.search_open = true;
             self.search_query.clear();
         }
@@ -3590,7 +3590,7 @@ impl App {
             Some(state) => state.status = None,
             None => {
                 let gear = self.strip_layout().settings_anchor();
-                self.export_anchor_y = along_center(gear, self.edge());
+                self.export_anchor_along = along_center(gear, self.edge());
                 self.export_generation += 1;
                 self.export = Some(ExportState::new(self.store.notes(), self.export_generation));
             }
@@ -4006,9 +4006,9 @@ impl App {
         // Re-anchor in the docked window.
         self.follow_open_bar();
         let strip = self.strip_layout();
-        self.settings_anchor_y = along_center(strip.settings_anchor(), edge);
-        self.search_anchor_y = along_center(strip.search_anchor(), edge);
-        self.export_anchor_y = along_center(strip.settings_anchor(), edge);
+        self.settings_anchor_along = along_center(strip.settings_anchor(), edge);
+        self.search_anchor_along = along_center(strip.search_anchor(), edge);
+        self.export_anchor_along = along_center(strip.settings_anchor(), edge);
         Task::batch([dock, self.update_passthrough(self.pointer)])
     }
 
@@ -4064,7 +4064,7 @@ impl App {
             Edge::Right | Edge::Left => height,
             Edge::Top => height.min(self.panel_room().max(MIN_SIZE.height)),
         };
-        self.beside_strip(Size::new(width, height), self.anchor_y)
+        self.beside_strip(Size::new(width, height), self.anchor_along)
     }
 
     /// Bar centers plus the Actions slot(s), which magnify along with them.
@@ -4142,7 +4142,7 @@ impl App {
             .and_then(|id| self.id_entry(id))
             .and_then(|entry| self.strip_layout().bars.get(entry).copied())
         {
-            self.anchor_y = along_center(bar, self.edge());
+            self.anchor_along = along_center(bar, self.edge());
         }
     }
 
@@ -4583,7 +4583,7 @@ mod tests {
         // Its bar is the stack's.
         assert_eq!(app.id_entry(ids[1]), Some(0));
         let stack_bar = app.strip_layout().bars[0];
-        assert_eq!(app.anchor_y, stack_bar.center().y);
+        assert_eq!(app.anchor_along, stack_bar.center().y);
     }
 
     #[test]
@@ -4997,14 +4997,14 @@ mod tests {
         let (mut app, ids) = app_with_notes(&dir, &[("a", ""), ("b", ""), ("c", "")]);
         let _ = app.update(Message::BarClicked(2));
         settle(&mut app);
-        let before = app.anchor_y;
+        let before = app.anchor_along;
         let _ = app.update(Message::TogglePin);
         assert_eq!(app.store.notes()[0].id, ids[2]);
         assert!(app.store.notes()[0].pinned);
         assert!(app.store.is_dirty());
         assert_eq!(app.active_note, Some(ids[2]));
         assert_eq!(app.id_entry(ids[2]), Some(0));
-        assert!(app.anchor_y < before, "anchor follows the moved bar");
+        assert!(app.anchor_along < before, "anchor follows the moved bar");
         app.store.save().unwrap();
         let reloaded = NoteStore::load(dir.path().join("notes.json"));
         assert!(reloaded.notes()[0].pinned);
@@ -6102,12 +6102,12 @@ mod tests {
         let mut app = app_in(&dir);
         let _ = app.update(Message::ToggleSettings);
         settle(&mut app);
-        app.settings_anchor_y = 123.0;
+        app.settings_anchor_along = 123.0;
         let _ = app.update(Message::ToggleSettings);
         assert!(!app.settings_morph.is_opening());
         let _ = app.update(Message::ToggleSettings);
         assert!(app.settings_morph.is_opening());
-        assert_eq!(app.settings_anchor_y, 123.0);
+        assert_eq!(app.settings_anchor_along, 123.0);
     }
 
     #[test]
@@ -7872,7 +7872,7 @@ mod tests {
         assert!(reloaded.settings().window.auto_hide);
         let app = App::new(NoteStore::load(dir.path().join("notes.json")), reloaded);
         assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Shown);
-        assert_eq!(app.strip_x_offset(), 0.0);
+        assert_eq!(app.strip_away_offset(), 0.0);
 
         let mut s = Settings::from_json(r#"{"window": {"auto_hide": false}}"#);
         assert!(!s.window.auto_hide);
@@ -7889,7 +7889,7 @@ mod tests {
         let t = run_for(&mut app, t0, 700);
         assert_eq!(app.auto_hide.offset(), 0.0);
         hide_strip(&mut app, t);
-        assert_eq!(app.strip_x_offset(), STRIP_WIDTH + HIDE_MARGIN);
+        assert_eq!(app.strip_away_offset(), STRIP_WIDTH + HIDE_MARGIN);
 
         let edge = edge_point(&app);
         assert!(app.is_interactive(edge));
@@ -8128,7 +8128,7 @@ mod tests {
         let _ = app.update(Message::SettingToggled(SettingToggle::AutoHide));
         assert!(!app.settings.settings().window.auto_hide);
         assert_eq!(app.auto_hide.offset(), 0.0);
-        assert_eq!(app.strip_x_offset(), 0.0);
+        assert_eq!(app.strip_away_offset(), 0.0);
         assert!(app.is_interactive(app.strip_layout().bars[0].center()));
         run_for(&mut app, t, 2000);
         assert_eq!(app.auto_hide.offset(), 0.0);
@@ -8136,7 +8136,7 @@ mod tests {
 
     /// Docks `app` the way `dock_window` would without passthrough.
     fn dock_without_passthrough(app: &mut App) {
-        app.window_size.width = app.window_width(false);
+        app.window_size.width = app.window_thickness(false);
     }
 
     #[test]
@@ -8144,11 +8144,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = auto_hide_app(&dir);
         let open = app.settings.settings().open_width();
-        assert_eq!(app.window_width(false), STRIP_WIDTH);
-        assert_eq!(app.window_width(true), open);
+        assert_eq!(app.window_thickness(false), STRIP_WIDTH);
+        assert_eq!(app.window_thickness(true), open);
         hide_strip(&mut app, Instant::now());
-        assert_eq!(app.window_width(false), EDGE_SLIVER);
-        assert_eq!(app.window_width(true), open, "passthrough stays wide");
+        assert_eq!(app.window_thickness(false), EDGE_SLIVER);
+        assert_eq!(app.window_thickness(true), open, "passthrough stays wide");
 
         // Anywhere inside the sliver counts as the edge zone.
         dock_without_passthrough(&mut app);
@@ -8179,9 +8179,9 @@ mod tests {
             entered + REVEAL_DWELL + Duration::from_millis(5),
         ));
         assert_eq!(app.auto_hide.phase(), crate::autohide::Phase::Revealing);
-        assert!(app.strip_x_offset() > 0.0, "the slide already ran");
+        assert!(app.strip_away_offset() > 0.0, "the slide already ran");
         assert_eq!(
-            app.window_width(false),
+            app.window_thickness(false),
             STRIP_WIDTH,
             "a revealing strip must get its docked width back before sliding"
         );
@@ -8197,7 +8197,7 @@ mod tests {
         hide_strip(&mut app, Instant::now());
         assert!(app.note_open());
         let open = app.settings.settings().open_width();
-        assert_eq!(app.window_width(false), open);
+        assert_eq!(app.window_thickness(false), open);
         dock_without_passthrough(&mut app);
 
         // The wide window's rightmost 2 px, anywhere along it, are the edge.
@@ -8213,7 +8213,7 @@ mod tests {
         let _ = app.update(Message::ClosePanel);
         tick_until(&mut app, |app| app.active_note.is_none());
         assert!(app.auto_hide.is_hidden());
-        assert_eq!(app.window_width(false), EDGE_SLIVER);
+        assert_eq!(app.window_thickness(false), EDGE_SLIVER);
     }
 
     #[test]
@@ -8284,8 +8284,8 @@ mod tests {
         let monitor = Size::new(1440.0, 900.0);
         let s = Settings::default();
         let open = s.open_width();
-        let strip = App::docked_width(&s, false, false);
-        let wide = App::docked_width(&s, true, false);
+        let strip = App::docked_thickness(&s, false, false);
+        let wide = App::docked_thickness(&s, true, false);
         assert_eq!((strip, wide), (STRIP_WIDTH, open));
         let rect = |x, y, w, h| Rectangle::new(Point::new(x, y), Size::new(w, h));
 
@@ -8359,7 +8359,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = on_edge(auto_hide_app(&dir), Edge::Left);
         hide_strip(&mut app, Instant::now());
-        let shift = crate::bar_strip::hide_translation(Edge::Left, app.strip_x_offset());
+        let shift = crate::bar_strip::hide_translation(Edge::Left, app.strip_away_offset());
         let strip = app.strip_layout();
         for rect in strip.bars.iter().chain([&strip.actions_button]) {
             let drawn = *rect + shift;
@@ -8407,7 +8407,7 @@ mod tests {
     #[test]
     fn top_window_fits_a_short_screen() {
         let monitor = Size::new(1366.0, 768.0);
-        let open = App::docked_width(&Settings::default(), true, false);
+        let open = App::docked_thickness(&Settings::default(), true, false);
         assert!(open > 768.0, "the open window must not fit");
         let top = dock_frame(Edge::Top, monitor, 25.0, false, open, 0.9);
         assert_eq!((top.y, top.height), (25.0, 743.0), "{top:?}");
@@ -8457,7 +8457,7 @@ mod tests {
         let mut app = docked(on_edge(app, Edge::Top));
         let _ = app.update(Message::ToggleSettings);
         settle(&mut app);
-        let top_anchor = app.settings_anchor_y;
+        let top_anchor = app.settings_anchor_along;
         let old = app.window_origin.unwrap();
         let (pointer, cursor) = (Point::new(100.0, -30.0), Point::new(100.0, 400.0));
         app.pointer = Some(pointer);
@@ -8467,7 +8467,10 @@ mod tests {
         assert_eq!(app.edge(), Edge::Right);
         let expected = along_center(app.strip_layout().settings_anchor(), Edge::Right);
         assert_ne!(expected, top_anchor);
-        assert_eq!(app.settings_anchor_y, expected, "settings not re-anchored");
+        assert_eq!(
+            app.settings_anchor_along, expected,
+            "settings not re-anchored"
+        );
         assert_eq!(app.pointer, moved_into(&app, old, pointer));
         assert_eq!(app.last_cursor, moved_into(&app, old, cursor));
         assert_eq!(app.pointer, None, "the pointer is outside the window");
@@ -8476,7 +8479,7 @@ mod tests {
     #[test]
     fn linux_sliver_axis_per_edge() {
         let monitor = Size::new(1440.0, 900.0);
-        let sliver = App::docked_width(&Settings::default(), false, true);
+        let sliver = App::docked_thickness(&Settings::default(), false, true);
         assert_eq!(sliver, EDGE_SLIVER);
         let top = dock_frame(Edge::Top, monitor, 0.0, false, sliver, 0.9);
         assert_eq!((top.y, top.width, top.height), (0.0, 1296.0, 2.0));
@@ -8487,7 +8490,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = on_edge(auto_hide_app(&dir), Edge::Top);
         hide_strip(&mut app, Instant::now());
-        assert_eq!(app.window_width(false), EDGE_SLIVER);
+        assert_eq!(app.window_thickness(false), EDGE_SLIVER);
         app.window_size = top.size();
         assert!(app.is_sliver());
         let mid = band_middle(&app);
@@ -8647,7 +8650,7 @@ mod tests {
             monitor,
             25.0,
             SUPPORTS_PASSTHROUGH,
-            app.window_width(SUPPORTS_PASSTHROUGH),
+            app.window_thickness(SUPPORTS_PASSTHROUGH),
             app.settings.settings().window.height_fraction,
         );
         assert_eq!(app.window_size, expected.size(), "not re-docked");
@@ -8656,7 +8659,11 @@ mod tests {
         assert!(app.peek.is_closed() && app.peek_note.is_none(), "peek kept");
         assert!(app.drag.is_none(), "drag kept");
         let bar = app.strip_layout().bars[app.id_entry(open).unwrap()];
-        assert_eq!(app.anchor_y, bar.center_x(), "the note didn't re-anchor");
+        assert_eq!(
+            app.anchor_along,
+            bar.center_x(),
+            "the note didn't re-anchor"
+        );
 
         app.settings.save().unwrap();
         let json: serde_json::Value = serde_json::from_str(
