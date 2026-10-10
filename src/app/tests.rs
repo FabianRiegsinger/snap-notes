@@ -1908,12 +1908,12 @@ fn reopening_closing_settings_keeps_anchor() {
     let mut app = app_in(&dir);
     let _ = app.update(Message::ToggleSettings);
     settle(&mut app);
-    app.settings_anchor_along = 123.0;
+    app.settings_panel.anchor_along = 123.0;
     let _ = app.update(Message::ToggleSettings);
-    assert!(!app.settings_morph.is_opening());
+    assert!(!app.settings_panel.morph.is_opening());
     let _ = app.update(Message::ToggleSettings);
-    assert!(app.settings_morph.is_opening());
-    assert_eq!(app.settings_anchor_along, 123.0);
+    assert!(app.settings_panel.morph.is_opening());
+    assert_eq!(app.settings_panel.anchor_along, 123.0);
 }
 
 #[test]
@@ -2117,7 +2117,7 @@ fn settings_reopen_on_the_application_tab() {
     assert_eq!(app.palette_slot, None);
     let _ = app.update(Message::CloseSettings);
     settle(&mut app);
-    assert!(!app.settings_open);
+    assert!(!app.settings_panel.open);
     let _ = app.update(Message::ToggleSettings);
     assert_eq!(app.settings_tab, SettingsTab::Application);
 }
@@ -2129,7 +2129,7 @@ fn tray_settings_item_only_opens() {
     let _ = app.update(Message::TrayMenu("settings".into()));
     settle(&mut app);
     let _ = app.update(Message::TrayMenu("settings".into()));
-    assert!(app.settings_open && app.settings_morph.is_opening());
+    assert!(app.settings_panel.open && app.settings_panel.morph.is_opening());
 }
 
 fn cmd_f() -> Message {
@@ -2165,7 +2165,7 @@ fn app_with_notes(dir: &tempfile::TempDir, notes: &[(&str, &str)]) -> (App, Vec<
 }
 
 fn search_showing(app: &App) -> bool {
-    app.search_open && app.search_morph.is_opening()
+    app.search_panel.open && app.search_panel.morph.is_opening()
 }
 
 fn cmd_key_on(ch: &str, code: keyboard::key::Code) -> Message {
@@ -2196,7 +2196,7 @@ fn non_latin_layout_keeps_app_shortcuts() {
     assert_eq!(app.store.notes().len(), notes + 1);
     settle(&mut app);
     let _ = app.update(cmd_key_on("б", Code::Comma));
-    assert!(app.settings_open);
+    assert!(app.settings_panel.open);
 }
 
 #[test]
@@ -2207,17 +2207,17 @@ fn cmd_f_opens_search_and_closes_settings() {
     settle(&mut app);
     let _ = app.update(cmd_f());
     assert!(search_showing(&app));
-    assert!(!app.settings_morph.is_opening());
+    assert!(!app.settings_panel.morph.is_opening());
     settle(&mut app);
-    assert!(!app.settings_open);
+    assert!(!app.settings_panel.open);
     // Settings close the search the same way.
     let _ = app.update(Message::ToggleSettings);
-    assert!(!app.search_morph.is_opening());
-    assert!(app.settings_morph.is_opening());
+    assert!(!app.search_panel.morph.is_opening());
+    assert!(app.settings_panel.morph.is_opening());
     // Cmd+F again toggles it.
     let _ = app.update(cmd_f());
     let _ = app.update(cmd_f());
-    assert!(!app.search_morph.is_opening());
+    assert!(!app.search_panel.morph.is_opening());
 }
 
 #[test]
@@ -2250,7 +2250,7 @@ fn picking_a_result_opens_note_with_match_selected() {
     let _ = app.update(Message::SearchResultPicked(ids[0]));
     assert_eq!(app.active_note, Some(ids[0]));
     assert!(app.editing);
-    assert!(!app.search_morph.is_opening());
+    assert!(!app.search_panel.morph.is_opening());
     assert_eq!(selected(&app).as_deref(), Some("Café"));
     let cursor = app.editor_content.as_ref().unwrap().cursor();
     assert_eq!(
@@ -2258,7 +2258,7 @@ fn picking_a_result_opens_note_with_match_selected() {
         (1, "say Café".len())
     );
     settle(&mut app);
-    assert!(!app.search_open);
+    assert!(!app.search_panel.open);
     assert_eq!(selected(&app).as_deref(), Some("Café"));
 
     // A title-only match puts the cursor at the start of the body.
@@ -2281,12 +2281,12 @@ fn enter_opens_first_result() {
     let _ = app.update(Message::SearchChanged("zzz".into()));
     let _ = app.update(Message::SearchSubmitted);
     assert_eq!(app.active_note, None);
-    assert!(app.search_morph.is_opening());
+    assert!(app.search_panel.morph.is_opening());
     let _ = app.update(Message::SearchChanged("needle".into()));
     let _ = app.update(Message::SearchSubmitted);
     assert_eq!(app.active_note, Some(ids[0]));
     assert!(app.editing);
-    assert!(!app.search_morph.is_opening());
+    assert!(!app.search_panel.morph.is_opening());
 }
 
 #[test]
@@ -2308,7 +2308,7 @@ fn picking_a_result_switches_notes() {
     settle(&mut app);
     assert_eq!(app.active_note, Some(ids[1]));
     assert_eq!(selected(&app).as_deref(), Some("needle"));
-    assert!(!app.search_open);
+    assert!(!app.search_panel.open);
 }
 
 #[test]
@@ -2318,15 +2318,15 @@ fn escape_closes_search_first() {
     let _ = app.update(Message::ToggleSearch);
     settle(&mut app);
     let _ = app.update(escape());
-    assert!(!app.search_morph.is_opening());
+    assert!(!app.search_panel.morph.is_opening());
     settle(&mut app);
-    assert!(!app.search_open);
+    assert!(!app.search_panel.open);
 
     // Esc swallowed by the focused search field closes it too.
     let _ = app.update(Message::ToggleSearch);
     settle(&mut app);
     let _ = app.update(Message::CloseSearch);
-    assert!(!app.search_morph.is_opening());
+    assert!(!app.search_panel.morph.is_opening());
     // Without the search open a captured Esc does nothing.
     let (mut app, _) = app_with_notes(&dir, &[("a", "b")]);
     let _ = app.update(Message::BarClicked(0));
@@ -2382,12 +2382,12 @@ fn reopening_search_mid_fold_closes_settings() {
     settle(&mut app);
     let _ = app.update(Message::ToggleSettings);
     tick_a_little(&mut app);
-    assert!(app.search_open && !app.search_morph.is_opening());
+    assert!(app.search_panel.open && !app.search_panel.morph.is_opening());
     let _ = app.update(Message::ToggleSearch);
     assert!(search_showing(&app));
-    assert!(!app.settings_morph.is_opening());
+    assert!(!app.settings_panel.morph.is_opening());
     settle(&mut app);
-    assert!(!app.settings_open);
+    assert!(!app.settings_panel.open);
 }
 
 #[test]
@@ -2399,7 +2399,7 @@ fn reopening_search_mid_fold_folds_the_note() {
     settle(&mut app);
     let _ = app.update(Message::SearchResultPicked(ids[0]));
     tick_a_little(&mut app);
-    assert!(app.search_open && app.morph.is_opening());
+    assert!(app.search_panel.open && app.morph.is_opening());
     let _ = app.update(Message::ToggleSearch);
     assert!(search_showing(&app));
     assert!(!app.morph.is_opening());
@@ -2415,12 +2415,12 @@ fn reopening_settings_mid_fold_closes_search() {
     settle(&mut app);
     let _ = app.update(Message::ToggleSearch);
     tick_a_little(&mut app);
-    assert!(app.settings_open && !app.settings_morph.is_opening());
+    assert!(app.settings_panel.open && !app.settings_panel.morph.is_opening());
     let _ = app.update(Message::ToggleSettings);
-    assert!(app.settings_morph.is_opening());
-    assert!(!app.search_morph.is_opening());
+    assert!(app.settings_panel.morph.is_opening());
+    assert!(!app.search_panel.morph.is_opening());
     settle(&mut app);
-    assert!(!app.search_open);
+    assert!(!app.search_panel.open);
 }
 
 #[test]
@@ -2469,7 +2469,7 @@ fn tray_failure_shows_dock_without_saving_it() {
 }
 
 fn export_showing(app: &App) -> bool {
-    app.export.is_some() && app.export_morph.is_opening()
+    app.export.is_some() && app.export_panel.morph.is_opening()
 }
 
 fn export_status(app: &App) -> Option<String> {
@@ -2508,12 +2508,12 @@ fn export_opens_with_all_selected() {
     assert_eq!(state.format, ExportFormat::Markdown);
     assert!(state.status.is_none());
     // Export replaces Settings, and closing it doesn't bring them back.
-    assert!(!app.settings_morph.is_opening());
+    assert!(!app.settings_panel.morph.is_opening());
     let _ = app.update(Message::ToggleExport);
-    assert!(!app.export_morph.is_opening());
+    assert!(!app.export_panel.morph.is_opening());
     settle(&mut app);
     assert!(app.export.is_none());
-    assert!(!app.settings_open);
+    assert!(!app.settings_panel.open);
 }
 
 #[test]
@@ -2568,7 +2568,7 @@ fn export_picked_writes_file_in_order() {
         (state.generation, state.status.as_ref().unwrap().1)
     };
     let _ = app.update(Message::ExportStatusExpired(generation, at));
-    assert!(!app.export_morph.is_opening());
+    assert!(!app.export_panel.morph.is_opening());
     settle(&mut app);
     assert!(app.export.is_none());
 
@@ -2609,7 +2609,7 @@ fn export_auto_close_uses_a_timer() {
     let _ = app.update(Message::ExportStatusExpired(generation + 1, at));
     assert!(export_showing(&app));
     let _ = app.update(Message::ExportStatusExpired(generation, at));
-    assert!(!app.export_morph.is_opening());
+    assert!(!app.export_panel.morph.is_opening());
 }
 
 #[test]
@@ -2778,7 +2778,7 @@ fn panel_stays_open_while_picking() {
     let generation = app.export.as_ref().unwrap().generation;
     let _ = app.update(Message::ExportCancelled(generation));
     let _ = app.update(Message::WindowUnfocused);
-    assert!(!app.export_morph.is_opening());
+    assert!(!app.export_panel.morph.is_opening());
 }
 
 #[test]
@@ -2851,11 +2851,11 @@ fn hotkey_closes_panels_first() {
         let before = app.store.notes().len();
         let _ = app.update(Message::HotkeyPressed);
         assert_eq!(app.store.notes().len(), before + 1);
-        assert!(!app.settings_morph.is_opening());
-        assert!(!app.search_morph.is_opening() && !app.export_morph.is_opening());
+        assert!(!app.settings_panel.morph.is_opening());
+        assert!(!app.search_panel.morph.is_opening() && !app.export_panel.morph.is_opening());
         assert!(app.active_note.is_some() && app.morph.is_opening());
         settle(&mut app);
-        assert!(!app.settings_open && !app.search_open && app.export.is_none());
+        assert!(!app.settings_panel.open && !app.search_panel.open && app.export.is_none());
         assert!(app.active_note.is_some());
         let _ = app.update(Message::ClosePanel);
         settle(&mut app);
@@ -2883,7 +2883,7 @@ fn escape_closes_export_first() {
     let _ = app.update(Message::ToggleExport);
     settle(&mut app);
     let _ = app.update(escape());
-    assert!(!app.export_morph.is_opening());
+    assert!(!app.export_panel.morph.is_opening());
 }
 
 #[test]
@@ -2899,14 +2899,14 @@ fn reopening_export_mid_fold_closes_others() {
         settle(&mut app);
         let _ = app.update(other);
         tick_a_little(&mut app);
-        assert!(app.export.is_some() && !app.export_morph.is_opening());
+        assert!(app.export.is_some() && !app.export_panel.morph.is_opening());
         let _ = app.update(Message::ToggleExport);
         assert!(export_showing(&app));
-        assert!(!app.settings_morph.is_opening());
-        assert!(!app.search_morph.is_opening());
+        assert!(!app.settings_panel.morph.is_opening());
+        assert!(!app.search_panel.morph.is_opening());
         assert!(!app.morph.is_opening());
         settle(&mut app);
-        assert!(!app.settings_open && !app.search_open && app.active_note.is_none());
+        assert!(!app.settings_panel.open && !app.search_panel.open && app.active_note.is_none());
         let _ = app.update(Message::ToggleExport);
         settle(&mut app);
     }
@@ -2915,7 +2915,7 @@ fn reopening_export_mid_fold_closes_others() {
         let _ = app.update(Message::ToggleExport);
         settle(&mut app);
         let _ = app.update(other);
-        assert!(!app.export_morph.is_opening());
+        assert!(!app.export_panel.morph.is_opening());
         settle(&mut app);
         assert!(app.export.is_none());
     }
@@ -3777,7 +3777,7 @@ fn panel_open_blocks_hiding() {
     assert_eq!(app.auto_hide.offset(), 0.0, "hid under the settings");
     let _ = app.update(Message::CloseSettings);
     let t = run_for(&mut app, t, 400);
-    assert!(!app.settings_open);
+    assert!(!app.settings_panel.open);
     run_for(&mut app, t, 1200);
     assert!(
         app.auto_hide.is_hidden(),
@@ -4262,7 +4262,7 @@ fn reset_window_reanchors_open_panels() {
     let mut app = docked(on_edge(app, Edge::Top));
     let _ = app.update(Message::ToggleSettings);
     settle(&mut app);
-    let top_anchor = app.settings_anchor_along;
+    let top_anchor = app.settings_panel.anchor_along;
     let old = app.window_origin.unwrap();
     let (pointer, cursor) = (Point::new(100.0, -30.0), Point::new(100.0, 400.0));
     app.pointer = Some(pointer);
@@ -4273,7 +4273,7 @@ fn reset_window_reanchors_open_panels() {
     let expected = along_center(app.strip_layout().settings_anchor(), Edge::Right);
     assert_ne!(expected, top_anchor);
     assert_eq!(
-        app.settings_anchor_along, expected,
+        app.settings_panel.anchor_along, expected,
         "settings not re-anchored"
     );
     assert_eq!(app.pointer, moved_into(&app, old, pointer));

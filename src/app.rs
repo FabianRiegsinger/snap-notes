@@ -479,6 +479,55 @@ struct TitleEdit {
     anchor: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// What the settings, search and export panels share: whether one is
+/// showing, its unfold morph and where along the edge it is centered.
+struct Panel {
+    /// Showing (kept while it folds back into its strip slot).
+    open: bool,
+    morph: Morph,
+    /// Slot center along the edge when the panel opened; the panel stays
+    /// centered on it.
+    anchor_along: f32,
+}
+
+impl Panel {
+    fn new(speed: f32) -> Self {
+        Self {
+            open: false,
+            morph: Morph::new(speed),
+            anchor_along: 0.0,
+        }
+    }
+
+    /// Open and unfolding (not folding away).
+    fn is_showing(&self) -> bool {
+        self.open && self.morph.is_opening()
+    }
+
+    /// Marks a closed panel open, centered on `anchor_along`.
+    fn start(&mut self, anchor_along: f32) {
+        self.anchor_along = anchor_along;
+        self.open = true;
+    }
+
+    /// Starts folding the panel back (if it is open); returns whether it is.
+    fn close(&mut self) -> bool {
+        if self.open {
+            self.morph.close();
+        }
+        self.open
+    }
+
+    /// Marks the panel closed once it has folded away; true on that tick.
+    fn finish_closing(&mut self) -> bool {
+        let closed = self.open && self.morph.is_closed();
+        if closed {
+            self.open = false;
+        }
+        closed
+    }
+}
+
 pub struct App {
     pub(crate) theme: theme::Theme,
     store: NoteStore,
@@ -563,11 +612,8 @@ pub struct App {
     /// starts at the top.
     peek_scroll: Option<(Uuid, f32)>,
     peek: Morph,
-    /// The settings panel is showing (kept while it folds back into the gear).
-    settings_open: bool,
-    settings_morph: Morph,
-    /// Gear center when the panel opened; the panel stays centered on it.
-    settings_anchor_along: f32,
+    /// The settings panel, morphing out of the gear.
+    settings_panel: Panel,
     /// Top-left of the settings panel after a drag (cleared on reset).
     settings_pos: Option<Point>,
     /// Grab offset (cursor minus panel top-left) while dragging settings.
@@ -582,11 +628,8 @@ pub struct App {
     actions_open: bool,
     actions_morph: Morph,
     palette_slot: Option<usize>,
-    /// The search panel is showing (kept while it folds back into its slot).
-    search_open: bool,
-    search_morph: Morph,
-    /// Search slot center when the panel opened.
-    search_anchor_along: f32,
+    /// The search panel, morphing out of its slot.
+    search_panel: Panel,
     search_query: String,
     /// Results for `search_query`, and the ids of every matching note (for
     /// dimming), as of `search_synced`: the store revision and query they
@@ -600,11 +643,11 @@ pub struct App {
     /// Task progress per entry of `strip_entries`, from the same revision.
     strip_progress: Vec<Option<(usize, usize)>>,
     entries_synced: u64,
-    /// The export panel is showing (kept while it folds back into the gear).
+    /// The export panel's choices while it is showing (kept while it folds
+    /// back into the gear); `export_panel.open` mirrors `is_some()`.
     export: Option<ExportState>,
-    export_morph: Morph,
-    /// Gear center when the export panel opened.
-    export_anchor_along: f32,
+    /// The export panel, morphing out of the gear like the settings.
+    export_panel: Panel,
     /// Counts fresh openings of the export panel; see
     /// [`ExportState::generation`].
     export_generation: u64,
@@ -740,11 +783,11 @@ impl App {
         let s = settings.settings();
         let morph = Morph::new(s.motion.speed);
         let peek = Morph::peek(s.motion.speed);
-        let settings_morph = Morph::new(s.motion.speed);
         let actions_morph = Morph::with_secs(ACTIONS_SECS, s.motion.speed);
-        let search_morph = Morph::new(s.motion.speed);
-        let export_morph = Morph::new(s.motion.speed);
         let mode_fade = Self::settled_fade(s.motion.speed);
+        let settings_panel = Panel::new(s.motion.speed);
+        let search_panel = Panel::new(s.motion.speed);
+        let export_panel = Panel::new(s.motion.speed);
         let window_size = s.window.edge.size(
             600.0,
             Self::docked_thickness(s, SUPPORTS_PASSTHROUGH, false),
@@ -805,9 +848,7 @@ impl App {
             peek_note: None,
             peek_scroll: None,
             peek,
-            settings_open: false,
-            settings_morph,
-            settings_anchor_along: 0.0,
+            settings_panel,
             settings_pos: None,
             settings_drag: None,
             settings_drag_pos: None,
@@ -816,14 +857,11 @@ impl App {
             actions_open: false,
             actions_morph,
             palette_slot: None,
-            search_open: false,
-            search_morph,
+            search_panel,
             export: None,
-            export_morph,
-            export_anchor_along: 0.0,
+            export_panel,
             export_generation: 0,
             export_dialog_open: false,
-            search_anchor_along: 0.0,
             search_query: String::new(),
             search_results: Vec::new(),
             search_matches: HashSet::new(),
@@ -909,7 +947,7 @@ impl App {
                 }
             }
             Message::ToggleSettings => {
-                if self.settings_open && self.settings_morph.is_opening() {
+                if self.settings_panel.is_showing() {
                     return self.update(Message::CloseSettings);
                 }
                 self.force_reveal = true;
@@ -919,20 +957,18 @@ impl App {
                 self.close_export();
                 self.hide_peek();
                 // Still folding away: unfold again from where it is.
-                if !self.settings_open {
+                if !self.settings_panel.open {
                     let gear = self.strip_layout().settings_anchor();
-                    self.settings_anchor_along = along_center(gear, self.edge());
-                    self.settings_open = true;
+                    self.settings_panel.start(along_center(gear, self.edge()));
                     self.settings_tab = SettingsTab::default();
                     self.palette_slot = None;
                 }
-                self.settings_morph.open();
+                self.settings_panel.morph.open();
                 self.animating = true;
                 return Task::batch([close_note, self.dock_window()]);
             }
             Message::CloseSettings => {
-                if self.settings_open {
-                    self.settings_morph.close();
+                if self.settings_panel.close() {
                     self.settings_drag = None;
                     self.settings_drag_pos = None;
                     self.animating = true;
@@ -1371,9 +1407,9 @@ impl App {
                 let morph_active = self.actions_morph.tick(dt)
                     | self.morph.tick(dt)
                     | self.peek.tick(dt)
-                    | self.settings_morph.tick(dt)
-                    | self.search_morph.tick(dt)
-                    | self.export_morph.tick(dt)
+                    | self.settings_panel.morph.tick(dt)
+                    | self.search_panel.morph.tick(dt)
+                    | self.export_panel.morph.tick(dt)
                     | self.mode_fade.tick(dt);
                 let collapse_active = self.collapsing.as_mut().is_some_and(|(_, m)| m.tick(dt));
                 let collapsed = if self.collapsing.is_some() && !collapse_active {
@@ -1384,16 +1420,12 @@ impl App {
                 if self.peek.is_closed() {
                     self.peek_note = None;
                 }
-                let settings_closed = self.settings_open && self.settings_morph.is_closed();
+                let settings_closed = self.settings_panel.finish_closing();
                 if settings_closed {
-                    self.settings_open = false;
                     self.palette_slot = None;
                 }
-                let search_closed = self.search_open && self.search_morph.is_closed();
-                if search_closed {
-                    self.search_open = false;
-                }
-                let export_closed = self.export.is_some() && self.export_morph.is_closed();
+                let search_closed = self.search_panel.finish_closing();
+                let export_closed = self.export_panel.finish_closing();
                 if export_closed {
                     self.export = None;
                 }
@@ -1784,9 +1816,9 @@ impl App {
                 };
                 let mut tasks = Vec::new();
                 // Adding a note or opening a panel needs the notes on screen.
-                let settings_showing = self.settings_open && self.settings_morph.is_opening();
-                let search_showing = self.search_open && self.search_morph.is_opening();
-                let export_showing = self.export.is_some() && self.export_morph.is_opening();
+                let settings_showing = self.settings_panel.is_showing();
+                let search_showing = self.search_panel.is_showing();
+                let export_showing = self.export_panel.is_showing();
                 let showing = match message {
                     Message::ToggleSettings => settings_showing,
                     Message::ToggleSearch => search_showing,
@@ -1876,15 +1908,13 @@ impl App {
                     keyboard::Key::Named(Named::Escape) if self.reminder_picker.is_some() => {
                         self.reminder_picker = None
                     }
-                    keyboard::Key::Named(Named::Escape) if self.search_morph.is_opening() => {
+                    keyboard::Key::Named(Named::Escape) if self.search_panel.morph.is_opening() => {
                         self.close_search()
                     }
-                    keyboard::Key::Named(Named::Escape)
-                        if self.export.is_some() && self.export_morph.is_opening() =>
-                    {
+                    keyboard::Key::Named(Named::Escape) if self.export_panel.is_showing() => {
                         self.close_export()
                     }
-                    keyboard::Key::Named(Named::Escape) if self.settings_open => {
+                    keyboard::Key::Named(Named::Escape) if self.settings_panel.open => {
                         return self.update(Message::CloseSettings)
                     }
                     keyboard::Key::Named(Named::Escape) if self.editing => {
@@ -2105,7 +2135,7 @@ impl App {
                     theme: self.theme,
                     settings: self.settings.settings(),
                     size: rect.size(),
-                    morph_progress: self.settings_morph.progress(),
+                    morph_progress: self.settings_panel.morph.progress(),
                     content_alpha: frame.content_alpha,
                     tab: self.settings_tab,
                     selected_slot: self.palette_slot,
@@ -2123,7 +2153,7 @@ impl App {
             if rect.width >= 1.0 && rect.height >= 1.0 {
                 // Only while unfolding: a folding panel mustn't block clicks
                 // on the note opening in its place.
-                if self.search_morph.is_opening() {
+                if self.search_panel.morph.is_opening() {
                     layers.push(
                         mouse_area(Space::new().width(Fill).height(Fill))
                             .on_press(Message::CloseSearch)
@@ -2135,7 +2165,7 @@ impl App {
                     query: &self.search_query,
                     hits: self.search_hits(),
                     size: rect.size(),
-                    morph_progress: self.search_morph.progress(),
+                    morph_progress: self.search_panel.morph.progress(),
                     content_alpha: frame.content_alpha,
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
@@ -2147,7 +2177,7 @@ impl App {
             if rect.width >= 1.0 && rect.height >= 1.0 {
                 // Only while unfolding, as for the search. While the save
                 // dialog is open a click beside the panel does nothing.
-                if self.export_morph.is_opening() {
+                if self.export_panel.morph.is_opening() {
                     let backdrop = Space::new().width(Fill).height(Fill);
                     layers.push(if self.export_dialog_open {
                         opaque(backdrop)
@@ -2161,7 +2191,7 @@ impl App {
                     state,
                     can_export: self.export_enabled(),
                     size: rect.size(),
-                    morph_progress: self.export_morph.progress(),
+                    morph_progress: self.export_panel.morph.progress(),
                     content_alpha: frame.content_alpha,
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
@@ -2272,9 +2302,7 @@ impl App {
         self.editing = note.content.trim().is_empty();
         self.hide_peek();
         // A note and the panels never show at the same time.
-        if self.settings_open {
-            self.settings_morph.close();
-        }
+        self.settings_panel.close();
         self.close_search();
         self.close_export();
         self.active_note = Some(id);
@@ -2947,8 +2975,8 @@ impl App {
     fn needs_wide_window(&self, passthrough: bool) -> bool {
         passthrough
             || self.active_note.is_some()
-            || self.settings_open
-            || self.search_open
+            || self.settings_panel.open
+            || self.search_panel.open
             || self.export.is_some()
             || self.clipboard_empty_at.is_some()
             || self.last_deleted.is_some()
@@ -3223,7 +3251,7 @@ impl App {
 
     /// Search, settings or export is open.
     fn panel_open(&self) -> bool {
-        self.search_open || self.settings_open || self.export.is_some()
+        self.search_panel.open || self.settings_panel.open || self.export.is_some()
     }
 
     /// The undo toast is up and no panel covers it.
@@ -3341,7 +3369,9 @@ impl App {
     fn update_hover(&mut self) {
         let hovered = match (self.cursor_y, self.active_note, &self.drag) {
             (Some(y), None, None)
-                if !self.settings_open && !self.search_open && self.export.is_none() =>
+                if !self.settings_panel.open
+                    && !self.search_panel.open
+                    && self.export.is_none() =>
             {
                 let strip = self.strip_layout();
                 strip
@@ -3439,7 +3469,7 @@ impl App {
 
     /// The settings panel's current frame, morphing out of the gear slot.
     fn settings_frame(&self) -> Option<MorphFrame> {
-        if !self.settings_open {
+        if !self.settings_panel.open {
             return None;
         }
         let source = self.strip_layout().settings_anchor();
@@ -3447,7 +3477,7 @@ impl App {
         Some(morph_frame(
             self.slid(source),
             target,
-            self.settings_morph.progress(),
+            self.settings_panel.morph.progress(),
         ))
     }
 
@@ -3468,34 +3498,37 @@ impl App {
                 size,
             );
         }
-        self.beside_strip(size, self.settings_anchor_along)
+        self.beside_strip(size, self.settings_panel.anchor_along)
     }
 
     /// The search panel's current frame, morphing out of the search slot.
     fn search_frame(&self) -> Option<MorphFrame> {
-        if !self.search_open {
-            return None;
-        }
         let source = self.strip_layout().search_anchor();
-        Some(self.panel_frame(source, self.search_anchor_along, &self.search_morph))
+        self.panel_frame(source, &self.search_panel)
     }
 
     /// The export panel's current frame, morphing out of the gear slot like
     /// the settings it replaces.
     fn export_frame(&self) -> Option<MorphFrame> {
-        self.export.as_ref()?;
         let source = self.strip_layout().settings_anchor();
-        Some(self.panel_frame(source, self.export_anchor_along, &self.export_morph))
+        self.panel_frame(source, &self.export_panel)
     }
 
-    /// A panel's frame on its way from the strip slot `source` to its place
-    /// on the strip's away side, centered on `anchor_along` (a coordinate along
-    /// the edge) where it fits.
-    fn panel_frame(&self, source: Rectangle, anchor_along: f32, morph: &Morph) -> MorphFrame {
+    /// An open panel's frame on its way from the strip slot `source` to its
+    /// place on the strip's away side, centered on its `anchor_along` (a
+    /// coordinate along the edge) where it fits.
+    fn panel_frame(&self, source: Rectangle, panel: &Panel) -> Option<MorphFrame> {
+        if !panel.open {
+            return None;
+        }
         let room = self.panel_room();
         let height = room.min(PANEL_MAX_HEIGHT);
-        let target = self.beside_strip(Size::new(PANEL_WIDTH, height), anchor_along);
-        morph_frame(self.slid(source), target, morph.progress())
+        let target = self.beside_strip(Size::new(PANEL_WIDTH, height), panel.anchor_along);
+        Some(morph_frame(
+            self.slid(source),
+            target,
+            panel.morph.progress(),
+        ))
     }
 
     /// Height available to a panel, leaving `NOTE_MARGIN` at the window
@@ -3548,7 +3581,7 @@ impl App {
     /// the note and the settings, and starts with an empty query.
     fn toggle_search(&mut self) -> Task<Message> {
         self.force_reveal = true;
-        if self.search_open && self.search_morph.is_opening() {
+        if self.search_panel.is_showing() {
             self.close_search();
             return Task::none();
         }
@@ -3557,13 +3590,12 @@ impl App {
         self.close_export();
         self.hide_peek();
         // Still folding away: unfold again from where it is, query kept.
-        if !self.search_open {
+        if !self.search_panel.open {
             let slot = self.strip_layout().search_anchor();
-            self.search_anchor_along = along_center(slot, self.edge());
-            self.search_open = true;
+            self.search_panel.start(along_center(slot, self.edge()));
             self.search_query.clear();
         }
-        self.search_morph.open();
+        self.search_panel.morph.open();
         self.pending_focus = Some(PendingFocus::SearchField);
         self.animating = true;
         Task::batch([
@@ -3577,7 +3609,7 @@ impl App {
     /// Opens the export panel with every note selected, or closes it while
     /// it is showing. It closes the note, the search and the settings.
     fn toggle_export(&mut self) -> Task<Message> {
-        if self.export.is_some() && self.export_morph.is_opening() {
+        if self.export_panel.is_showing() {
             self.close_export();
             return Task::none();
         }
@@ -3590,20 +3622,19 @@ impl App {
             Some(state) => state.status = None,
             None => {
                 let gear = self.strip_layout().settings_anchor();
-                self.export_anchor_along = along_center(gear, self.edge());
+                self.export_panel.start(along_center(gear, self.edge()));
                 self.export_generation += 1;
                 self.export = Some(ExportState::new(self.store.notes(), self.export_generation));
             }
         }
-        self.export_morph.open();
+        self.export_panel.morph.open();
         self.animating = true;
         Task::batch([close_note, close_settings, self.dock_window()])
     }
 
     /// Folds the export panel back into the gear (if it is showing).
     fn close_export(&mut self) {
-        if self.export.is_some() {
-            self.export_morph.close();
+        if self.export_panel.close() {
             self.animating = true;
         }
     }
@@ -3703,8 +3734,7 @@ impl App {
 
     /// Folds the search panel back into its slot (if it is showing).
     fn close_search(&mut self) {
-        if self.search_open {
-            self.search_morph.close();
+        if self.search_panel.close() {
             self.animating = true;
         }
         if self.pending_focus == Some(PendingFocus::SearchField) {
@@ -3777,7 +3807,7 @@ impl App {
     /// Recomputes the search results while the panel is open and the
     /// query or the notes changed since they were computed.
     fn sync_search(&mut self) {
-        if !self.search_open {
+        if !self.search_panel.open {
             return;
         }
         let key = (self.store.revision(), self.search_query.clone());
@@ -3798,7 +3828,7 @@ impl App {
     /// Bars to dim, by index: while the search is open with a query, the
     /// entries none of whose notes match it. Empty otherwise.
     fn dimmed_bars(&self) -> Vec<bool> {
-        if !self.search_open || self.search_query.trim().is_empty() {
+        if !self.search_panel.open || self.search_query.trim().is_empty() {
             return Vec::new();
         }
         let notes = self.store.notes();
@@ -4008,9 +4038,13 @@ impl App {
         // Re-anchor in the docked window.
         self.follow_open_bar();
         let strip = self.strip_layout();
-        self.settings_anchor_along = along_center(strip.settings_anchor(), edge);
-        self.search_anchor_along = along_center(strip.search_anchor(), edge);
-        self.export_anchor_along = along_center(strip.settings_anchor(), edge);
+        for (panel, slot) in [
+            (&mut self.settings_panel, strip.settings_anchor()),
+            (&mut self.search_panel, strip.search_anchor()),
+            (&mut self.export_panel, strip.settings_anchor()),
+        ] {
+            panel.anchor_along = along_center(slot, edge);
+        }
         Task::batch([dock, self.update_passthrough(self.pointer)])
     }
 
@@ -4022,9 +4056,9 @@ impl App {
         self.morph.set_speed(speed);
         self.actions_morph.set_speed(speed);
         self.peek.set_speed(speed);
-        self.settings_morph.set_speed(speed);
-        self.search_morph.set_speed(speed);
-        self.export_morph.set_speed(speed);
+        self.settings_panel.morph.set_speed(speed);
+        self.search_panel.morph.set_speed(speed);
+        self.export_panel.morph.set_speed(speed);
         self.mode_fade.set_speed(speed);
         if let Some((_, collapse)) = &mut self.collapsing {
             collapse.set_speed(speed);
