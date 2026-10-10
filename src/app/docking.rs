@@ -278,6 +278,48 @@ impl App {
         }
     }
 
+    /// Makes a recorded `combo` the global hotkey.
+    pub(super) fn adopt_hotkey(&mut self, combo: hotkey::Combo) {
+        if self.window_id.is_none() {
+            self.hotkey_recording = false;
+            self.hotkey_hint = None;
+            self.settings.settings_mut().app.global_hotkey_combo = combo;
+            return;
+        }
+        self.adopt_hotkey_with(combo, hotkey::register);
+    }
+
+    /// [`App::adopt_hotkey`] registering through `register`. A combo that
+    /// can't be registered isn't kept: the previous one is taken back and
+    /// the red line names the one that failed.
+    pub(super) fn adopt_hotkey_with(
+        &mut self,
+        combo: hotkey::Combo,
+        register: impl FnOnce(&hotkey::Combo) -> Result<hotkey::Manager, String>,
+    ) {
+        self.hotkey_recording = false;
+        self.hotkey_hint = None;
+        let wanted = !cfg!(any(windows, target_os = "macos"))
+            || self.settings.settings().is_on(SettingToggle::GlobalHotkey);
+        if !wanted {
+            self.settings.settings_mut().app.global_hotkey_combo = combo;
+            return;
+        }
+        // Let go of the old combo before taking the new one.
+        self.hotkey = None;
+        match register(&combo) {
+            Ok(manager) => {
+                self.settings.settings_mut().app.global_hotkey_combo = combo;
+                self.apply_registration(Ok(manager));
+            }
+            Err(reason) => {
+                let failed = format!("{} ({reason})", combo.label(cfg!(target_os = "macos")));
+                self.sync_hotkey();
+                self.hotkey_error = Some(failed);
+            }
+        }
+    }
+
     /// Keeps the registered hotkey, or the reason it failed.
     pub(super) fn apply_registration(&mut self, result: Result<hotkey::Manager, String>) {
         match result {

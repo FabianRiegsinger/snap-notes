@@ -102,17 +102,39 @@ fn canonical_key(name: &str) -> Option<String> {
         .map(|k| k.to_string())
 }
 
+/// What the recording prompt says after a press [`PressError::NeedsCommandOrAlt`].
+pub const NEEDS_COMMAND_OR_ALT: &str = "Needs Cmd/Ctrl or Alt";
+
+/// Why a key press doesn't make a hotkey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressError {
+    /// No modifier, or not a key a hotkey can end in (a modifier key
+    /// itself, Esc, ...): not an attempt at a combo.
+    Ignored,
+    /// Only Shift held: typing would trigger it, so it needs Cmd/Ctrl or
+    /// Alt (F1–F12 excepted).
+    NeedsCommandOrAlt,
+}
+
 impl Combo {
-    /// A key pressed with `mods`, if it makes a usable hotkey: at least one
-    /// modifier and a supported key (not a modifier key itself, not Esc).
-    pub fn from_press(mods: Mods, key: &str) -> Option<Combo> {
+    /// A key pressed with `mods` as a hotkey: a supported key (not a
+    /// modifier key itself, not Esc) with Cmd/Ctrl or Alt, or an F-key with
+    /// any modifier.
+    pub fn check_press(mods: Mods, key: &str) -> Result<Combo, PressError> {
+        let key = canonical_key(key).ok_or(PressError::Ignored)?;
         if mods == Mods::default() {
-            return None;
+            return Err(PressError::Ignored);
         }
-        Some(Combo {
-            mods,
-            key: canonical_key(key)?,
-        })
+        let f_key = key.len() > 1 && key.starts_with('F');
+        if !(mods.primary || mods.ctrl || mods.alt || f_key) {
+            return Err(PressError::NeedsCommandOrAlt);
+        }
+        Ok(Combo { mods, key })
+    }
+
+    /// [`Combo::check_press`], when it makes a hotkey.
+    pub fn from_press(mods: Mods, key: &str) -> Option<Combo> {
+        Combo::check_press(mods, key).ok()
     }
 
     /// Reads a saved combo: modifiers then one key, joined by "+", in any
@@ -263,7 +285,8 @@ mod tests {
             "Ctrl+Alt+Q",
             "CmdOrCtrl+Ctrl+Alt+Shift+F5",
             "Alt+1",
-            "Shift+ArrowUp",
+            "Alt+ArrowUp",
+            "Shift+F7",
             "CmdOrCtrl+Backquote",
         ] {
             let combo = Combo::parse(s).unwrap_or_else(|| panic!("{s}"));
@@ -290,6 +313,8 @@ mod tests {
             "CmdOrCtrl+Bogus",
             "Hyper+Q",
             "CmdOrCtrl+Escape",
+            "Shift+ArrowUp",
+            "Shift+Q",
         ] {
             assert_eq!(Combo::parse(s), None, "{s:?}");
             assert_eq!(Combo::parse_or_default(s), Combo::default(), "{s:?}");
@@ -318,6 +343,43 @@ mod tests {
         assert_eq!(Combo::from_press(Mods::default(), "KeyQ"), None);
         assert_eq!(Combo::from_press(mods, "ShiftLeft"), None);
         assert_eq!(Combo::from_press(mods, "Escape"), None);
+    }
+
+    #[test]
+    fn a_combo_needs_cmd_ctrl_or_alt_unless_it_ends_in_an_f_key() {
+        let shift = Mods {
+            shift: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            Combo::check_press(shift, "KeyQ"),
+            Err(PressError::NeedsCommandOrAlt)
+        );
+        assert_eq!(
+            Combo::check_press(shift, "F12").unwrap().to_string(),
+            "Shift+F12"
+        );
+        assert_eq!(
+            Combo::check_press(Mods::default(), "F5"),
+            Err(PressError::Ignored)
+        );
+        assert_eq!(
+            Combo::check_press(shift, "ShiftLeft"),
+            Err(PressError::Ignored)
+        );
+        for mods in [
+            Mods { alt: true, ..shift },
+            Mods {
+                ctrl: true,
+                ..Mods::default()
+            },
+            Mods {
+                primary: true,
+                ..Mods::default()
+            },
+        ] {
+            assert!(Combo::check_press(mods, "KeyQ").is_ok(), "{mods:?}");
+        }
     }
 
     #[test]

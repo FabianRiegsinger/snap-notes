@@ -118,11 +118,6 @@ impl App {
                 return Task::batch([close_note, self.dock_window()]);
             }
             Message::CloseSettings => {
-                self.range_drafts.clear();
-                if self.hotkey_recording {
-                    self.hotkey_recording = false;
-                    self.sync_hotkey();
-                }
                 if self.settings_panel.close() {
                     self.settings_panel.cancel_drag();
                     self.animating = true;
@@ -180,28 +175,33 @@ impl App {
                 self.settings.settings_mut().set(key, value);
                 return self.apply_settings();
             }
+            // Only kept while typing: "2" on the way to "2.5" mustn't
+            // clamp the value. Enter, a click or closing Settings applies it.
             Message::RangeEdited(key, end, typed) => {
-                let value = key.parse_bound(&typed);
                 self.range_drafts.insert((key, end), typed);
-                let applied = value.is_some_and(|v| {
-                    self.settings
-                        .settings()
-                        .check_range_end(key, end, v)
-                        .is_some()
-                        && self.settings.settings_mut().set_range_end(key, end, v)
-                });
-                if applied {
-                    return self.apply_settings();
+                if self.hotkey_recording {
+                    self.stop_recording();
                 }
             }
             Message::HotkeyRecord => {
-                self.hotkey_recording = !self.hotkey_recording;
-                // The old hotkey is let go while recording, so its own
-                // keys can be recorded too.
-                self.sync_hotkey();
+                if std::mem::take(&mut self.hotkey_press_stopped) {
+                    // The press on this button already ended the recording.
+                } else if self.hotkey_recording {
+                    self.stop_recording();
+                } else if self.settings_panel.is_showing() {
+                    self.hotkey_recording = true;
+                    self.hotkey_hint = None;
+                    // The old hotkey is let go while recording, so its own
+                    // keys can be recorded too.
+                    self.sync_hotkey();
+                }
             }
             Message::RangeSubmitted(key, end) => {
-                self.range_drafts.remove(&(key, end));
+                if let Some(typed) = self.range_drafts.remove(&(key, end)) {
+                    if self.apply_range_draft(key, end, &typed) {
+                        return self.apply_settings();
+                    }
+                }
             }
             Message::ReminderAlertChosen(style) => {
                 self.settings.settings_mut().motion.reminder_alert = style;
@@ -236,6 +236,7 @@ impl App {
                 }
                 if group == SettingsGroup::App {
                     self.hotkey_recording = false;
+                    self.hotkey_hint = None;
                     self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
                     self.sync_hotkey();
                     return self.apply_app_visibility();
@@ -284,8 +285,56 @@ impl App {
         Task::none()
     }
 
-    /// Ends the settings' and the search's drags where they are.
-    pub(super) fn finish_panel_drags(&mut self) {
+    /// Applies a typed range bound if it is usable; returns whether it was.
+    fn apply_range_draft(&mut self, key: SettingKey, end: RangeEnd, typed: &str) -> bool {
+        key.parse_bound(typed).is_some_and(|v| {
+            self.settings
+                .settings()
+                .check_range_end(key, end, v)
+                .is_some()
+                && self.settings.settings_mut().set_range_end(key, end, v)
+        })
+    }
+
+    /// Applies every typed range bound (unusable ones are dropped), as when
+    /// the fields lose focus.
+    pub(super) fn commit_range_drafts(&mut self) -> Task<Message> {
+        let mut applied = false;
+        for ((key, end), typed) in std::mem::take(&mut self.range_drafts) {
+            applied |= self.apply_range_draft(key, end, &typed);
+        }
+        if applied {
+            self.apply_settings()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Stops recording the global hotkey and takes the saved one back.
+    pub(super) fn stop_recording(&mut self) {
+        self.hotkey_recording = false;
+        self.hotkey_hint = None;
+        self.sync_hotkey();
+    }
+
+    /// Settings closed or hidden, by whatever path: typed range bounds
+    /// apply and hotkey recording stops.
+    pub(super) fn settle_settings_session(&mut self) -> Task<Message> {
+        if self.settings_panel.is_showing() && self.visible {
+            return Task::none();
+        }
+        if self.hotkey_recording {
+            self.stop_recording();
+        }
+        if self.range_drafts.is_empty() {
+            return Task::none();
+        }
+        self.commit_range_drafts()
+    }
+
+    /// Ends the settings' and the search's drags where they are. Returns
+    /// the search field's focus after a search drag.
+    pub(super) fn finish_panel_drags(&mut self) -> Task<Message> {
         if self.settings_panel.drag.is_some() {
             let rect = self.panel_target(&self.settings_panel);
             self.settings_panel.cancel_drag();
@@ -295,7 +344,9 @@ impl App {
             let rect = self.panel_target(&self.search_panel);
             self.search_panel.cancel_drag();
             self.search_panel.pos = Some(rect.position());
+            return focus_field();
         }
+        Task::none()
     }
 
     /// The settings panel's current frame, morphing out of the gear slot.

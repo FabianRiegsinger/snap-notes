@@ -385,7 +385,6 @@ impl SettingKey {
         }
     }
 
-    /// Group and field name of this setting in `settings.json`.
     /// The hard bounds the app can render; user ranges stay inside them.
     pub fn safety_range(self) -> RangeInclusive<f32> {
         match self {
@@ -458,6 +457,7 @@ impl SettingKey {
         shown.is_finite().then(|| (shown - offset) / factor)
     }
 
+    /// Group and field name of this setting in `settings.json`.
     fn json_path(self) -> (&'static str, &'static str) {
         match self {
             SettingKey::BarWidth => ("bars", "width"),

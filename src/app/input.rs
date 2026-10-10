@@ -128,16 +128,26 @@ impl App {
                 if !down && self.note_drag.is_some() {
                     self.finish_note_drag();
                 }
+                let mut tasks = Vec::new();
                 if !down {
-                    self.finish_panel_drags();
-                }
-                if !down {
+                    tasks.push(self.finish_panel_drags());
                     self.finish_note_resize();
+                }
+                if down {
+                    // Any press ends a recording; on the Record button its
+                    // release must not start one again.
+                    self.hotkey_press_stopped = self.hotkey_recording;
+                    if self.hotkey_recording {
+                        self.stop_recording();
+                    }
+                    // A click is where the range fields lose focus.
+                    tasks.push(self.commit_range_drafts());
                 }
                 // A click elsewhere ends the title's edit.
                 if down && self.title_edit.is_some() {
-                    return crate::note_panel::title_focused().map(Message::TitleBlurred);
+                    tasks.push(crate::note_panel::title_focused().map(Message::TitleBlurred));
                 }
+                return Task::batch(tasks);
             }
             Message::PollCursor => {
                 if let Some(id) = self.window_id {
@@ -309,8 +319,7 @@ impl App {
     ) {
         use keyboard::key::{Named, Physical};
         if *key == keyboard::Key::Named(Named::Escape) {
-            self.hotkey_recording = false;
-            self.sync_hotkey();
+            self.stop_recording();
             return;
         }
         let Physical::Code(code) = physical_key else {
@@ -327,10 +336,12 @@ impl App {
             alt: modifiers.alt(),
             shift: modifiers.shift(),
         };
-        if let Some(combo) = hotkey::Combo::from_press(mods, &format!("{code:?}")) {
-            self.settings.settings_mut().app.global_hotkey_combo = combo;
-            self.hotkey_recording = false;
-            self.sync_hotkey();
+        match hotkey::Combo::check_press(mods, &format!("{code:?}")) {
+            Ok(combo) => self.adopt_hotkey(combo),
+            Err(hotkey::PressError::NeedsCommandOrAlt) => {
+                self.hotkey_hint = Some(hotkey::NEEDS_COMMAND_OR_ALT);
+            }
+            Err(hotkey::PressError::Ignored) => {}
         }
     }
 }

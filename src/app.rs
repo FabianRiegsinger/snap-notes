@@ -633,6 +633,11 @@ pub struct App {
     /// The next modified key press becomes the global hotkey (Esc
     /// cancels); no shortcut runs meanwhile.
     hotkey_recording: bool,
+    /// Why the last press while recording didn't make a hotkey.
+    hotkey_hint: Option<&'static str>,
+    /// A mouse press just ended the recording, so the Record button's
+    /// message on its release must not start it again.
+    hotkey_press_stopped: bool,
     /// The menu bar / tray icon exists.
     tray_ok: bool,
     /// The tray icon could not be created, so the Dock icon is shown this
@@ -852,6 +857,8 @@ impl App {
             hotkey: None,
             hotkey_error: None,
             hotkey_recording: false,
+            hotkey_hint: None,
+            hotkey_press_stopped: false,
             tray_ok: false,
             tray_failed: false,
             keep_open_until: None,
@@ -881,6 +888,7 @@ impl App {
         // A tick steps auto-hide itself, by its own frame time.
         let tick = matches!(message, Message::Tick(_));
         let task = self.handle(message);
+        let task = Task::batch([task, self.settle_settings_session()]);
         self.sync_entries();
         self.sync_search();
         if tick {
@@ -1133,6 +1141,7 @@ impl App {
                         .global_hotkey_combo
                         .label(cfg!(target_os = "macos")),
                     hotkey_recording: self.hotkey_recording,
+                    hotkey_hint: self.hotkey_hint,
                     dragging: self.settings_panel.drag.is_some(),
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());

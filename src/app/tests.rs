@@ -4784,25 +4784,68 @@ fn panels_open_away_from_edge() {
     }
 }
 
+/// An app with the Settings panel open.
+fn app_with_settings(dir: &tempfile::TempDir) -> App {
+    let mut app = app_in(dir);
+    app.window_size = Size::new(1400.0, 900.0);
+    let _ = app.update(Message::ToggleSettings);
+    settle(&mut app);
+    assert!(app.settings_panel.is_showing());
+    app
+}
+
 #[test]
-fn editing_a_range_field_applies_a_valid_bound_and_clamps_the_value() {
+fn a_range_bound_applies_on_enter_and_then_clamps_the_value() {
     use crate::settings::{RangeEnd, SettingKey};
     let dir = tempfile::tempdir().unwrap();
-    let mut app = app_in(&dir);
+    let mut app = app_with_settings(&dir);
     let key = SettingKey::BarWidth;
     let _ = app.update(Message::RangeEdited(key, RangeEnd::Max, "6".into()));
+    assert!(!app.range_draft_invalid(key, RangeEnd::Max));
+    // Typing alone changes nothing yet.
+    assert_eq!(app.settings.settings().range(key), 3.0..=12.0);
+    assert_eq!(app.settings.settings().bars.width, 10.0);
+    let _ = app.update(Message::RangeSubmitted(key, RangeEnd::Max));
     assert_eq!(app.settings.settings().range(key), 3.0..=6.0);
     assert_eq!(app.settings.settings().bars.width, 6.0);
-    assert!(!app.range_draft_invalid(key, RangeEnd::Max));
-    let _ = app.update(Message::RangeSubmitted(key, RangeEnd::Max));
     assert_eq!(app.range_field_text(key, RangeEnd::Max), "6");
+}
+
+#[test]
+fn typing_a_decimal_bound_does_not_clamp_on_the_way() {
+    use crate::settings::{RangeEnd, SettingKey};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_settings(&dir);
+    let key = SettingKey::Speed;
+    let _ = app.update(Message::SettingChanged(key, 2.8));
+    for typed in ["2", "2.", "2.5"] {
+        let _ = app.update(Message::RangeEdited(key, RangeEnd::Max, typed.into()));
+        assert_eq!(app.settings.settings().motion.speed, 2.8, "{typed}");
+    }
+    let _ = app.update(Message::RangeSubmitted(key, RangeEnd::Max));
+    assert_eq!(app.settings.settings().range(key), 0.25..=2.5);
+    assert_eq!(app.settings.settings().motion.speed, 2.5);
+}
+
+#[test]
+fn a_click_elsewhere_or_closing_settings_applies_typed_bounds() {
+    use crate::settings::{RangeEnd, SettingKey};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_settings(&dir);
+    let key = SettingKey::BarWidth;
+    let _ = app.update(Message::RangeEdited(key, RangeEnd::Max, "8".into()));
+    let _ = app.update(Message::MouseButton(true));
+    assert_eq!(app.settings.settings().range(key), 3.0..=8.0);
+    let _ = app.update(Message::RangeEdited(key, RangeEnd::Min, "5".into()));
+    let _ = app.update(Message::CloseSettings);
+    assert_eq!(app.settings.settings().range(key), 5.0..=8.0);
 }
 
 #[test]
 fn an_invalid_range_edit_is_flagged_and_not_applied() {
     use crate::settings::{RangeEnd, SettingKey};
     let dir = tempfile::tempdir().unwrap();
-    let mut app = app_in(&dir);
+    let mut app = app_with_settings(&dir);
     let key = SettingKey::BarWidth;
     for typed in ["2", "x", ""] {
         let _ = app.update(Message::RangeEdited(key, RangeEnd::Max, typed.into()));
@@ -4820,9 +4863,10 @@ fn an_invalid_range_edit_is_flagged_and_not_applied() {
 fn group_reset_restores_ranges_and_drops_their_drafts() {
     use crate::settings::{RangeEnd, SettingKey};
     let dir = tempfile::tempdir().unwrap();
-    let mut app = app_in(&dir);
+    let mut app = app_with_settings(&dir);
     let key = SettingKey::BarWidth;
     let _ = app.update(Message::RangeEdited(key, RangeEnd::Max, "30".into()));
+    let _ = app.update(Message::RangeSubmitted(key, RangeEnd::Max));
     let _ = app.update(Message::RangeEdited(key, RangeEnd::Min, "zz".into()));
     assert_eq!(app.settings.settings().range(key), 3.0..=30.0);
     let _ = app.update(Message::ResetGroup(SettingsGroup::Bars));
@@ -4846,7 +4890,7 @@ impl App {
 #[test]
 fn closing_settings_drops_range_drafts() {
     let dir = tempfile::tempdir().unwrap();
-    let mut app = app_in(&dir);
+    let mut app = app_with_settings(&dir);
     let key = SettingKey::Spread;
     let _ = app.update(Message::RangeEdited(key, RangeEnd::Min, "abc".into()));
     let _ = app.update(Message::CloseSettings);
@@ -4871,7 +4915,7 @@ fn recording_captures_the_next_modified_key_as_the_hotkey() {
     use keyboard::key::Code;
     use keyboard::Modifiers;
     let dir = tempfile::tempdir().unwrap();
-    let mut app = app_in(&dir);
+    let mut app = app_with_settings(&dir);
     let _ = app.update(Message::HotkeyRecord);
     assert!(app.hotkey_recording);
     // A bare key doesn't count; recording goes on.
@@ -4896,7 +4940,7 @@ fn recording_swallows_app_shortcuts() {
     use keyboard::key::Code;
     use keyboard::Modifiers;
     let dir = tempfile::tempdir().unwrap();
-    let mut app = app_in(&dir);
+    let mut app = app_with_settings(&dir);
     let notes = app.store.notes().len();
     let _ = app.update(Message::HotkeyRecord);
     // Cmd/Ctrl+N would add a note; while recording it becomes the hotkey.
@@ -4910,8 +4954,7 @@ fn recording_swallows_app_shortcuts() {
 #[test]
 fn escape_cancels_recording_and_keeps_the_combo() {
     let dir = tempfile::tempdir().unwrap();
-    let mut app = app_in(&dir);
-    let _ = app.update(Message::ToggleSettings);
+    let mut app = app_with_settings(&dir);
     let _ = app.update(Message::HotkeyRecord);
     let _ = app.update(escape());
     assert!(!app.hotkey_recording);
@@ -4929,7 +4972,7 @@ fn escape_cancels_recording_and_keeps_the_combo() {
 #[test]
 fn app_reset_restores_the_hotkey_and_stops_recording() {
     let dir = tempfile::tempdir().unwrap();
-    let mut app = app_in(&dir);
+    let mut app = app_with_settings(&dir);
     app.settings.settings_mut().app.global_hotkey_combo = Combo::parse("Alt+F3").unwrap();
     let _ = app.update(Message::HotkeyRecord);
     let _ = app.update(Message::ResetGroup(SettingsGroup::App));
@@ -4943,9 +4986,145 @@ fn app_reset_restores_the_hotkey_and_stops_recording() {
 #[test]
 fn closing_settings_stops_recording() {
     let dir = tempfile::tempdir().unwrap();
-    let mut app = app_in(&dir);
-    let _ = app.update(Message::ToggleSettings);
+    let mut app = app_with_settings(&dir);
     let _ = app.update(Message::HotkeyRecord);
     let _ = app.update(Message::CloseSettings);
     assert!(!app.hotkey_recording);
+}
+
+#[test]
+fn opening_a_note_stops_recording_and_takes_the_hotkey_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_settings(&dir);
+    app.store.add_note(&crate::note::PALETTE);
+    let _ = app.update(Message::HotkeyRecord);
+    assert!(app.hotkey_recording);
+    let _ = app.update(Message::BarClicked(0));
+    assert!(!app.hotkey_recording);
+    // Esc now closes things again instead of being recorded.
+    let _ = app.update(escape());
+    assert_eq!(
+        app.settings.settings().app.global_hotkey_combo,
+        Combo::default()
+    );
+}
+
+#[test]
+fn hiding_the_notes_or_opening_search_stops_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_settings(&dir);
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(Message::ToggleSearch);
+    assert!(!app.hotkey_recording);
+
+    let mut app = app_with_settings(&dir);
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(Message::ToggleVisibility);
+    assert!(!app.hotkey_recording);
+}
+
+#[test]
+fn a_press_elsewhere_ends_recording_but_the_record_button_toggles() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_settings(&dir);
+    // Pressing Record: the press, then the button's message on release.
+    let _ = app.update(Message::MouseButton(true));
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(Message::MouseButton(false));
+    assert!(app.hotkey_recording);
+    // Pressing Cancel ends it (and doesn't start it again).
+    let _ = app.update(Message::MouseButton(true));
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(Message::MouseButton(false));
+    assert!(!app.hotkey_recording);
+    // A press anywhere else ends it too.
+    let _ = app.update(Message::MouseButton(true));
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(Message::MouseButton(false));
+    assert!(app.hotkey_recording);
+    let _ = app.update(Message::MouseButton(true));
+    let _ = app.update(Message::MouseButton(false));
+    assert!(!app.hotkey_recording);
+    // So does typing into a range field.
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(Message::RangeEdited(
+        SettingKey::Spread,
+        RangeEnd::Min,
+        "3".into(),
+    ));
+    assert!(!app.hotkey_recording);
+}
+
+#[test]
+fn shift_alone_is_refused_with_a_hint_and_recording_goes_on() {
+    use keyboard::key::Code;
+    use keyboard::Modifiers;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_settings(&dir);
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(key_press(Code::KeyK, "K", Modifiers::SHIFT));
+    assert!(app.hotkey_recording);
+    assert_eq!(app.hotkey_hint, Some(crate::hotkey::NEEDS_COMMAND_OR_ALT));
+    assert_eq!(
+        app.settings.settings().app.global_hotkey_combo,
+        Combo::default()
+    );
+    let _ = app.update(key_press(Code::F5, "", Modifiers::SHIFT));
+    assert!(!app.hotkey_recording);
+    assert_eq!(app.hotkey_hint, None);
+    let combo = &app.settings.settings().app.global_hotkey_combo;
+    assert_eq!(combo.to_string(), "Shift+F5");
+}
+
+#[test]
+fn a_combo_that_fails_to_register_is_not_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_settings(&dir);
+    let _ = app.update(Message::HotkeyRecord);
+    let failed = Combo::parse("Alt+F3").unwrap();
+    app.adopt_hotkey_with(failed.clone(), |_| Err("HotKey already registered".into()));
+    assert!(!app.hotkey_recording);
+    assert_eq!(
+        app.settings.settings().app.global_hotkey_combo,
+        Combo::default()
+    );
+    let error = app.hotkey_error.clone().unwrap();
+    assert!(
+        error.contains(&failed.label(cfg!(target_os = "macos"))),
+        "{error}"
+    );
+    assert!(error.contains("already registered"), "{error}");
+}
+
+#[test]
+fn search_field_gets_focus_back_after_a_drag() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    app.window_size = Size::new(1400.0, 900.0);
+    let _ = app.update(Message::ToggleSearch);
+    settle(&mut app);
+    let plain = app.update(Message::MouseButton(false)).units();
+    let start = app.search_frame().unwrap().rect.position();
+    app.last_cursor = Some(Point::new(start.x + 20.0, start.y + 8.0));
+    let _ = app.update(Message::SearchDragStart);
+    let _ = app.update(Message::CursorMoved(Point::new(start.x - 50.0, start.y)));
+    let after_drag = app.update(Message::MouseButton(false)).units();
+    assert_eq!(after_drag, plain + 1, "no focus task after the drag");
+}
+
+#[test]
+fn trash_closes_the_color_bubble_so_esc_drops_the_question() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "x");
+    let id = app.store.notes()[0].id;
+    let _ = app.update(Message::ToggleColorPicker);
+    assert!(app.color_picker_open);
+    let _ = app.update(Message::RequestDelete(id));
+    assert!(!app.color_picker_open);
+    assert!(app.reminder_picker.is_none());
+    assert!(app.delete_ask.is_some());
+    let _ = app.update(escape());
+    assert_eq!(app.delete_ask, None);
+    assert!(!app.color_picker_open);
+    assert_eq!(app.active_note, Some(id), "Esc only dropped the question");
 }

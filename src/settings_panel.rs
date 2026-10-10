@@ -49,6 +49,8 @@ pub struct SettingsView<'a> {
     pub hotkey_label: String,
     /// The next modified key press becomes the hotkey.
     pub hotkey_recording: bool,
+    /// Why the last press while recording didn't make a hotkey.
+    pub hotkey_hint: Option<&'static str>,
     /// The panel is being dragged from its grip.
     pub dragging: bool,
 }
@@ -349,6 +351,7 @@ fn toggle_label(toggle: SettingToggle) -> &'static str {
 struct HotkeyRow<'a> {
     label: String,
     recording: bool,
+    hint: Option<&'static str>,
     error: Option<&'a str>,
 }
 
@@ -365,7 +368,11 @@ fn hotkey_combo_row<'a>(
     a: f32,
 ) -> Element<'a, Message> {
     let (shown, button) = if hotkey.recording {
-        ("Press keys… (Esc cancels)".to_string(), "Cancel")
+        let prompt = match hotkey.hint {
+            Some(hint) => format!("{hint} (Esc cancels)"),
+            None => "Press keys… (Esc cancels)".to_string(),
+        };
+        (prompt, "Cancel")
     } else {
         (hotkey.label.clone(), "Record")
     };
@@ -533,6 +540,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         hotkey_error,
         hotkey_label,
         hotkey_recording,
+        hotkey_hint,
         dragging,
     } = v;
     let inner: Element<'_, Message> = if a < 0.01 {
@@ -566,6 +574,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
             hotkey_error,
             hotkey_label,
             hotkey_recording,
+            hotkey_hint,
         );
         for group in SettingsGroup::ALL.into_iter().filter(|g| g.tab() == tab) {
             let section = match group {
@@ -575,6 +584,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
                     let hotkey = HotkeyRow {
                         label: hotkey_label.clone(),
                         recording: hotkey_recording,
+                        hint: hotkey_hint,
                         error: hotkey_error,
                     };
                     app_section(settings, tray_ok, dock_forced, hotkey, theme, a)

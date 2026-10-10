@@ -2,7 +2,7 @@
 //! Enter on an empty item ends the list.
 
 /// What Enter does on a list line instead of a plain line break: delete
-/// `delete` bytes before the cursor, then insert `insert` at it.
+/// `delete` characters before the cursor, then insert `insert` at it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListEdit {
     pub delete: usize,
@@ -39,9 +39,10 @@ pub fn continue_list(line: &str, cursor_col: usize) -> Option<ListEdit> {
         .or_else(|| body.strip_prefix("[X]"))
         .filter(|t| t.is_empty() || t.starts_with([' ', '\t']));
     let text = task.unwrap_or(body);
-    if text.trim().is_empty() && cursor_col == line.len() {
+    // Only spaces and tabs: other whitespace (a no-break space) is text.
+    if text.trim_matches([' ', '\t']).is_empty() && cursor_col == line.len() {
         return Some(ListEdit {
-            delete: line.len(),
+            delete: line.chars().count(),
             insert: String::new(),
         });
     }
@@ -138,6 +139,13 @@ mod tests {
         assert_eq!(continue_list("  - [ ] ", 8), end(8));
         assert_eq!(continue_list("- [x] ", 6), end(6));
         assert_eq!(continue_list("-   ", 4), end(4));
+    }
+
+    #[test]
+    fn unicode_space_is_text_not_an_empty_item() {
+        // A no-break space is content: the item continues, nothing is deleted.
+        let line = "- \u{a0}";
+        assert_eq!(continue_list(line, line.len()), cont("\n- "));
     }
 
     #[test]

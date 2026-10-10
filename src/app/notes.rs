@@ -264,6 +264,11 @@ impl App {
             }
             Message::RequestDelete(id) => {
                 if self.active_note == Some(id) && self.pending_delete.is_none() {
+                    // The question replaces the bubble and the picker, so
+                    // Esc drops just the question.
+                    self.color_picker_open = false;
+                    self.text_color_picker_open = false;
+                    self.reminder_picker = None;
                     self.delete_ask = Some(DeleteAsk::Header(id));
                 }
             }
