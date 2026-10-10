@@ -77,20 +77,21 @@ jobs:
           path: dist
 
       - name: Name each binary after its platform
+        # Each artifact downloads into a folder named after it, so the
+        # renamed binaries go to their own folder.
         run: |
-          cd dist
-          for d in */; do
-            name=${d%/}
+          mkdir release
+          for d in dist/*/; do
+            name=$(basename "$d")
             for f in "$d"*; do
               ext=""
               case "$f" in *.exe) ext=".exe" ;; esac
-              mv "$f" "$name$ext"
+              mv "$f" "release/$name$ext"
             done
-            rmdir "$d"
           done
-          ls -l
+          ls -l release
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: release/*
           generate_release_notes: true
