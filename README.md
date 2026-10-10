@@ -17,7 +17,7 @@ Snap Notes turns sticky notes into slim colored bars along the edge of your scre
 - **Notes that look good.** Real formatting: bold, italic, headings, checklists, links, images, colors and highlights. Checklist bars fill up as you tick items off.
 - **Stay organized.** Color-code notes, pin important ones to the top, drag bars onto each other to stack related notes, and search everything as you type.
 - **Your screen, your way.** Dock the strip to the right, left or top edge. It adapts to light and dark mode on its own, and every look and motion detail is adjustable.
-- **Your data stays yours.** No account, no cloud, no installer. One executable and a plain JSON file next to it. Export everything to Markdown or text whenever you like.
+- **Your data stays yours.** No account, no cloud, no installer. One executable; your notes are plain JSON files in your own app-data folder. Export everything to Markdown or text whenever you like.
 
 ## Works everywhere
 
@@ -25,7 +25,7 @@ macOS, Windows and Linux, from a single small executable.
 
 ## Get it
 
-Download the latest build for **Windows, macOS (Apple silicon) or Linux** from [Actions](https://github.com/FabianRiegsinger/snap-notes/actions), or build it yourself:
+Download the latest build for **Windows, macOS (Apple silicon) or Linux** from [Releases](https://github.com/FabianRiegsinger/snap-notes/releases), or build it yourself:
 
 ```bash
 cargo build --release

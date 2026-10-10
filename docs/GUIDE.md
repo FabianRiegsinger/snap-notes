@@ -6,7 +6,7 @@
 
 - **Out of the way:** about 6 px of screen per note. Clicks anywhere else go straight to the apps behind it.
 - **One glance away:** peek at any note without opening it.
-- **Portable:** a single executable, no installer. Your notes are a JSON file next to it, with their images in an `images/` folder.
+- **No installer:** a single executable. Your notes are plain JSON files in your app-data folder, with their images in an `images/` folder.
 - **Cross-platform:** macOS, Windows and Linux.
 
 ## What it can do
@@ -162,13 +162,25 @@ The Cmd/Ctrl shortcuts also work while you type in a note's title or body or in 
 
 ## Your data
 
-Notes are stored in `notes.json` and settings in `settings.json`, next to the executable. Images added to notes live in an `images/` folder next to them. Edits save automatically, with a 500 ms debounce and atomic writes, so a crash never leaves a half-written file. A hand-edited `settings.json` with a typo keeps every valid value and falls back to defaults only for the broken ones. At startup, images that no note references are deleted from `images/`, except when `notes.json` fails to load.
+Notes are stored in `notes.json` and settings in `settings.json` in your per-user app-data folder:
 
-To move Snap Notes to another machine, copy the executable together with both JSON files and the `images/` folder.
+| OS | Folder |
+|---|---|
+| macOS | `~/Library/Application Support/Snap Notes/` |
+| Windows | `%APPDATA%\Snap Notes\` |
+| Linux | `$XDG_DATA_HOME/snap-notes/` (usually `~/.local/share/snap-notes/`) |
+
+Images added to notes live in an `images/` folder inside it. Nothing is written next to the executable, so you can replace it with a newer version safely.
+
+**Portable mode:** if a `notes.json` or `settings.json` sits next to the executable, Snap Notes keeps using that folder instead. Installs from before this change keep working this way; to move to the app-data folder, move the two JSON files and `images/` there. To carry Snap Notes on a USB stick, put an empty `settings.json` (`{}`) next to the executable.
+
+Edits save automatically, with a 500 ms debounce and atomic writes, so a crash never leaves a half-written file. A hand-edited `settings.json` with a typo keeps every valid value and falls back to defaults only for the broken ones. At startup, images that no note references are deleted from `images/`, except when `notes.json` fails to load.
+
+To move Snap Notes to another machine, copy both JSON files and the `images/` folder into the same app-data folder there.
 
 ## Install
 
-Every push to `main` builds Snap Notes for **Windows x64, macOS arm64, Linux x64 and Linux arm64**. Download the binary from the build artifacts in [Actions](https://github.com/FabianRiegsinger/snap-notes/actions), or build it yourself:
+Download a build from [Releases](https://github.com/FabianRiegsinger/snap-notes/releases): `snap-notes-windows-x64.exe`, `snap-notes-macos-arm64`, `snap-notes-linux-x64` or `snap-notes-linux-arm64`. Every push to `main` also builds all four as artifacts in [Actions](https://github.com/FabianRiegsinger/snap-notes/actions). Or build it yourself:
 
 ```bash
 cargo build --release
@@ -176,6 +188,10 @@ cargo build --release
 ```
 
 The release binary is optimized for size (`opt-level = "z"`, LTO, stripped). Linux builds need `pkg-config`, `libxkbcommon-dev`, `libwayland-dev` and `libfontconfig1-dev`.
+
+**macOS:** the binary is not signed, so the first launch is blocked by Gatekeeper. Right-click it and choose **Open**, or run `xattr -d com.apple.quarantine snap-notes-macos-arm64`. On macOS and Linux, make it executable first with `chmod +x`.
+
+**Publishing a release:** push a tag starting with `v`, e.g. `git tag v1.0.0 && git push origin v1.0.0`. The Build workflow builds all four platforms and attaches them to a GitHub Release with generated notes.
 
 ## Under the hood
 
