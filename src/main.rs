@@ -18,6 +18,7 @@ mod hit_text;
 mod hotkey;
 mod icons;
 mod images;
+mod list_continue;
 mod note;
 mod note_panel;
 mod notify;

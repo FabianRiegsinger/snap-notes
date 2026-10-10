@@ -606,6 +606,58 @@ fn title_then_enter(dir: &tempfile::TempDir, times: usize) -> App {
     app
 }
 
+fn enter(app: &mut App) {
+    let _ = app.update(Message::NoteEdited(text_editor::Action::Edit(
+        text_editor::Edit::Enter,
+    )));
+}
+
+#[test]
+fn enter_continues_a_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "1. a");
+    let _ = app.update(Message::BodyClicked(None));
+    enter(&mut app);
+    assert_eq!(app.editor_content.as_ref().unwrap().text(), "1. a\n2. ");
+    let at = cursor_of(&app);
+    assert_eq!((at.line, at.column), (1, 3));
+    assert_eq!(app.store.notes()[0].content, "1. a\n2. ");
+    // One undo step takes the whole continuation back.
+    let _ = app.update(Message::Undo);
+    assert_eq!(app.editor_content.as_ref().unwrap().text(), "1. a");
+}
+
+#[test]
+fn enter_on_an_empty_item_ends_the_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "- a");
+    let _ = app.update(Message::BodyClicked(None));
+    enter(&mut app);
+    enter(&mut app);
+    assert_eq!(app.editor_content.as_ref().unwrap().text(), "- a\n");
+    let at = cursor_of(&app);
+    assert_eq!((at.line, at.column), (1, 0));
+    let _ = app.update(Message::Undo);
+    assert_eq!(app.editor_content.as_ref().unwrap().text(), "- a\n- ");
+}
+
+#[test]
+fn enter_with_a_selection_or_in_code_is_a_plain_break() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "```\n- a");
+    let _ = app.update(Message::BodyClicked(None));
+    enter(&mut app);
+    assert_eq!(app.editor_content.as_ref().unwrap().text(), "```\n- a\n");
+
+    let mut app = app_with_note(&dir, "- ab");
+    let _ = app.update(Message::BodyClicked(None));
+    let _ = app.update(Message::NoteEdited(text_editor::Action::Select(
+        text_editor::Motion::Left,
+    )));
+    enter(&mut app);
+    assert_eq!(app.editor_content.as_ref().unwrap().text(), "- a\n");
+}
+
 #[test]
 fn bold_after_enter_goes_on_new_line() {
     let dir = tempfile::tempdir().unwrap();

@@ -93,6 +93,20 @@ impl App {
                 self.rendered_click = None;
                 if let Some(content) = &mut self.editor_content {
                     let is_edit = action.is_edit();
+                    // Enter on a list item continues or ends the list.
+                    let list = match &action {
+                        text_editor::Action::Edit(
+                            text_editor::Edit::Enter | text_editor::Edit::Insert('\n'),
+                        ) if content.cursor().selection.is_none() => {
+                            let at = content.cursor().position;
+                            crate::list_continue::continue_list_at(
+                                &content.text(),
+                                at.line,
+                                at.column,
+                            )
+                        }
+                        _ => None,
+                    };
                     if is_edit {
                         let typing = matches!(
                             action,
@@ -104,7 +118,21 @@ impl App {
                     } else {
                         self.history.break_step();
                     }
-                    content.perform(action);
+                    match list {
+                        Some(edit) => {
+                            for _ in 0..edit.delete {
+                                content.perform(text_editor::Action::Edit(
+                                    text_editor::Edit::Backspace,
+                                ));
+                            }
+                            if !edit.insert.is_empty() {
+                                content.perform(text_editor::Action::Edit(
+                                    text_editor::Edit::Paste(std::sync::Arc::new(edit.insert)),
+                                ));
+                            }
+                        }
+                        None => content.perform(action),
+                    }
                     if is_edit {
                         if let Some(id) = self.active_note {
                             let text = content.text();

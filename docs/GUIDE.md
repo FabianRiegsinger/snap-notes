@@ -85,6 +85,8 @@ Put a tag in a note's title:
 ### Formatting
 Notes are written in Markdown plus a few color and size tags. An open note shows the formatted text. Click the body to edit the raw Markdown, and click the title or press Esc to return to the formatted view. A second Esc folds the note. Empty notes open straight in edit mode. While editing, the editor already shows bold, italic, code, colored text and bold headings, with the Markdown markers drawn faint. Bold, italic and colors that span several lines of a paragraph show on each of those lines, as in the formatted view. Strikethrough, highlight backgrounds, sizes and images only show in the formatted view. In edit mode the toolbar's bold, italic, strikethrough, code, text color, highlight, size (small, normal, large, huge), link and image buttons apply the markup.
 
+Pressing Enter on a list item starts the next one: `1. ` or `1) ` counts up, `- `, `* ` and `+ ` repeat, and a task (checked or not) continues as an open `- [ ] `, all at the same indentation. Enter in the middle of an item splits it, and the moved text gets the new marker. Enter on an empty item removes its marker and ends the list. Undo takes back the whole step. Inside a fenced code block, or with text selected, Enter is a plain line break.
+
 | Effect | Syntax |
 |---|---|
 | Bold / italic / strikethrough | `**bold**`, `*italic*`, `~~struck~~` |
