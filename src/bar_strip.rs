@@ -116,6 +116,13 @@ impl Frame {
     }
 }
 
+/// `shape` of `rect` on `edge`: `rect` taken into its own edge-local frame,
+/// shaped there and mapped back to window coordinates.
+fn shaped(rect: Rectangle, edge: Edge, shape: impl FnOnce(LocalRect) -> LocalRect) -> Rectangle {
+    let frame = Frame { edge, bounds: rect };
+    frame.rect(shape(frame.span()))
+}
+
 /// Where `r` starts along `edge` and how long it is along it.
 pub(crate) fn along_span(r: Rectangle, edge: Edge) -> (f32, f32) {
     match edge {
@@ -150,28 +157,22 @@ pub fn jump_translation(edge: Edge, amount: f32) -> Vector {
 /// The `done` of `total` share of `rect` at its end along `edge` (the
 /// bottom on Right and Left, the right end on Top), the checklist progress.
 pub fn progress_fill(rect: Rectangle, done: usize, total: usize, edge: Edge) -> Rectangle {
+    shaped(rect, edge, |r| progress_fill_local(r, done, total))
+}
+
+/// [`progress_fill`] in edge-local terms: the `done` of `total` share of
+/// `r` at its far end along the edge.
+fn progress_fill_local(r: LocalRect, done: usize, total: usize) -> LocalRect {
     let share = if total == 0 {
         0.0
     } else {
         (done as f32 / total as f32).clamp(0.0, 1.0)
     };
-    match edge {
-        Edge::Right | Edge::Left => {
-            let height = rect.height * share;
-            Rectangle {
-                y: rect.y + rect.height - height,
-                height,
-                ..rect
-            }
-        }
-        Edge::Top => {
-            let width = rect.width * share;
-            Rectangle {
-                x: rect.x + rect.width - width,
-                width,
-                ..rect
-            }
-        }
+    let length = r.length * share;
+    LocalRect {
+        along: r.along + r.length - length,
+        length,
+        ..r
     }
 }
 
@@ -179,16 +180,17 @@ pub fn progress_fill(rect: Rectangle, done: usize, total: usize, edge: Edge) -> 
 /// Right and Left, its left end on Top), inset by the corner radius: the
 /// highlight and the pinned notch.
 fn start_cap(rect: Rectangle, depth: f32, edge: Edge) -> Rectangle {
+    shaped(rect, edge, |r| start_cap_local(r, depth))
+}
+
+/// [`start_cap`] in edge-local terms.
+fn start_cap_local(r: LocalRect, depth: f32) -> LocalRect {
     let corner = CORNER_RADIUS;
-    match edge {
-        Edge::Right | Edge::Left => Rectangle::new(
-            Point::new(rect.x + corner, rect.y),
-            Size::new((rect.width - 2.0 * corner).max(0.0), rect.height.min(depth)),
-        ),
-        Edge::Top => Rectangle::new(
-            Point::new(rect.x, rect.y + corner),
-            Size::new(rect.width.min(depth), (rect.height - 2.0 * corner).max(0.0)),
-        ),
+    LocalRect {
+        along: r.along,
+        away: r.away + corner,
+        length: r.length.min(depth),
+        thickness: (r.thickness - 2.0 * corner).max(0.0),
     }
 }
 
@@ -230,25 +232,20 @@ const STACK_EDGE_STEP: f32 = 4.0;
 /// bar, right of a Left one, below a Top one), each further out and shorter
 /// than the last.
 fn stack_edges(rect: Rectangle, edge: Edge) -> [Rectangle; 2] {
+    let frame = Frame { edge, bounds: rect };
+    stack_edges_local(frame.span()).map(|line| frame.rect(line))
+}
+
+/// [`stack_edges`] in edge-local terms: lines past `r`'s away side.
+fn stack_edges_local(r: LocalRect) -> [LocalRect; 2] {
     [1, 2].map(|n| {
         let inset = 3.0 * n as f32;
         let out = STACK_EDGE_STEP * n as f32;
-        match edge {
-            Edge::Right => Rectangle::new(
-                Point::new(rect.x - out, rect.y + inset),
-                Size::new(STACK_EDGE_WIDTH, (rect.height - 2.0 * inset).max(0.0)),
-            ),
-            Edge::Left => Rectangle::new(
-                Point::new(rect.x + rect.width + out - STACK_EDGE_WIDTH, rect.y + inset),
-                Size::new(STACK_EDGE_WIDTH, (rect.height - 2.0 * inset).max(0.0)),
-            ),
-            Edge::Top => Rectangle::new(
-                Point::new(
-                    rect.x + inset,
-                    rect.y + rect.height + out - STACK_EDGE_WIDTH,
-                ),
-                Size::new((rect.width - 2.0 * inset).max(0.0), STACK_EDGE_WIDTH),
-            ),
+        LocalRect {
+            along: r.along + inset,
+            away: r.away + r.thickness + out - STACK_EDGE_WIDTH,
+            length: (r.length - 2.0 * inset).max(0.0),
+            thickness: STACK_EDGE_WIDTH,
         }
     })
 }
@@ -289,24 +286,15 @@ pub fn stack_target(bars: &[Rectangle], dragged: usize, along: f32, edge: Edge) 
 /// `edge`, keeping its side on it, as the note unfolds (`progress` 0 is
 /// docked, 1 fully open).
 pub fn bar_rect_for(progress: f32, rect: Rectangle, edge: Edge) -> Rectangle {
+    shaped(rect, edge, |r| bar_rect_local(progress, r))
+}
+
+/// [`bar_rect_for`] in edge-local terms: `r` thickened away from the edge.
+fn bar_rect_local(progress: f32, r: LocalRect) -> LocalRect {
     let grow = 1.0 + (OPEN_BAR_SCALE - 1.0) * progress;
-    match edge {
-        Edge::Right => {
-            let width = rect.width * grow;
-            Rectangle {
-                x: rect.x + rect.width - width,
-                width,
-                ..rect
-            }
-        }
-        Edge::Left => Rectangle {
-            width: rect.width * grow,
-            ..rect
-        },
-        Edge::Top => Rectangle {
-            height: rect.height * grow,
-            ..rect
-        },
+    LocalRect {
+        thickness: r.thickness * grow,
+        ..r
     }
 }
 
@@ -831,21 +819,16 @@ pub fn toast_rect(strip: &StripLayout, bounds: Rectangle) -> Rectangle {
 /// The `fraction` of `bounds` the bars are laid out in: centred along the
 /// `edge`, spanning the full extent away from it.
 pub fn band(bounds: Rectangle, fraction: f32, edge: Edge) -> Rectangle {
-    match edge {
-        Edge::Right | Edge::Left => {
-            let height = bounds.height * fraction;
-            Rectangle::new(
-                Point::new(bounds.x, bounds.y + (bounds.height - height) / 2.0),
-                Size::new(bounds.width, height),
-            )
-        }
-        Edge::Top => {
-            let width = bounds.width * fraction;
-            Rectangle::new(
-                Point::new(bounds.x + (bounds.width - width) / 2.0, bounds.y),
-                Size::new(width, bounds.height),
-            )
-        }
+    shaped(bounds, edge, |b| band_local(b, fraction))
+}
+
+/// [`band`] in edge-local terms.
+fn band_local(b: LocalRect, fraction: f32) -> LocalRect {
+    let length = b.length * fraction;
+    LocalRect {
+        along: b.along + (b.length - length) / 2.0,
+        length,
+        ..b
     }
 }
 
@@ -3627,6 +3610,52 @@ mod tests {
         let [a, b] = stack_edges(top, Edge::Top);
         assert!(a.y > top.y + top.height && b.y > a.y + a.height);
         assert!(b.width < a.width && a.width < top.width);
+    }
+
+    #[test]
+    fn decorations_are_edge_equivalent() {
+        // One bar in edge-local terms, placed on every edge: each decoration
+        // mapped back to local is the same shape, the one the local helper
+        // draws.
+        let bar = LocalRect {
+            along: 300.0,
+            away: 10.0,
+            length: 40.0,
+            thickness: 8.0,
+        };
+        for edge in Edge::ALL {
+            let frame = Frame {
+                edge,
+                bounds: edge_bounds(edge),
+            };
+            let rect = frame.rect(bar);
+            let back = |r: Rectangle| frame.local(r);
+            assert_eq!(
+                back(progress_fill(rect, 1, 4, edge)),
+                progress_fill_local(bar, 1, 4),
+                "{edge:?} progress_fill"
+            );
+            assert_eq!(
+                back(start_cap(rect, NOTCH_HEIGHT, edge)),
+                start_cap_local(bar, NOTCH_HEIGHT),
+                "{edge:?} start_cap"
+            );
+            assert_eq!(
+                stack_edges(rect, edge).map(back),
+                stack_edges_local(bar),
+                "{edge:?} stack_edges"
+            );
+            assert_eq!(
+                back(bar_rect_for(0.5, rect, edge)),
+                bar_rect_local(0.5, bar),
+                "{edge:?} bar_rect_for"
+            );
+            assert_eq!(
+                back(band(frame.bounds, 0.5, edge)),
+                band_local(frame.span(), 0.5),
+                "{edge:?} band"
+            );
+        }
     }
 
     #[test]
