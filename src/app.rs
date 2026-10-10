@@ -288,6 +288,10 @@ pub enum Message {
     SettingsDragStart,
     /// Double-click the settings grip: snap back beside the strip.
     SettingsResetPosition,
+    /// Drag the search panel from its top grip.
+    SearchDragStart,
+    /// Double-click the search grip: snap back beside the strip.
+    SearchResetPosition,
     /// A press on the open note's border starts resizing it.
     ResizeStart(Edges),
     ClosePanel,
@@ -574,12 +578,6 @@ pub struct App {
     peek: Morph,
     /// The settings panel, morphing out of the gear.
     settings_panel: Panel,
-    /// Top-left of the settings panel after a drag (cleared on reset).
-    settings_pos: Option<Point>,
-    /// Grab offset (cursor minus panel top-left) while dragging settings.
-    settings_drag: Option<Vector>,
-    /// Live top-left while dragging settings.
-    settings_drag_pos: Option<Point>,
     settings_tab: SettingsTab,
     /// The title field's edit in progress, if any.
     title_edit: Option<TitleEdit>,
@@ -819,9 +817,6 @@ impl App {
             peek_scroll: None,
             peek,
             settings_panel,
-            settings_pos: None,
-            settings_drag: None,
-            settings_drag_pos: None,
             settings_tab: SettingsTab::default(),
             title_edit: None,
             actions_open: false,
@@ -932,7 +927,9 @@ impl App {
             | Message::PaletteSlotSelected(..)
             | Message::PaletteColorChosen(..)
             | Message::SettingsDragStart
-            | Message::SettingsResetPosition => self.handle_panels(message),
+            | Message::SettingsResetPosition
+            | Message::SearchDragStart
+            | Message::SearchResetPosition => self.handle_panels(message),
             Message::AddNote
             | Message::NoteEdited(..)
             | Message::BodyClicked(..)
@@ -1110,7 +1107,7 @@ impl App {
                     tray_ok: self.tray_ok,
                     dock_forced: self.tray_failed,
                     hotkey_error: self.hotkey_error.as_deref(),
-                    dragging: self.settings_drag.is_some(),
+                    dragging: self.settings_panel.drag.is_some(),
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
             }
@@ -1135,6 +1132,7 @@ impl App {
                     size: rect.size(),
                     morph_progress: self.search_panel.morph.progress(),
                     content_alpha: frame.content_alpha,
+                    dragging: self.search_panel.drag.is_some(),
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());
             }

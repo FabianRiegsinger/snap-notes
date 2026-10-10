@@ -2239,7 +2239,7 @@ fn settings_panel_can_be_dragged() {
     let start = app.settings_frame().unwrap().rect.position();
     app.last_cursor = Some(Point::new(start.x + 20.0, start.y + 8.0));
     let _ = app.update(Message::SettingsDragStart);
-    assert!(app.settings_drag.is_some());
+    assert!(app.settings_panel.drag.is_some());
     let _ = app.update(Message::CursorMoved(Point::new(
         start.x + 120.0,
         start.y + 80.0,
@@ -2248,12 +2248,69 @@ fn settings_panel_can_be_dragged() {
     let _ = app.update(Message::MouseButton(false));
     let after = app.settings_frame().unwrap().rect.position();
     assert!((after.x - start.x).abs() > 50.0 || (after.y - start.y).abs() > 50.0);
-    assert_eq!(app.settings_pos, Some(after));
+    assert_eq!(app.settings_panel.pos, Some(after));
     let _ = app.update(Message::SettingsResetPosition);
     settle(&mut app);
-    assert!(app.settings_pos.is_none());
+    assert!(app.settings_panel.pos.is_none());
     let reset = app.settings_frame().unwrap().rect.position();
     assert!((reset.x - start.x).abs() < 1.0 && (reset.y - start.y).abs() < 1.0);
+}
+
+#[test]
+fn search_panel_can_be_dragged() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    app.window_size = Size::new(1400.0, 900.0);
+    let _ = app.update(Message::ToggleSearch);
+    settle(&mut app);
+    let start = app.search_frame().unwrap().rect.position();
+    app.last_cursor = Some(Point::new(start.x + 20.0, start.y + 8.0));
+    let _ = app.update(Message::SearchDragStart);
+    assert!(app.search_panel.drag.is_some());
+    let _ = app.update(Message::CursorMoved(Point::new(
+        start.x - 120.0,
+        start.y + 80.0,
+    )));
+    // It follows the cursor, held where it was grabbed.
+    let moving = app.search_frame().unwrap().rect.position();
+    assert!((moving.x - (start.x - 140.0)).abs() < 1.0);
+    app.mouse_down = false;
+    let _ = app.update(Message::MouseButton(false));
+    assert!(app.search_panel.drag.is_none());
+    let after = app.search_frame().unwrap().rect.position();
+    assert!((after.x - start.x).abs() > 50.0 || (after.y - start.y).abs() > 50.0);
+    assert_eq!(app.search_panel.pos, Some(after));
+    // Remembered when the panel opens again.
+    let _ = app.update(Message::CloseSearch);
+    settle(&mut app);
+    let _ = app.update(Message::ToggleSearch);
+    settle(&mut app);
+    assert_eq!(app.search_frame().unwrap().rect.position(), after);
+    // Double-clicking the grip docks it back.
+    let _ = app.update(Message::SearchResetPosition);
+    settle(&mut app);
+    assert!(app.search_panel.pos.is_none());
+    let reset = app.search_frame().unwrap().rect.position();
+    assert!((reset.x - start.x).abs() < 1.0 && (reset.y - start.y).abs() < 1.0);
+}
+
+#[test]
+fn dragged_search_panel_stays_in_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    app.window_size = Size::new(1400.0, 900.0);
+    let _ = app.update(Message::ToggleSearch);
+    settle(&mut app);
+    let start = app.search_frame().unwrap().rect.position();
+    app.last_cursor = Some(start);
+    let _ = app.update(Message::SearchDragStart);
+    let _ = app.update(Message::CursorMoved(Point::new(-500.0, 5000.0)));
+    let _ = app.update(Message::MouseButton(false));
+    let rect = app.search_frame().unwrap().rect;
+    assert_eq!(rect.x, NOTE_MARGIN);
+    assert_eq!(rect.y + rect.height, app.window_size.height - NOTE_MARGIN);
+    // Settings keeps its own place.
+    assert!(app.settings_panel.pos.is_none());
 }
 
 #[test]
@@ -2261,7 +2318,7 @@ fn top_panel_keeps_its_bottom_margin() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = on_edge(app_in(&dir), Edge::Top);
     app.window_size = Size::new(1400.0, 500.0);
-    let rect = app.settings_target_rect();
+    let rect = app.panel_target(&app.settings_panel);
     assert!(rect.height < PANEL_MAX_HEIGHT, "must be height-limited");
     assert_eq!(rect.y + rect.height, app.window_size.height - NOTE_MARGIN);
 }

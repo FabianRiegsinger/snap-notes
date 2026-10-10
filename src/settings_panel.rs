@@ -425,27 +425,13 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
     let inner: Element<'_, Message> = if a < 0.01 {
         Space::new().width(Fill).height(Fill).into()
     } else {
-        let pill = container(Space::new().width(36).height(4)).style(move |_theme: &Theme| {
-            container::Style {
-                background: Some(theme.ink(0.3 * a).into()),
-                border: border::rounded(2),
-                ..Default::default()
-            }
-        });
-        let grip = mouse_area(
-            container(pill)
-                .width(Fill)
-                .height(GRIP_HEIGHT)
-                .align_x(iced::Alignment::Center)
-                .align_y(iced::Alignment::Center),
-        )
-        .on_press(Message::SettingsDragStart)
-        .on_double_click(Message::SettingsResetPosition)
-        .interaction(if dragging {
-            mouse::Interaction::Grabbing
-        } else {
-            mouse::Interaction::Grab
-        });
+        let grip = panel_grip(
+            Message::SettingsDragStart,
+            Message::SettingsResetPosition,
+            dragging,
+            theme,
+            a,
+        );
 
         let header = row![
             text("Settings")
@@ -510,6 +496,38 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         .into()
     };
     paper_card(inner, size, theme, t)
+}
+
+/// A panel's grip along its top: press to drag the panel (`drag`),
+/// double-click to dock it back beside the strip (`reset`).
+pub(crate) fn panel_grip<'a>(
+    drag: Message,
+    reset: Message,
+    dragging: bool,
+    theme: theme::Theme,
+    a: f32,
+) -> Element<'a, Message> {
+    let pill =
+        container(Space::new().width(36).height(4)).style(move |_theme: &Theme| container::Style {
+            background: Some(theme.ink(0.3 * a).into()),
+            border: border::rounded(2),
+            ..Default::default()
+        });
+    mouse_area(
+        container(pill)
+            .width(Fill)
+            .height(GRIP_HEIGHT)
+            .align_x(iced::Alignment::Center)
+            .align_y(iced::Alignment::Center),
+    )
+    .on_press(drag)
+    .on_double_click(reset)
+    .interaction(if dragging {
+        mouse::Interaction::Grabbing
+    } else {
+        mouse::Interaction::Grab
+    })
+    .into()
 }
 
 /// The card a panel's `inner` content sits on, `t` of the way through its

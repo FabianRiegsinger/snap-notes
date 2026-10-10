@@ -74,6 +74,7 @@ Put a tag in a note's title:
 - **As you type:** results update with every keystroke. Matching ignores case and covers titles and bodies.
 - **Results:** each one shows the title and a snippet with the match in bold. Click one to open that note with the match selected, or press Enter to open the first one.
 - **Dimmed bars:** while you type, the bars of notes that don't match dim.
+- **Move it anywhere:** drag the grip at the top of the panel. It stays inside the window, opens again where you left it (until the app quits), and double-clicking the grip docks it beside the strip again.
 
 ### Export
 - **Open it:** **Export…** in the Settings group "Data" (Application tab), or in the tray menu.
@@ -114,6 +115,8 @@ Pressing Enter on a list item starts the next one: `1. ` or `1) ` counts up, `- 
 Open them from the menu bar/tray icon, the Settings control in the strip's Actions slot, or with Cmd/Ctrl+,. Every change applies live and is saved automatically, and each group except Data has a Reset button. There is no theme setting: dark mode follows the system.
 
 The groups are split across two tabs, **Application** and **Styling**. Settings always opens on Application.
+
+Drag the grip at the top of the panel to move it; it stays inside the window and opens again where you left it until the app quits. Double-clicking the grip docks it beside the strip again. The search panel moves the same way.
 
 | Tab | Group | What you can adjust |
 |---|---|---|

@@ -95,9 +95,8 @@ impl App {
                 if let Some(offset) = self.note_drag {
                     self.note_drag_pos = Some(position - offset);
                 }
-                if let Some(offset) = self.settings_drag {
-                    self.settings_drag_pos = Some(position - offset);
-                }
+                self.settings_panel.drag_to(position);
+                self.search_panel.drag_to(position);
                 let room = self.note_room();
                 if let Some(resize) = &mut self.note_resize {
                     resize.rect = resized(resize.start, resize.edges, position - resize.grab, room);
@@ -121,8 +120,8 @@ impl App {
                 if !down && self.note_drag.is_some() {
                     self.finish_note_drag();
                 }
-                if !down && self.settings_drag.is_some() {
-                    self.finish_settings_drag();
+                if !down {
+                    self.finish_panel_drags();
                 }
                 if !down {
                     self.finish_note_resize();

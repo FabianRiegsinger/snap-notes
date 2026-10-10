@@ -4,7 +4,8 @@
 use super::*;
 
 /// What the settings, search and export panels share: whether one is
-/// showing, its unfold morph and where along the edge it is centered.
+/// showing, its unfold morph, where along the edge it is centered and,
+/// for a panel with a grip (settings, search), where it was dragged to.
 pub(super) struct Panel {
     /// Showing (kept while it folds back into its strip slot).
     pub(super) open: bool,
@@ -12,6 +13,13 @@ pub(super) struct Panel {
     /// Slot center along the edge when the panel opened; the panel stays
     /// centered on it.
     pub(super) anchor_along: f32,
+    /// Top-left after a drag (cleared on reset); the panel stays there
+    /// when it opens again.
+    pub(super) pos: Option<Point>,
+    /// Grab offset (cursor minus panel top-left) while dragging.
+    pub(super) drag: Option<Vector>,
+    /// Live top-left while dragging.
+    pub(super) drag_pos: Option<Point>,
 }
 
 impl Panel {
@@ -20,7 +28,40 @@ impl Panel {
             open: false,
             morph: Morph::new(speed),
             anchor_along: 0.0,
+            pos: None,
+            drag: None,
+            drag_pos: None,
         }
+    }
+
+    /// Starts dragging the panel shown at `top_left` by a press at `cursor`.
+    pub(super) fn start_drag(&mut self, cursor: Point, top_left: Point) {
+        self.drag = Some(cursor - top_left);
+        self.drag_pos = Some(top_left);
+    }
+
+    /// Moves a dragged panel with the cursor at `position`.
+    pub(super) fn drag_to(&mut self, position: Point) {
+        if let Some(offset) = self.drag {
+            self.drag_pos = Some(position - offset);
+        }
+    }
+
+    /// Ends a drag without moving the panel.
+    pub(super) fn cancel_drag(&mut self) {
+        self.drag = None;
+        self.drag_pos = None;
+    }
+
+    /// Where a dragged position puts the panel, if it has one.
+    pub(super) fn top_left(&self) -> Option<Point> {
+        self.drag_pos.or(self.pos)
+    }
+
+    /// Docks the panel back beside the strip.
+    pub(super) fn reset_position(&mut self) {
+        self.pos = None;
+        self.cancel_drag();
     }
 
     /// Open and unfolding (not folding away).
@@ -78,8 +119,7 @@ impl App {
             }
             Message::CloseSettings => {
                 if self.settings_panel.close() {
-                    self.settings_drag = None;
-                    self.settings_drag_pos = None;
+                    self.settings_panel.cancel_drag();
                     self.animating = true;
                 }
             }
@@ -198,49 +238,49 @@ impl App {
             }
             Message::SettingsDragStart => {
                 if let (Some(cursor), Some(frame)) = (self.last_cursor, self.settings_frame()) {
-                    let top_left = frame.rect.position();
-                    self.settings_drag = Some(cursor - top_left);
-                    self.settings_drag_pos = Some(top_left);
+                    self.settings_panel
+                        .start_drag(cursor, frame.rect.position());
                 }
             }
-            Message::SettingsResetPosition => {
-                self.settings_pos = None;
-                self.settings_drag = None;
-                self.settings_drag_pos = None;
+            Message::SettingsResetPosition => self.settings_panel.reset_position(),
+            Message::SearchDragStart => {
+                if let (Some(cursor), Some(frame)) = (self.last_cursor, self.search_frame()) {
+                    self.search_panel.start_drag(cursor, frame.rect.position());
+                }
             }
+            Message::SearchResetPosition => self.search_panel.reset_position(),
             _ => unreachable!("not a panels message"),
         }
         Task::none()
     }
 
-    pub(super) fn finish_settings_drag(&mut self) {
-        let rect = self.settings_target_rect();
-        self.settings_drag = None;
-        self.settings_drag_pos = None;
-        self.settings_pos = Some(rect.position());
+    /// Ends the settings' and the search's drags where they are.
+    pub(super) fn finish_panel_drags(&mut self) {
+        if self.settings_panel.drag.is_some() {
+            let rect = self.panel_target(&self.settings_panel);
+            self.settings_panel.cancel_drag();
+            self.settings_panel.pos = Some(rect.position());
+        }
+        if self.search_panel.drag.is_some() {
+            let rect = self.panel_target(&self.search_panel);
+            self.search_panel.cancel_drag();
+            self.search_panel.pos = Some(rect.position());
+        }
     }
 
     /// The settings panel's current frame, morphing out of the gear slot.
     pub(super) fn settings_frame(&self) -> Option<MorphFrame> {
-        if !self.settings_panel.open {
-            return None;
-        }
         let source = self.strip_layout().settings_anchor();
-        let target = self.settings_target_rect();
-        Some(morph_frame(
-            self.slid(source),
-            target,
-            self.settings_panel.morph.progress(),
-        ))
+        self.panel_frame(source, &self.settings_panel)
     }
 
-    /// Where the settings panel sits: a dragged position, or beside the strip.
-    pub(super) fn settings_target_rect(&self) -> Rectangle {
+    /// Where `panel` sits: a dragged position kept inside the window, or
+    /// beside the strip.
+    pub(super) fn panel_target(&self, panel: &Panel) -> Rectangle {
         let room = self.panel_room();
         let height = room.min(PANEL_MAX_HEIGHT);
         let size = Size::new(PANEL_WIDTH, height);
-        let top_left = self.settings_drag_pos.or(self.settings_pos);
-        if let Some(top_left) = top_left {
+        if let Some(top_left) = panel.top_left() {
             let max_x = (self.window_size.width - size.width - NOTE_MARGIN).max(NOTE_MARGIN);
             let max_y = (self.window_size.height - size.height - NOTE_MARGIN).max(NOTE_MARGIN);
             return Rectangle::new(
@@ -251,7 +291,7 @@ impl App {
                 size,
             );
         }
-        self.beside_strip(size, self.settings_panel.anchor_along)
+        self.beside_strip(size, panel.anchor_along)
     }
 
     /// The search panel's current frame, morphing out of the search slot.
@@ -268,15 +308,12 @@ impl App {
     }
 
     /// An open panel's frame on its way from the strip slot `source` to its
-    /// place on the strip's away side, centered on its `anchor_along` (a
-    /// coordinate along the edge) where it fits.
+    /// place (see [`Self::panel_target`]).
     pub(super) fn panel_frame(&self, source: Rectangle, panel: &Panel) -> Option<MorphFrame> {
         if !panel.open {
             return None;
         }
-        let room = self.panel_room();
-        let height = room.min(PANEL_MAX_HEIGHT);
-        let target = self.beside_strip(Size::new(PANEL_WIDTH, height), panel.anchor_along);
+        let target = self.panel_target(panel);
         Some(morph_frame(
             self.slid(source),
             target,
@@ -488,6 +525,7 @@ impl App {
     /// Folds the search panel back into its slot (if it is showing).
     pub(super) fn close_search(&mut self) {
         if self.search_panel.close() {
+            self.search_panel.cancel_drag();
             self.animating = true;
         }
         if self.pending_focus == Some(PendingFocus::SearchField) {

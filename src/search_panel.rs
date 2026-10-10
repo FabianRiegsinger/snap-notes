@@ -6,7 +6,7 @@ use crate::command_passthrough::command_passthrough;
 use crate::icons::{icon, Icon, ICON_FONT};
 use crate::note_panel::pressable;
 use crate::search::Hit;
-use crate::settings_panel::{paper_card, text_button};
+use crate::settings_panel::{panel_grip, paper_card, text_button};
 use crate::theme::{self, space, RADIUS_CONTROL, TEXT_MD, TEXT_SM, TEXT_XS};
 
 use iced::widget::{button, column, rich_text, row, scrollable, text, text_input, Space};
@@ -27,6 +27,8 @@ pub struct SearchView<'a> {
     pub size: Size,
     pub morph_progress: f32,
     pub content_alpha: f32,
+    /// The panel is being dragged by its grip.
+    pub dragging: bool,
 }
 
 /// The snippet split around its match: before, match, after. A range that
@@ -93,6 +95,7 @@ pub fn search_panel(v: SearchView<'_>) -> Element<'_, Message> {
         size,
         morph_progress: t,
         content_alpha: a,
+        dragging,
     } = v;
 
     let inner: Element<'_, Message> = if a < 0.01 {
@@ -153,13 +156,21 @@ pub fn search_panel(v: SearchView<'_>) -> Element<'_, Message> {
         }
 
         // Cmd shortcuts reach the app instead of typing.
+        let grip = panel_grip(
+            Message::SearchDragStart,
+            Message::SearchResetPosition,
+            dragging,
+            theme,
+            a,
+        );
         column![
+            grip,
             header,
             command_passthrough(field),
             scrollable(list).height(Fill)
         ]
         .spacing(space(3))
-        .padding(Padding::new(space(4)).right(space(1)))
+        .padding(Padding::new(space(4)).top(space(1)).right(space(1)))
         .into()
     };
     paper_card(inner, size, theme, t)
