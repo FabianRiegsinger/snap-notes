@@ -5,7 +5,7 @@ use crate::icons::{Icon, ICON_FONT};
 use crate::note::Note;
 use crate::peek::{
     draw_peek, entry_peek_text, max_body_scroll, note_peek_width, peek_layout, scroll_body,
-    PeekText,
+    PeekDraw, PeekText,
 };
 use crate::settings::BarSettings;
 use crate::strip_model::{self, Entry};
@@ -704,19 +704,18 @@ pub fn chip_rect(
 
 /// Draws a hint chip beside `anchor` (a bar or slot) in `bounds`, on its
 /// away side from the screen `edge` and centred on it along the edge: a
-/// small card like the peek's paper with `text` at 0.75 ink and `accent`
-/// after it at full ink, all at `alpha`. Returns its rect.
-#[allow(clippy::too_many_arguments)]
-pub fn draw_chip(
+/// small card like the peek's paper with the `hint`'s text at 0.75 ink and
+/// its accent after it at full ink, all at `alpha`. Returns its rect.
+fn draw_chip(
     renderer: &mut iced::Renderer,
     theme: &theme::Theme,
     bounds: Rectangle,
     anchor: Rectangle,
-    text: &str,
-    accent: Option<&str>,
+    hint: Hint,
     alpha: f32,
     edge: Edge,
 ) -> Rectangle {
+    let Hint { text, accent, .. } = hint;
     let paragraph = chip_paragraph(text, accent, theme.ink(alpha));
     let rect = chip_frame(
         bounds,
@@ -884,6 +883,23 @@ pub fn strip_thickness(
     }
 }
 
+/// What the strip's layout is worked out from, besides the per-slot
+/// magnification.
+#[derive(Debug, Clone, Copy)]
+pub struct LayoutInput<'a> {
+    /// How many bars there are.
+    pub count: usize,
+    pub bounds: Rectangle,
+    pub scroll_offset: f32,
+    pub bars: &'a BarSettings,
+    pub actions_expanded: bool,
+    /// How far (eased, 0..=1) the Actions row has unfolded.
+    pub actions_progress: f32,
+    /// A deleted bar's index and how far it has collapsed (0..=1).
+    pub collapse: Option<(usize, f32)>,
+    pub edge: Edge,
+}
+
 /// Lays out the bars plus the Actions slot (collapsed or expanded into New /
 /// Search / Settings side by side away from the edge), centred along the
 /// `edge` in `bounds`. Centering on the *current* (magnified) length keeps
@@ -900,48 +916,20 @@ pub fn strip_thickness(
 /// `collapse` is a deleted bar's index and how far it has collapsed (0..=1):
 /// its length and one gap next to it shrink by that share.
 ///
-/// Settled: the row fully unfolded when `actions_expanded`, else folded.
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub fn compute_layout(
-    count: usize,
-    scale: impl Fn(usize) -> f32,
-    bounds: Rectangle,
-    scroll_offset: f32,
-    bars_settings: &BarSettings,
-    actions_expanded: bool,
-    collapse: Option<(usize, f32)>,
-    edge: Edge,
-) -> StripLayout {
-    let progress = if actions_expanded { 1.0 } else { 0.0 };
-    compute_layout_with(
+/// The Actions row is `actions_progress` (eased, 0..=1) of the way
+/// unfolded: the row's length along the edge, and so where the bars sit,
+/// follows it, so nothing jumps as it unfolds or folds back.
+pub fn compute_layout(input: LayoutInput, scale: impl Fn(usize) -> f32) -> StripLayout {
+    let LayoutInput {
         count,
-        scale,
         bounds,
         scroll_offset,
-        bars_settings,
+        bars: bars_settings,
         actions_expanded,
-        progress,
+        actions_progress,
         collapse,
         edge,
-    )
-}
-
-/// [`compute_layout`] with the Actions row `actions_progress` (eased, 0..=1)
-/// of the way unfolded: the row's length along the edge, and so where the
-/// bars sit, follows it, so nothing jumps as it unfolds or folds back.
-#[allow(clippy::too_many_arguments)]
-pub fn compute_layout_with(
-    count: usize,
-    scale: impl Fn(usize) -> f32,
-    bounds: Rectangle,
-    scroll_offset: f32,
-    bars_settings: &BarSettings,
-    actions_expanded: bool,
-    actions_progress: f32,
-    collapse: Option<(usize, f32)>,
-    edge: Edge,
-) -> StripLayout {
+    } = input;
     let frame = Frame { edge, bounds };
     let span = frame.span();
     let gap = bars_settings.gap;
@@ -1224,16 +1212,18 @@ impl<'a> BarStrip<'a> {
     }
 
     fn layout_in(&self, bounds: Rectangle) -> StripLayout {
-        compute_layout_with(
-            self.entries.len(),
+        compute_layout(
+            LayoutInput {
+                count: self.entries.len(),
+                bounds: band(bounds, self.height_fraction, self.edge),
+                scroll_offset: self.scroll_offset,
+                bars: self.bars,
+                actions_expanded: self.actions_expanded,
+                actions_progress: self.actions_progress,
+                collapse: self.collapse,
+                edge: self.edge,
+            },
             |i| self.magnification.scale(i),
-            band(bounds, self.height_fraction, self.edge),
-            self.scroll_offset,
-            self.bars,
-            self.actions_expanded,
-            self.actions_progress,
-            self.collapse,
-            self.edge,
         )
     }
 
@@ -1492,18 +1482,20 @@ impl<'a> BarStrip<'a> {
                         let peek_bar = *bar_rect + hide_translation(edge, self.bar_slide(i));
                         draw_peek(
                             renderer,
-                            note,
-                            &text,
-                            peek_bar,
-                            bounds,
                             &self.theme,
-                            CORNER_RADIUS,
-                            progress,
-                            self.paper_tint,
-                            cursor.position(),
-                            width,
-                            self.peek_scroll,
-                            edge,
+                            PeekDraw {
+                                note,
+                                text: &text,
+                                bar: peek_bar,
+                                bounds,
+                                radius: CORNER_RADIUS,
+                                progress,
+                                paper_tint: self.paper_tint,
+                                cursor: cursor.position(),
+                                width,
+                                scroll: self.peek_scroll,
+                                edge,
+                            },
                         );
                     }
                     continue;
@@ -1782,16 +1774,7 @@ impl<'a> BarStrip<'a> {
         let state = tree.state.downcast_ref::<StripState>();
         if let Some((hint, alpha)) = self.frame_chip(state, &strip) {
             if let Some(anchor) = hint_anchor(&strip, hint.at) {
-                draw_chip(
-                    renderer,
-                    &self.theme,
-                    bounds,
-                    anchor,
-                    hint.text,
-                    hint.accent,
-                    alpha,
-                    edge,
-                );
+                draw_chip(renderer, &self.theme, bounds, anchor, hint, alpha, edge);
             }
         }
     }
@@ -2168,16 +2151,39 @@ mod tests {
         Rectangle::new(Point::ORIGIN, Size::new(STRIP_WIDTH, height))
     }
 
-    fn layout(count: usize, scale: impl Fn(usize) -> f32, height: f32, scroll: f32) -> StripLayout {
-        compute_layout(
+    /// A Right strip of `count` bars in `bounds`: unscrolled, folded and
+    /// with nothing collapsing.
+    fn input(count: usize, bounds: Rectangle, bars: &BarSettings) -> LayoutInput<'_> {
+        LayoutInput {
             count,
+            bounds,
+            scroll_offset: 0.0,
+            bars,
+            actions_expanded: false,
+            actions_progress: 0.0,
+            collapse: None,
+            edge: Edge::Right,
+        }
+    }
+
+    /// `input` with the Actions row settled: fully unfolded when
+    /// `expanded`, else folded.
+    fn settled(expanded: bool, input: LayoutInput) -> LayoutInput {
+        LayoutInput {
+            actions_expanded: expanded,
+            actions_progress: if expanded { 1.0 } else { 0.0 },
+            ..input
+        }
+    }
+
+    fn layout(count: usize, scale: impl Fn(usize) -> f32, height: f32, scroll: f32) -> StripLayout {
+        let bars = BarSettings::default();
+        compute_layout(
+            LayoutInput {
+                scroll_offset: scroll,
+                ..input(count, bounds(height), &bars)
+            },
             scale,
-            bounds(height),
-            scroll,
-            &BarSettings::default(),
-            false,
-            None,
-            Edge::Right,
         )
     }
 
@@ -2187,16 +2193,12 @@ mod tests {
         height: f32,
         scroll: f32,
     ) -> StripLayout {
-        compute_layout(
-            count,
-            scale,
-            bounds(height),
-            scroll,
-            &BarSettings::default(),
-            true,
-            None,
-            Edge::Right,
-        )
+        let bars = BarSettings::default();
+        let input = LayoutInput {
+            scroll_offset: scroll,
+            ..input(count, bounds(height), &bars)
+        };
+        compute_layout(settled(true, input), scale)
     }
 
     fn stack_center(l: &StripLayout) -> f32 {
@@ -2295,14 +2297,11 @@ mod tests {
         let d = BarSettings::default();
         let with = |collapse| {
             compute_layout(
-                3,
+                LayoutInput {
+                    collapse,
+                    ..input(3, bounds(900.0), &d)
+                },
                 |_| 1.0,
-                bounds(900.0),
-                0.0,
-                &d,
-                false,
-                collapse,
-                Edge::Right,
             )
         };
         let full = with(None);
@@ -2328,16 +2327,7 @@ mod tests {
             height: 50.0,
             gap: 20.0,
         };
-        let l = compute_layout(
-            3,
-            |_| 1.0,
-            bounds(900.0),
-            0.0,
-            &bars,
-            false,
-            None,
-            Edge::Right,
-        );
+        let l = compute_layout(input(3, bounds(900.0), &bars), |_| 1.0);
         assert_eq!(l.bars[0].size(), Size::new(10.0, 50.0));
         let gap = l.bars[1].y - (l.bars[0].y + l.bars[0].height);
         assert!((gap - 20.0).abs() < 0.01);
@@ -3321,16 +3311,12 @@ mod tests {
 
     fn edge_layout(edge: Edge, expanded: bool) -> StripLayout {
         let b = edge_bounds(edge);
-        compute_layout(
-            3,
-            |i| SCALES[i],
-            band(b, 0.8, edge),
-            0.0,
-            &BarSettings::default(),
-            expanded,
-            None,
+        let bars = BarSettings::default();
+        let input = LayoutInput {
             edge,
-        )
+            ..input(3, band(b, 0.8, edge), &bars)
+        };
+        compute_layout(settled(expanded, input), |i| SCALES[i])
     }
 
     /// Every bar and slot rect of `l`, in the edge-local frame of `edge`.
@@ -3422,15 +3408,14 @@ mod tests {
         );
 
         // Overflowing, scrolled and with a bar collapsing.
+        let bars = BarSettings::default();
         let over = compute_layout(
-            12,
+            LayoutInput {
+                scroll_offset: 50.0,
+                collapse: Some((4, 0.5)),
+                ..input(12, band(STRIP_BOUNDS, 0.5, Edge::Right), &bars)
+            },
             |i| 1.0 + 0.1 * i as f32,
-            band(STRIP_BOUNDS, 0.5, Edge::Right),
-            50.0,
-            &BarSettings::default(),
-            false,
-            Some((4, 0.5)),
-            Edge::Right,
         );
         close(over.bars[0], (1044.0, 191.0, 10.0, 42.0));
         close(over.bars[4], (1040.0, 448.2, 14.0, 29.4));
@@ -3731,7 +3716,13 @@ mod tests {
                     },
                     window,
                 );
-                let mut l = compute_layout(3, scale, bounds, 0.0, &bars, false, None, edge);
+                let mut l = compute_layout(
+                    LayoutInput {
+                        edge,
+                        ..input(3, bounds, &bars)
+                    },
+                    scale,
+                );
                 l.actions_progress = p;
                 for pill in l.pill_rects() {
                     let inside = pill.x >= bounds.x - 0.01
@@ -3756,16 +3747,13 @@ mod tests {
         // the expanded row is longer.
         let scale = |i: usize| if i > 3 { 1.6 } else { 1.0 };
         let at = |expanded, p| {
-            compute_layout_with(
-                3,
+            compute_layout(
+                LayoutInput {
+                    actions_expanded: expanded,
+                    actions_progress: p,
+                    ..input(3, STRIP_BOUNDS, &bars)
+                },
                 scale,
-                STRIP_BOUNDS,
-                0.0,
-                &bars,
-                expanded,
-                p,
-                None,
-                Edge::Right,
             )
             .bars[0]
                 .y
@@ -3789,16 +3777,8 @@ mod tests {
 
     #[test]
     fn action_pills_are_visible_at_rest() {
-        let mut l = compute_layout(
-            3,
-            |_| 1.0,
-            STRIP_BOUNDS,
-            0.0,
-            &BarSettings::default(),
-            true,
-            None,
-            Edge::Right,
-        );
+        let bars = BarSettings::default();
+        let mut l = compute_layout(settled(true, input(3, STRIP_BOUNDS, &bars)), |_| 1.0);
         // Fully unfolded, the pills sit at full size in their slots.
         assert!(l.actions_settled());
         assert_eq!(

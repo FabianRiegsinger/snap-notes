@@ -473,26 +473,41 @@ fn draw_button(
     );
 }
 
+/// A peek to draw: `note`'s, `progress` of the way out of its `bar` (with
+/// corner `radius`) on `edge`, `width` wide in `bounds`, its body scrolled
+/// by `scroll`.
+pub struct PeekDraw<'a> {
+    pub note: &'a Note,
+    pub text: &'a PeekText,
+    pub bar: Rectangle,
+    pub bounds: Rectangle,
+    pub radius: f32,
+    pub progress: f32,
+    pub paper_tint: f32,
+    pub cursor: Option<Point>,
+    pub width: f32,
+    pub scroll: f32,
+    pub edge: Edge,
+}
+
 /// Draws the peek: the bar's color turning into paper, then the title,
 /// divider and body fading in once the peek is nearly fully open. The
 /// header has a delete button.
 /// `cursor` darkens whichever button it is over.
-#[allow(clippy::too_many_arguments)]
-pub fn draw_peek(
-    renderer: &mut iced::Renderer,
-    note: &Note,
-    text: &PeekText,
-    bar: Rectangle,
-    bounds: Rectangle,
-    theme: &Theme,
-    radius: f32,
-    progress: f32,
-    paper_tint: f32,
-    cursor: Option<Point>,
-    width: f32,
-    scroll: f32,
-    edge: Edge,
-) {
+pub fn draw_peek(renderer: &mut iced::Renderer, theme: &Theme, peek: PeekDraw) {
+    let PeekDraw {
+        note,
+        text,
+        bar,
+        bounds,
+        radius,
+        progress,
+        paper_tint,
+        cursor,
+        width,
+        scroll,
+        edge,
+    } = peek;
     let layout = peek_layout(bar, bounds, progress, text, width, edge);
     let rect = layout.rect;
     let t = ease_out_cubic(progress);

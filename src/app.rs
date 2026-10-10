@@ -1,8 +1,8 @@
 use crate::animation::{ease_out_cubic, morph_frame, MagnificationState, Morph, MorphFrame};
 use crate::autohide::{self, AutoHide};
 use crate::bar_strip::{
-    along_center, along_span, band, compute_layout_with, hide_translation, peek_target,
-    stack_target, BarStrip, StripLayout, HIDE_SHIFT, STRIP_WIDTH,
+    along_center, along_span, band, compute_layout, hide_translation, peek_target, stack_target,
+    BarStrip, LayoutInput, StripLayout, HIDE_SHIFT, STRIP_WIDTH,
 };
 use crate::edge::{Edge, LocalRect};
 use crate::export::{self, ExportFormat};
@@ -3893,16 +3893,18 @@ impl App {
     fn strip_layout(&self) -> StripLayout {
         let bounds = self.strip_bounds();
         let edge = self.edge();
-        compute_layout_with(
-            self.entries().len(),
+        compute_layout(
+            LayoutInput {
+                count: self.entries().len(),
+                bounds: band(bounds, self.strip_fraction(), edge),
+                scroll_offset: self.scroll_offset,
+                bars: &self.settings.settings().bars,
+                actions_expanded: self.actions_open,
+                actions_progress: self.actions_progress(),
+                collapse: self.collapse(),
+                edge,
+            },
             |i| self.magnification.scale(i),
-            band(bounds, self.strip_fraction(), edge),
-            self.scroll_offset,
-            &self.settings.settings().bars,
-            self.actions_open,
-            self.actions_progress(),
-            self.collapse(),
-            edge,
         )
     }
 
