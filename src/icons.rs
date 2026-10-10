@@ -28,7 +28,6 @@ pub static FONTS: [&[u8]; 6] = [
 ];
 
 /// Icons available in the bundled Lucide subset.
-#[allow(dead_code)] // the rest are used by the later surfaces
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Trash,
@@ -43,22 +42,19 @@ pub enum Icon {
     Link,
     Image,
     Plus,
-    Sliders,
     Check,
-    Square,
     Search,
     Copy,
     Download,
     Pin,
     Bell,
-    Layers,
     Settings,
 }
 
 impl Icon {
     /// Every icon in the subset.
-    #[allow(dead_code)] // used by tests only
-    pub const ALL: [Icon; 22] = [
+    #[cfg(test)]
+    pub const ALL: [Icon; 19] = [
         Icon::Trash,
         Icon::Close,
         Icon::Bold,
@@ -71,15 +67,12 @@ impl Icon {
         Icon::Link,
         Icon::Image,
         Icon::Plus,
-        Icon::Sliders,
         Icon::Check,
-        Icon::Square,
         Icon::Search,
         Icon::Copy,
         Icon::Download,
         Icon::Pin,
         Icon::Bell,
-        Icon::Layers,
         Icon::Settings,
     ];
 
@@ -98,15 +91,12 @@ impl Icon {
             Icon::Link => '\u{e102}',
             Icon::Image => '\u{e0f6}',
             Icon::Plus => '\u{e13d}',
-            Icon::Sliders => '\u{e29a}',
             Icon::Check => '\u{e06c}',
-            Icon::Square => '\u{e167}',
             Icon::Search => '\u{e151}',
             Icon::Copy => '\u{e09e}',
             Icon::Download => '\u{e0b2}',
             Icon::Pin => '\u{e259}',
             Icon::Bell => '\u{e059}',
-            Icon::Layers => '\u{e529}',
             Icon::Settings => '\u{e154}',
         }
     }
