@@ -118,15 +118,17 @@ The groups are split across two tabs, **Application** and **Styling**. Settings 
 
 Drag the grip at the top of the panel to move it; it stays inside the window and opens again where you left it until the app quits. Double-clicking the grip docks it beside the strip again. The search panel moves the same way.
 
+Every slider has small min and max fields at its ends. Type a new bound to widen or narrow the slider's range (in the units its label shows, so 50 for 50 %); the value moves into the new range if it falls outside. Each setting has hard limits the app can draw, and a bound past them is pulled back to the limit. A min that isn't below the max (or text that isn't a number) gets a red border and isn't applied; press Enter to show the bound in force again. A group's Reset also restores its default ranges.
+
 | Tab | Group | What you can adjust |
 |---|---|---|
 | Application | App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey (Cmd/Ctrl+Shift+Space). If it can't be registered (for example, another app uses it), a red line under the toggle says why. On Linux, failures are only logged. |
 | Application | Window | **Strip length** (the share of the edge the strip may use, which is the width on Top), **Screen edge** (Right, Left or Top), and **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)) |
 | Application | Data | **Export…** your notes to one file (see [Export](#export)) |
 | Styling | Bars | Width, height and gap |
-| Styling | Hover | Magnification, how far it spreads, and the peek delay (0–3 s) |
+| Styling | Hover | Magnification, how far it spreads, and the peek delay (0–3 s by default) |
 | Styling | Notes | Default size, paper tint (lighter/darker than the bar), and how faint the header controls are until you hover |
-| Styling | Motion | Animation speed (0.25–3×); Reminder alert (Jump / Pulse) |
+| Styling | Motion | Animation speed (0.25–3× by default); Reminder alert (Jump / Pulse) |
 | Styling | Palette | Replace any of the 6 note colors from 60 presets. Notes using the old color follow along. |
 
 ### Menu bar / tray

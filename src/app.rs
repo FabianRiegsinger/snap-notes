@@ -23,7 +23,7 @@ use crate::rich_view;
 use crate::search::{self, Hit};
 use crate::search_panel::{focus_field, search_panel, SearchView};
 use crate::settings::{
-    SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore, SettingsTab,
+    RangeEnd, SettingKey, SettingToggle, Settings, SettingsGroup, SettingsStore, SettingsTab,
 };
 use crate::settings_panel::{settings_panel, SettingsView, PANEL_MAX_HEIGHT, PANEL_WIDTH};
 use crate::store::{Deleted, NoteStore};
@@ -38,7 +38,7 @@ use iced::{
     Vector,
 };
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -254,6 +254,11 @@ pub enum Message {
     /// of this generation: the panel closes, if it still shows it.
     ExportStatusExpired(u64, Instant),
     SettingChanged(SettingKey, f32),
+    /// Text typed into a slider's min or max field.
+    RangeEdited(SettingKey, RangeEnd, String),
+    /// Enter in a slider's min or max field: the field shows the bound in
+    /// force again.
+    RangeSubmitted(SettingKey, RangeEnd),
     SettingToggled(SettingToggle),
     EdgeChosen(Edge),
     ReminderAlertChosen(crate::settings::ReminderAlertStyle),
@@ -579,6 +584,8 @@ pub struct App {
     /// The settings panel, morphing out of the gear.
     settings_panel: Panel,
     settings_tab: SettingsTab,
+    /// Slider min/max fields being typed into, as typed.
+    range_drafts: HashMap<(SettingKey, RangeEnd), String>,
     /// The title field's edit in progress, if any.
     title_edit: Option<TitleEdit>,
     /// The strip Actions slot shows New / Search / Settings side by side
@@ -818,6 +825,7 @@ impl App {
             peek,
             settings_panel,
             settings_tab: SettingsTab::default(),
+            range_drafts: HashMap::new(),
             title_edit: None,
             actions_open: false,
             actions_morph,
@@ -920,6 +928,8 @@ impl App {
             | Message::ExportCancelled(..)
             | Message::ExportStatusExpired(..)
             | Message::SettingChanged(..)
+            | Message::RangeEdited(..)
+            | Message::RangeSubmitted(..)
             | Message::SettingToggled(..)
             | Message::ReminderAlertChosen(..)
             | Message::ResetGroup(..)
@@ -1103,6 +1113,7 @@ impl App {
                     morph_progress: self.settings_panel.morph.progress(),
                     content_alpha: frame.content_alpha,
                     tab: self.settings_tab,
+                    range_drafts: &self.range_drafts,
                     selected_slot: self.palette_slot,
                     tray_ok: self.tray_ok,
                     dock_forced: self.tray_failed,

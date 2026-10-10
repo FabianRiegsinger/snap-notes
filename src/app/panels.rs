@@ -118,6 +118,7 @@ impl App {
                 return Task::batch([close_note, self.dock_window()]);
             }
             Message::CloseSettings => {
+                self.range_drafts.clear();
                 if self.settings_panel.close() {
                     self.settings_panel.cancel_drag();
                     self.animating = true;
@@ -175,6 +176,23 @@ impl App {
                 self.settings.settings_mut().set(key, value);
                 return self.apply_settings();
             }
+            Message::RangeEdited(key, end, typed) => {
+                let value = key.parse_bound(&typed);
+                self.range_drafts.insert((key, end), typed);
+                let applied = value.is_some_and(|v| {
+                    self.settings
+                        .settings()
+                        .check_range_end(key, end, v)
+                        .is_some()
+                        && self.settings.settings_mut().set_range_end(key, end, v)
+                });
+                if applied {
+                    return self.apply_settings();
+                }
+            }
+            Message::RangeSubmitted(key, end) => {
+                self.range_drafts.remove(&(key, end));
+            }
             Message::ReminderAlertChosen(style) => {
                 self.settings.settings_mut().motion.reminder_alert = style;
                 self.jump_settle = None;
@@ -204,6 +222,7 @@ impl App {
                     self.reparse();
                 } else {
                     self.settings.settings_mut().reset(group);
+                    self.range_drafts.retain(|(key, _), _| key.group() != group);
                 }
                 if group == SettingsGroup::App {
                     self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);

@@ -4,9 +4,10 @@ use crate::app::{NOTE_GAP, NOTE_MARGIN};
 use crate::bar_strip::STRIP_WIDTH;
 use crate::edge::Edge;
 use crate::note::{NoteColor, DEFAULT_PALETTE, DEFAULT_SLOTS, PALETTE};
-use crate::resize::MAX_NOTE_WIDTH;
+use crate::resize::{MAX_NOTE_WIDTH, MIN_SIZE};
 
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::ops::RangeInclusive;
@@ -177,6 +178,20 @@ impl Default for AppSettings {
     }
 }
 
+/// One end of a slider's range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RangeEnd {
+    Min,
+    Max,
+}
+
+/// A slider range the user picked in place of the default.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct SliderRange {
+    pub min: f32,
+    pub max: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Settings {
     pub bars: BarSettings,
@@ -186,6 +201,9 @@ pub struct Settings {
     pub window: WindowSettings,
     pub palette: Vec<NoteColor>,
     pub app: AppSettings,
+    /// Slider ranges the user changed, by [`SettingKey::id`]; every other
+    /// slider keeps its default range.
+    pub ranges: BTreeMap<&'static str, SliderRange>,
 }
 
 impl Default for Settings {
@@ -198,6 +216,7 @@ impl Default for Settings {
             window: WindowSettings::default(),
             palette: DEFAULT_PALETTE.to_vec(),
             app: AppSettings::default(),
+            ranges: BTreeMap::new(),
         }
     }
 }
@@ -309,7 +328,7 @@ impl SettingsTab {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingKey {
     BarWidth,
     BarHeight,
@@ -339,6 +358,8 @@ impl SettingKey {
         SettingKey::HeightFraction,
     ];
 
+    /// The slider's default range; the user can narrow or widen it within
+    /// [`SettingKey::safety_range`].
     pub fn range(self) -> RangeInclusive<f32> {
         match self {
             SettingKey::BarWidth => 3.0..=12.0,
@@ -356,6 +377,78 @@ impl SettingKey {
     }
 
     /// Group and field name of this setting in `settings.json`.
+    /// The hard bounds the app can render; user ranges stay inside them.
+    pub fn safety_range(self) -> RangeInclusive<f32> {
+        match self {
+            SettingKey::BarWidth => 1.0..=40.0,
+            SettingKey::BarHeight => 4.0..=200.0,
+            SettingKey::BarGap => 0.0..=80.0,
+            SettingKey::Magnification => 0.0..=5.0,
+            // The hover falloff divides by the spread.
+            SettingKey::Spread => 5.0..=400.0,
+            SettingKey::PeekDelay => 0.0..=10.0,
+            // A note is never smaller than resize allows nor wider than the
+            // window makes room for.
+            SettingKey::NoteSize => MIN_SIZE.width..=MAX_NOTE_WIDTH,
+            SettingKey::PaperTint => -0.5..=0.5,
+            SettingKey::IdleControlAlpha => 0.0..=1.0,
+            SettingKey::Speed => 0.1..=5.0,
+            SettingKey::HeightFraction => 0.2..=1.0,
+        }
+    }
+
+    /// The key's name in the saved `ranges` object.
+    pub fn id(self) -> &'static str {
+        match self {
+            SettingKey::BarWidth => "bars.width",
+            SettingKey::BarHeight => "bars.height",
+            SettingKey::BarGap => "bars.gap",
+            SettingKey::Magnification => "hover.magnification",
+            SettingKey::Spread => "hover.spread",
+            SettingKey::PeekDelay => "hover.peek_delay_secs",
+            SettingKey::NoteSize => "notes.size",
+            SettingKey::PaperTint => "notes.paper_tint",
+            SettingKey::IdleControlAlpha => "notes.idle_control_alpha",
+            SettingKey::Speed => "motion.speed",
+            SettingKey::HeightFraction => "window.height_fraction",
+        }
+    }
+
+    /// Stored value to the number the label shows (factor, then offset).
+    fn shown_scale(self) -> (f32, f32) {
+        match self {
+            SettingKey::Magnification => (1.0, 1.0),
+            SettingKey::PaperTint | SettingKey::IdleControlAlpha | SettingKey::HeightFraction => {
+                (100.0, 0.0)
+            }
+            _ => (1.0, 0.0),
+        }
+    }
+
+    /// A range bound as its min/max field shows it, in the label's units.
+    pub fn bound_text(self, v: f32) -> String {
+        let (factor, offset) = self.shown_scale();
+        let shown = v * factor + offset;
+        let decimals = match self {
+            SettingKey::Speed => 2,
+            SettingKey::Magnification | SettingKey::PeekDelay => 1,
+            _ => 0,
+        };
+        let text = format!("{shown:.decimals$}");
+        if text.contains('.') {
+            text.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            text
+        }
+    }
+
+    /// The stored value for what was typed into a min/max field.
+    pub fn parse_bound(self, input: &str) -> Option<f32> {
+        let shown: f32 = input.trim().parse().ok()?;
+        let (factor, offset) = self.shown_scale();
+        shown.is_finite().then(|| (shown - offset) / factor)
+    }
+
     fn json_path(self) -> (&'static str, &'static str) {
         match self {
             SettingKey::BarWidth => ("bars", "width"),
@@ -453,6 +546,23 @@ impl Settings {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
             return settings;
         };
+        if let Some(ranges) = value.get("ranges").and_then(|r| r.as_object()) {
+            for key in SettingKey::ALL {
+                let Some(saved) = ranges.get(key.id()) else {
+                    continue;
+                };
+                let default = key.range();
+                let end = |name: &str, fallback: f32| {
+                    let v = saved.get(name).and_then(|v| v.as_f64());
+                    v.map_or(fallback, |v| v as f32)
+                };
+                let range = SliderRange {
+                    min: end("min", *default.start()),
+                    max: end("max", *default.end()),
+                };
+                settings.store_range(key, range);
+            }
+        }
         for key in SettingKey::ALL {
             let (group, field) = key.json_path();
             if let Some(v) = value
@@ -566,10 +676,101 @@ impl Settings {
         }
     }
 
+    /// The slider range of `key`: the user's, or the default.
+    pub fn range(&self, key: SettingKey) -> RangeInclusive<f32> {
+        match self.ranges.get(key.id()) {
+            Some(r) => r.min..=r.max,
+            None => key.range(),
+        }
+    }
+
+    /// The range `key` would get with its `end` moved to `value` (clamped
+    /// into the safety range), or `None` when that leaves min ≥ max.
+    pub fn check_range_end(
+        &self,
+        key: SettingKey,
+        end: RangeEnd,
+        value: f32,
+    ) -> Option<SliderRange> {
+        let current = self.range(key);
+        let mut range = SliderRange {
+            min: *current.start(),
+            max: *current.end(),
+        };
+        match end {
+            RangeEnd::Min => range.min = value,
+            RangeEnd::Max => range.max = value,
+        }
+        Self::clamped_range(key, range)
+    }
+
+    /// `range` clamped into the safety range, if it stays non-empty.
+    fn clamped_range(key: SettingKey, range: SliderRange) -> Option<SliderRange> {
+        let safe = key.safety_range();
+        if !range.min.is_finite() || !range.max.is_finite() {
+            return None;
+        }
+        let clamp = |v: f32| v.clamp(*safe.start(), *safe.end());
+        let range = SliderRange {
+            min: clamp(range.min),
+            max: clamp(range.max),
+        };
+        (range.min < range.max).then_some(range)
+    }
+
+    /// Keeps `range` (if valid) as the user range of `key`; the default
+    /// range is stored as no entry at all.
+    fn store_range(&mut self, key: SettingKey, range: SliderRange) -> bool {
+        let Some(range) = Self::clamped_range(key, range) else {
+            return false;
+        };
+        if key.range() == (range.min..=range.max) {
+            self.ranges.remove(key.id());
+        } else {
+            self.ranges.insert(key.id(), range);
+        }
+        true
+    }
+
+    /// What the `end` field of `key` shows, and whether it is flagged:
+    /// a draft being typed (flagged when it isn't a usable bound), else
+    /// the bound in force.
+    pub fn bound_field(
+        &self,
+        key: SettingKey,
+        end: RangeEnd,
+        draft: Option<&str>,
+    ) -> (String, bool) {
+        if let Some(draft) = draft {
+            let usable = key
+                .parse_bound(draft)
+                .and_then(|v| self.check_range_end(key, end, v))
+                .is_some();
+            return (draft.to_string(), !usable);
+        }
+        let range = self.range(key);
+        let bound = match end {
+            RangeEnd::Min => *range.start(),
+            RangeEnd::Max => *range.end(),
+        };
+        (key.bound_text(bound), false)
+    }
+
+    /// Moves one end of `key`'s range and clamps the value into the new
+    /// range. Returns `false` (and changes nothing) when min ≥ max.
+    pub fn set_range_end(&mut self, key: SettingKey, end: RangeEnd, value: f32) -> bool {
+        let Some(range) = self.check_range_end(key, end, value) else {
+            return false;
+        };
+        self.store_range(key, range);
+        self.set(key, self.get(key));
+        true
+    }
+
     /// Sets `key` clamped to its range; a non-finite value resets it.
     pub fn set(&mut self, key: SettingKey, value: f32) {
         let default = Settings::default().get(key);
-        let range = key.range();
+        let range = self.range(key);
         let value = if value.is_finite() { value } else { default };
         *self.field(key) = value.clamp(*range.start(), *range.end());
     }
@@ -585,6 +786,9 @@ impl Settings {
             SettingsGroup::Palette => self.palette = d.palette,
             SettingsGroup::App => self.app = d.app,
             SettingsGroup::Data => {}
+        }
+        for key in SettingKey::ALL.into_iter().filter(|k| k.group() == group) {
+            self.ranges.remove(key.id());
         }
     }
 
@@ -1200,6 +1404,160 @@ mod tests {
         assert_eq!(SettingKey::PaperTint.format(0.1), "10 % darker");
         assert_eq!(SettingKey::PaperTint.format(0.0), "same as bar");
         assert_eq!(SettingKey::PeekDelay.format(0.0), "0.0 s");
+    }
+
+    #[test]
+    fn default_ranges_are_unchanged() {
+        let s = Settings::default();
+        let expected = [
+            (SettingKey::BarWidth, 3.0, 12.0),
+            (SettingKey::BarHeight, 16.0, 60.0),
+            (SettingKey::BarGap, 0.0, 24.0),
+            (SettingKey::Magnification, 0.0, 5.0),
+            (SettingKey::Spread, 20.0, 150.0),
+            (SettingKey::PeekDelay, 0.0, 3.0),
+            (SettingKey::NoteSize, 240.0, 600.0),
+            (SettingKey::PaperTint, -0.3, 0.3),
+            (SettingKey::IdleControlAlpha, 0.0, 1.0),
+            (SettingKey::Speed, 0.25, 3.0),
+            (SettingKey::HeightFraction, 0.5, 1.0),
+        ];
+        for (key, min, max) in expected {
+            assert_eq!(key.range(), min..=max, "{key:?}");
+            assert_eq!(s.range(key), min..=max, "{key:?}");
+        }
+        assert!(s.ranges.is_empty());
+    }
+
+    #[test]
+    fn default_ranges_sit_inside_the_safety_ranges() {
+        for key in SettingKey::ALL {
+            let (d, safe) = (key.range(), key.safety_range());
+            assert!(
+                safe.start() <= d.start() && d.end() <= safe.end(),
+                "{key:?}"
+            );
+            assert!(safe.start() < safe.end(), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn range_round_trips_through_json() {
+        let mut s = Settings::default();
+        assert!(s.set_range_end(SettingKey::BarWidth, RangeEnd::Max, 30.0));
+        assert!(s.set_range_end(SettingKey::Speed, RangeEnd::Min, 0.5));
+        let json = serde_json::to_string(&s).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["ranges"]["bars.width"]["max"], 30.0);
+        assert_eq!(value["ranges"]["bars.width"]["min"], 3.0);
+        let back = Settings::from_json(&json);
+        assert_eq!(back, s);
+        assert_eq!(back.range(SettingKey::BarWidth), 3.0..=30.0);
+        assert_eq!(back.range(SettingKey::Speed), 0.5..=3.0);
+    }
+
+    #[test]
+    fn saved_value_outside_the_default_range_survives_a_wider_range() {
+        let json = r#"{"bars":{"width":25},"ranges":{"bars.width":{"min":3,"max":30}}}"#;
+        let s = Settings::from_json(json);
+        assert_eq!(s.bars.width, 25.0);
+    }
+
+    #[test]
+    fn ranges_read_leniently() {
+        let json = r#"{"ranges":{
+            "bars.width":{"max":20},
+            "bars.gap":{"min":"x","max":10},
+            "hover.spread":{"min":100,"max":50},
+            "notes.size":{"min":-5,"max":99999},
+            "nope.key":{"min":1,"max":2},
+            "motion.speed":7
+        }}"#;
+        let s = Settings::from_json(json);
+        assert_eq!(
+            s.range(SettingKey::BarWidth),
+            3.0..=20.0,
+            "missing end = default"
+        );
+        assert_eq!(
+            s.range(SettingKey::BarGap),
+            0.0..=10.0,
+            "mistyped end = default"
+        );
+        assert_eq!(
+            s.range(SettingKey::Spread),
+            20.0..=150.0,
+            "min >= max ignored"
+        );
+        assert_eq!(
+            s.range(SettingKey::NoteSize),
+            SettingKey::NoteSize.safety_range(),
+            "clamped into the safety range"
+        );
+        assert_eq!(s.range(SettingKey::Speed), 0.25..=3.0);
+        assert_eq!(
+            Settings::from_json(r#"{"ranges":[1,2]}"#),
+            Settings::default()
+        );
+    }
+
+    #[test]
+    fn narrowing_a_range_clamps_the_value() {
+        let mut s = Settings::default();
+        s.set(SettingKey::BarWidth, 10.0);
+        assert!(s.set_range_end(SettingKey::BarWidth, RangeEnd::Max, 6.0));
+        assert_eq!(s.bars.width, 6.0);
+        assert!(s.set_range_end(SettingKey::BarWidth, RangeEnd::Min, 5.0));
+        assert_eq!(s.bars.width, 6.0);
+        s.set(SettingKey::BarWidth, 100.0);
+        assert_eq!(s.bars.width, 6.0, "set clamps into the user range");
+        assert!(s.set_range_end(SettingKey::BarWidth, RangeEnd::Max, 1000.0));
+        assert_eq!(
+            s.range(SettingKey::BarWidth),
+            5.0..=40.0,
+            "max clamped to safety"
+        );
+    }
+
+    #[test]
+    fn min_not_below_max_is_rejected() {
+        let mut s = Settings::default();
+        assert!(!s.set_range_end(SettingKey::BarWidth, RangeEnd::Min, 12.0));
+        assert!(!s.set_range_end(SettingKey::BarWidth, RangeEnd::Max, 2.0));
+        assert!(!s.set_range_end(SettingKey::BarWidth, RangeEnd::Max, f32::NAN));
+        assert_eq!(s, Settings::default());
+        assert!(s
+            .check_range_end(SettingKey::BarWidth, RangeEnd::Min, 12.0)
+            .is_none());
+        assert!(s
+            .check_range_end(SettingKey::BarWidth, RangeEnd::Min, 4.0)
+            .is_some());
+    }
+
+    #[test]
+    fn reset_restores_the_group_ranges_only() {
+        let mut s = Settings::default();
+        s.set_range_end(SettingKey::BarWidth, RangeEnd::Max, 30.0);
+        s.set(SettingKey::BarWidth, 25.0);
+        s.set_range_end(SettingKey::Spread, RangeEnd::Max, 300.0);
+        s.reset(SettingsGroup::Bars);
+        assert_eq!(s.range(SettingKey::BarWidth), 3.0..=12.0);
+        assert_eq!(s.bars, BarSettings::default());
+        assert_eq!(s.range(SettingKey::Spread), 20.0..=300.0);
+    }
+
+    #[test]
+    fn bound_fields_use_the_shown_units() {
+        assert_eq!(SettingKey::Magnification.bound_text(0.0), "1");
+        assert_eq!(SettingKey::Magnification.bound_text(4.5), "5.5");
+        assert_eq!(SettingKey::HeightFraction.bound_text(0.5), "50");
+        assert_eq!(SettingKey::PaperTint.bound_text(-0.3), "-30");
+        assert_eq!(SettingKey::Speed.bound_text(0.25), "0.25");
+        assert_eq!(SettingKey::BarWidth.bound_text(12.0), "12");
+        assert_eq!(SettingKey::Magnification.parse_bound(" 6 "), Some(5.0));
+        assert_eq!(SettingKey::HeightFraction.parse_bound("80"), Some(0.8));
+        assert_eq!(SettingKey::BarWidth.parse_bound("abc"), None);
+        assert_eq!(SettingKey::BarWidth.parse_bound("inf"), None);
     }
 
     #[test]

@@ -4782,3 +4782,72 @@ fn panels_open_away_from_edge() {
         assert!(away(rect) && inside(&app, rect), "{edge:?} export {rect:?}");
     }
 }
+
+#[test]
+fn editing_a_range_field_applies_a_valid_bound_and_clamps_the_value() {
+    use crate::settings::{RangeEnd, SettingKey};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    let key = SettingKey::BarWidth;
+    let _ = app.update(Message::RangeEdited(key, RangeEnd::Max, "6".into()));
+    assert_eq!(app.settings.settings().range(key), 3.0..=6.0);
+    assert_eq!(app.settings.settings().bars.width, 6.0);
+    assert!(!app.range_draft_invalid(key, RangeEnd::Max));
+    let _ = app.update(Message::RangeSubmitted(key, RangeEnd::Max));
+    assert_eq!(app.range_field_text(key, RangeEnd::Max), "6");
+}
+
+#[test]
+fn an_invalid_range_edit_is_flagged_and_not_applied() {
+    use crate::settings::{RangeEnd, SettingKey};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    let key = SettingKey::BarWidth;
+    for typed in ["2", "x", ""] {
+        let _ = app.update(Message::RangeEdited(key, RangeEnd::Max, typed.into()));
+        assert_eq!(app.settings.settings().range(key), 3.0..=12.0, "{typed:?}");
+        assert!(app.range_draft_invalid(key, RangeEnd::Max), "{typed:?}");
+        assert_eq!(app.range_field_text(key, RangeEnd::Max), typed);
+    }
+    // Submitting drops the draft and shows the bound in force again.
+    let _ = app.update(Message::RangeSubmitted(key, RangeEnd::Max));
+    assert!(!app.range_draft_invalid(key, RangeEnd::Max));
+    assert_eq!(app.range_field_text(key, RangeEnd::Max), "12");
+}
+
+#[test]
+fn group_reset_restores_ranges_and_drops_their_drafts() {
+    use crate::settings::{RangeEnd, SettingKey};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    let key = SettingKey::BarWidth;
+    let _ = app.update(Message::RangeEdited(key, RangeEnd::Max, "30".into()));
+    let _ = app.update(Message::RangeEdited(key, RangeEnd::Min, "zz".into()));
+    assert_eq!(app.settings.settings().range(key), 3.0..=30.0);
+    let _ = app.update(Message::ResetGroup(SettingsGroup::Bars));
+    assert_eq!(app.settings.settings().range(key), 3.0..=12.0);
+    assert_eq!(app.range_field_text(key, RangeEnd::Min), "3");
+    assert_eq!(app.range_field_text(key, RangeEnd::Max), "12");
+}
+
+impl App {
+    fn range_field_text(&self, key: SettingKey, end: RangeEnd) -> String {
+        let draft = self.range_drafts.get(&(key, end)).map(String::as_str);
+        self.settings.settings().bound_field(key, end, draft).0
+    }
+
+    fn range_draft_invalid(&self, key: SettingKey, end: RangeEnd) -> bool {
+        let draft = self.range_drafts.get(&(key, end)).map(String::as_str);
+        self.settings.settings().bound_field(key, end, draft).1
+    }
+}
+
+#[test]
+fn closing_settings_drops_range_drafts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    let key = SettingKey::Spread;
+    let _ = app.update(Message::RangeEdited(key, RangeEnd::Min, "abc".into()));
+    let _ = app.update(Message::CloseSettings);
+    assert_eq!(app.range_field_text(key, RangeEnd::Min), "20");
+}

@@ -8,14 +8,17 @@ use crate::icons::{icon, Icon};
 use crate::note_panel::pressable;
 use crate::settings::SettingToggle;
 use crate::settings::{
-    ReminderAlertStyle, SettingKey, Settings, SettingsGroup, SettingsTab, PRESETS,
+    RangeEnd, ReminderAlertStyle, SettingKey, Settings, SettingsGroup, SettingsTab, PRESETS,
 };
 use crate::theme::{self, space, RADIUS_CONTROL, RADIUS_SURFACE, TEXT_MD, TEXT_SM, TEXT_XS};
 
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, slider, text, toggler, Space,
+    button, column, container, mouse_area, row, scrollable, slider, text, text_input, toggler,
+    Space,
 };
-use iced::{border, mouse, Color, Element, Fill, Length, Padding, Shadow, Size, Theme};
+use std::collections::HashMap;
+
+use iced::{border, mouse, Border, Color, Element, Fill, Length, Padding, Shadow, Size, Theme};
 
 pub const PANEL_WIDTH: f32 = 400.0;
 pub const PANEL_MAX_HEIGHT: f32 = 600.0;
@@ -32,6 +35,8 @@ pub struct SettingsView<'a> {
     pub content_alpha: f32,
     /// The tab whose groups the card shows.
     pub tab: SettingsTab,
+    /// Slider min/max fields being typed into, as typed.
+    pub range_drafts: &'a HashMap<(SettingKey, RangeEnd), String>,
     pub selected_slot: Option<usize>,
     /// The menu bar / tray icon exists. Without it the Dock icon is the
     /// only way back into the app, so it can't be turned off.
@@ -103,13 +108,70 @@ fn data_section<'a>(theme: theme::Theme, a: f32) -> Element<'a, Message> {
     .into()
 }
 
+/// Width of a slider's min/max field.
+const BOUND_FIELD_WIDTH: f32 = 44.0;
+
+/// A slider's editable min or max: red-bordered while the typed text isn't
+/// a usable bound (it isn't applied then).
+fn bound_field<'a>(
+    settings: &Settings,
+    drafts: &HashMap<(SettingKey, RangeEnd), String>,
+    key: SettingKey,
+    end: RangeEnd,
+    theme: theme::Theme,
+    a: f32,
+) -> Element<'a, Message> {
+    let draft = drafts.get(&(key, end)).map(String::as_str);
+    let (shown, invalid) = settings.bound_field(key, end, draft);
+    let align = match end {
+        RangeEnd::Min => iced::alignment::Horizontal::Left,
+        RangeEnd::Max => iced::alignment::Horizontal::Right,
+    };
+    text_input("", &shown)
+        .on_input(move |typed| Message::RangeEdited(key, end, typed))
+        .on_submit(Message::RangeSubmitted(key, end))
+        .size(TEXT_XS)
+        .width(BOUND_FIELD_WIDTH)
+        .align_x(align)
+        .padding(Padding::new(1.0).left(space(1)).right(space(1)))
+        .style(move |_theme: &Theme, status| {
+            let focused = matches!(status, text_input::Status::Focused { .. });
+            let (color, width) = if invalid {
+                (theme.danger(a), 1.5)
+            } else if focused {
+                (theme.focus_ring().scale_alpha(a), 1.5)
+            } else {
+                (Color::TRANSPARENT, 0.0)
+            };
+            text_input::Style {
+                background: theme.ink(0.06 * a).into(),
+                border: Border {
+                    color,
+                    width,
+                    radius: RADIUS_CONTROL.into(),
+                },
+                icon: theme.ink(0.55 * a),
+                placeholder: theme.ink(0.4 * a),
+                value: theme.ink(0.75 * a),
+                selection: theme.ink(0.18 * a),
+            }
+        })
+        .into()
+}
+
 fn slider_row<'a>(
     settings: &Settings,
+    drafts: &HashMap<(SettingKey, RangeEnd), String>,
     key: SettingKey,
     theme: theme::Theme,
     a: f32,
 ) -> Element<'a, Message> {
     let value = settings.get(key);
+    let field = |end| bound_field(settings, drafts, key, end, theme, a);
+    let slider = slider(settings.range(key), value, move |v| {
+        Message::SettingChanged(key, v)
+    })
+    .step(key.step());
     column![
         row![
             text(key.label()).size(TEXT_XS).color(theme.ink(0.75 * a)),
@@ -118,7 +180,9 @@ fn slider_row<'a>(
                 .size(TEXT_XS)
                 .color(theme.ink(0.55 * a)),
         ],
-        slider(key.range(), value, move |v| Message::SettingChanged(key, v)).step(key.step()),
+        row![field(RangeEnd::Min), slider, field(RangeEnd::Max)]
+            .spacing(space(2))
+            .align_y(iced::Alignment::Center),
     ]
     .spacing(space(1))
     .into()
@@ -416,6 +480,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         morph_progress: t,
         content_alpha: a,
         tab,
+        range_drafts,
         selected_slot,
         tray_ok,
         dock_forced,
@@ -462,7 +527,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
                 _ => {
                     let mut section = column![group_header(group, theme, a)].spacing(space(2));
                     for key in SettingKey::ALL.into_iter().filter(|k| k.group() == group) {
-                        section = section.push(slider_row(settings, key, theme, a));
+                        section = section.push(slider_row(settings, range_drafts, key, theme, a));
                     }
                     if group == SettingsGroup::Motion {
                         section = section.push(reminder_alert_row(
