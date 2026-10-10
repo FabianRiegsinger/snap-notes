@@ -122,7 +122,7 @@ Every slider has small min and max fields at its ends. Type a new bound to widen
 
 | Tab | Group | What you can adjust |
 |---|---|---|
-| Application | App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey (Cmd/Ctrl+Shift+Space). If it can't be registered (for example, another app uses it), a red line under the toggle says why. On Linux, failures are only logged. |
+| Application | App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey: a toggle to use it, and a **Global hotkey** row showing its keys (Cmd/Ctrl+Shift+Space by default). Click **Record**, then press the new combination: it needs at least one of Cmd, Ctrl, Alt/Option or Shift plus one key (a letter, digit, F1–F12, Space, an arrow or another named key). Bare keys are ignored, Esc or **Cancel** stops recording, and no other shortcut runs meanwhile. The new hotkey works right away. If it can't be registered (for example, another app uses it), a red line under the toggle says why. Reset restores the default keys. On Linux, failures are only logged. |
 | Application | Window | **Strip length** (the share of the edge the strip may use, which is the width on Top), **Screen edge** (Right, Left or Top), and **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)) |
 | Application | Data | **Export…** your notes to one file (see [Export](#export)) |
 | Styling | Bars | Width, height and gap |
@@ -138,7 +138,7 @@ On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Ne
 
 | Shortcut | Action |
 |---|---|
-| Cmd+Shift+Space (macOS), Ctrl+Shift+Space (elsewhere) | Global hotkey: show the notes and create a new note in edit mode, from any app. On Linux it is always on and needs X11 (Wayland is not supported). |
+| Cmd+Shift+Space (macOS), Ctrl+Shift+Space (elsewhere), or the keys you recorded in Settings | Global hotkey: show the notes and create a new note in edit mode, from any app. On Linux it is always on and needs X11 (Wayland is not supported). |
 | Cmd/Ctrl+N | New note |
 | Cmd/Ctrl+F | Open or close search |
 | Cmd/Ctrl+, | Open or close settings |

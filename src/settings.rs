@@ -3,6 +3,7 @@
 use crate::app::{NOTE_GAP, NOTE_MARGIN};
 use crate::bar_strip::STRIP_WIDTH;
 use crate::edge::Edge;
+use crate::hotkey::Combo;
 use crate::note::{NoteColor, DEFAULT_PALETTE, DEFAULT_SLOTS, PALETTE};
 use crate::resize::{MAX_NOTE_WIDTH, MIN_SIZE};
 
@@ -164,8 +165,15 @@ impl Default for WindowSettings {
 pub struct AppSettings {
     pub show_menu_bar_icon: bool,
     pub show_dock_icon: bool,
-    /// Cmd/Ctrl+Shift+Space adds a note from anywhere.
+    /// The global hotkey adds a note from anywhere.
     pub global_hotkey: bool,
+    /// The global hotkey's keys (Cmd/Ctrl+Shift+Space by default).
+    #[serde(serialize_with = "serialize_combo")]
+    pub global_hotkey_combo: Combo,
+}
+
+fn serialize_combo<S: serde::Serializer>(combo: &Combo, s: S) -> Result<S::Ok, S::Error> {
+    s.collect_str(combo)
 }
 
 impl Default for AppSettings {
@@ -174,6 +182,7 @@ impl Default for AppSettings {
             show_menu_bar_icon: true,
             show_dock_icon: false,
             global_hotkey: true,
+            global_hotkey_combo: Combo::default(),
         }
     }
 }
@@ -595,6 +604,10 @@ impl Settings {
             if let Some(v) = app.and_then(|a| a.get(field)).and_then(|v| v.as_bool()) {
                 *target = v;
             }
+        }
+        let combo = app.and_then(|a| a.get("global_hotkey_combo"));
+        if let Some(v) = combo.and_then(|v| v.as_str()) {
+            settings.app.global_hotkey_combo = Combo::parse_or_default(v);
         }
         if !settings.app.show_menu_bar_icon && !settings.app.show_dock_icon {
             settings.app.show_menu_bar_icon = true;
@@ -1558,6 +1571,34 @@ mod tests {
         assert_eq!(SettingKey::HeightFraction.parse_bound("80"), Some(0.8));
         assert_eq!(SettingKey::BarWidth.parse_bound("abc"), None);
         assert_eq!(SettingKey::BarWidth.parse_bound("inf"), None);
+    }
+
+    #[test]
+    fn hotkey_combo_persists_as_a_readable_string() {
+        let mut s = Settings::default();
+        assert_eq!(s.app.global_hotkey_combo, Combo::default());
+        s.app.global_hotkey_combo = Combo::parse("Ctrl+Alt+K").unwrap();
+        let json = serde_json::to_string(&s).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["app"]["global_hotkey_combo"], "Ctrl+Alt+K");
+        assert_eq!(Settings::from_json(&json), s);
+    }
+
+    #[test]
+    fn bad_hotkey_combo_reads_as_the_default() {
+        for combo in [r#""Q""#, r#""nope""#, "42", "null"] {
+            let json = format!(r#"{{"app":{{"global_hotkey_combo":{combo}}}}}"#);
+            let s = Settings::from_json(&json);
+            assert_eq!(s.app.global_hotkey_combo, Combo::default(), "{combo}");
+        }
+    }
+
+    #[test]
+    fn app_reset_restores_the_default_hotkey_combo() {
+        let mut s = Settings::default();
+        s.app.global_hotkey_combo = Combo::parse("Alt+F2").unwrap();
+        s.reset(SettingsGroup::App);
+        assert_eq!(s.app.global_hotkey_combo, Combo::default());
     }
 
     #[test]

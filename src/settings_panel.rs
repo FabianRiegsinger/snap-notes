@@ -45,6 +45,10 @@ pub struct SettingsView<'a> {
     pub dock_forced: bool,
     /// Why the global hotkey couldn't be registered, if it couldn't.
     pub hotkey_error: Option<&'a str>,
+    /// The global hotkey's keys as shown ("⌘⇧Space", "Ctrl+Shift+Space").
+    pub hotkey_label: String,
+    /// The next modified key press becomes the hotkey.
+    pub hotkey_recording: bool,
     /// The panel is being dragged from its grip.
     pub dragging: bool,
 }
@@ -313,7 +317,7 @@ pub fn toggle_enabled(settings: &Settings, toggle: SettingToggle, tray_ok: bool)
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-const HOTKEY_LABEL: &str = "Global hotkey (Cmd/Ctrl+Shift+Space)";
+const HOTKEY_LABEL: &str = "Use the global hotkey";
 
 #[cfg(any(windows, target_os = "macos"))]
 fn hotkey_error_label(reason: &str) -> String {
@@ -341,11 +345,50 @@ fn toggle_label(toggle: SettingToggle) -> &'static str {
 }
 
 #[cfg(any(windows, target_os = "macos"))]
+/// The App group's global hotkey state.
+struct HotkeyRow<'a> {
+    label: String,
+    recording: bool,
+    error: Option<&'a str>,
+}
+
+/// The App group's row naming the global hotkey's keys.
+#[cfg(any(windows, target_os = "macos"))]
+const HOTKEY_ROW_LABEL: &str = "Global hotkey";
+
+/// "Global hotkey  ⌘⇧Space  [Record]"; while recording, a prompt and
+/// Cancel.
+#[cfg(any(windows, target_os = "macos"))]
+fn hotkey_combo_row<'a>(
+    hotkey: &HotkeyRow<'_>,
+    theme: theme::Theme,
+    a: f32,
+) -> Element<'a, Message> {
+    let (shown, button) = if hotkey.recording {
+        ("Press keys… (Esc cancels)".to_string(), "Cancel")
+    } else {
+        (hotkey.label.clone(), "Record")
+    };
+    let ink = if hotkey.recording { 0.75 } else { 0.55 };
+    row![
+        text(HOTKEY_ROW_LABEL)
+            .size(TEXT_XS)
+            .color(theme.ink(0.75 * a)),
+        Space::new().width(Fill),
+        text(shown).size(TEXT_XS).color(theme.ink(ink * a)),
+        text_button(text(button).size(TEXT_XS), Message::HotkeyRecord, theme, a),
+    ]
+    .spacing(space(2))
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+#[cfg(any(windows, target_os = "macos"))]
 fn app_section<'a>(
     settings: &Settings,
     tray_ok: bool,
     dock_forced: bool,
-    hotkey_error: Option<&str>,
+    hotkey: HotkeyRow<'_>,
     theme: theme::Theme,
     a: f32,
 ) -> Element<'a, Message> {
@@ -357,7 +400,10 @@ fn app_section<'a>(
             switch = switch.on_toggle(move |_| Message::SettingToggled(t));
         }
         col = col.push(switch);
-        if let (SettingToggle::GlobalHotkey, Some(reason)) = (t, hotkey_error) {
+        if t == SettingToggle::GlobalHotkey {
+            col = col.push(hotkey_combo_row(&hotkey, theme, a));
+        }
+        if let (SettingToggle::GlobalHotkey, Some(reason)) = (t, hotkey.error) {
             col = col.push(
                 text(hotkey_error_label(reason))
                     .size(TEXT_XS)
@@ -485,6 +531,8 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
         tray_ok,
         dock_forced,
         hotkey_error,
+        hotkey_label,
+        hotkey_recording,
         dragging,
     } = v;
     let inner: Element<'_, Message> = if a < 0.01 {
@@ -512,13 +560,24 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
             .spacing(space(4))
             .padding(Padding::ZERO.right(space(5)));
         #[cfg(not(any(windows, target_os = "macos")))]
-        let _ = (tray_ok, dock_forced, hotkey_error);
+        let _ = (
+            tray_ok,
+            dock_forced,
+            hotkey_error,
+            hotkey_label,
+            hotkey_recording,
+        );
         for group in SettingsGroup::ALL.into_iter().filter(|g| g.tab() == tab) {
             let section = match group {
                 // Only macOS and Windows have the menu bar / tray icon.
                 #[cfg(any(windows, target_os = "macos"))]
                 SettingsGroup::App => {
-                    app_section(settings, tray_ok, dock_forced, hotkey_error, theme, a)
+                    let hotkey = HotkeyRow {
+                        label: hotkey_label.clone(),
+                        recording: hotkey_recording,
+                        error: hotkey_error,
+                    };
+                    app_section(settings, tray_ok, dock_forced, hotkey, theme, a)
                 }
                 #[cfg(not(any(windows, target_os = "macos")))]
                 SettingsGroup::App => continue,

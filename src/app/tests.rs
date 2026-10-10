@@ -1,6 +1,7 @@
 use super::*;
 use crate::autohide::REVEAL_DWELL;
 use crate::bar_strip::HIDE_MARGIN;
+use crate::hotkey::Combo;
 use crate::settings::SettingToggle;
 
 fn app_in(dir: &tempfile::TempDir) -> App {
@@ -4850,4 +4851,101 @@ fn closing_settings_drops_range_drafts() {
     let _ = app.update(Message::RangeEdited(key, RangeEnd::Min, "abc".into()));
     let _ = app.update(Message::CloseSettings);
     assert_eq!(app.range_field_text(key, RangeEnd::Min), "20");
+}
+
+fn key_press(code: keyboard::key::Code, ch: &str, modifiers: keyboard::Modifiers) -> Message {
+    use keyboard::key::Physical;
+    Message::Key(keyboard::Event::KeyPressed {
+        key: keyboard::Key::Character(ch.into()),
+        modified_key: keyboard::Key::Character(ch.into()),
+        physical_key: Physical::Code(code),
+        location: keyboard::Location::Standard,
+        modifiers,
+        text: None,
+        repeat: false,
+    })
+}
+
+#[test]
+fn recording_captures_the_next_modified_key_as_the_hotkey() {
+    use keyboard::key::Code;
+    use keyboard::Modifiers;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    let _ = app.update(Message::HotkeyRecord);
+    assert!(app.hotkey_recording);
+    // A bare key doesn't count; recording goes on.
+    let _ = app.update(key_press(Code::KeyK, "k", Modifiers::empty()));
+    assert!(app.hotkey_recording);
+    assert_eq!(
+        app.settings.settings().app.global_hotkey_combo,
+        Combo::default()
+    );
+    let _ = app.update(key_press(
+        Code::KeyK,
+        "k",
+        Modifiers::COMMAND | Modifiers::SHIFT,
+    ));
+    assert!(!app.hotkey_recording);
+    let combo = &app.settings.settings().app.global_hotkey_combo;
+    assert_eq!(combo.to_string(), "CmdOrCtrl+Shift+K");
+}
+
+#[test]
+fn recording_swallows_app_shortcuts() {
+    use keyboard::key::Code;
+    use keyboard::Modifiers;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    let notes = app.store.notes().len();
+    let _ = app.update(Message::HotkeyRecord);
+    // Cmd/Ctrl+N would add a note; while recording it becomes the hotkey.
+    let _ = app.update(key_press(Code::KeyN, "n", Modifiers::COMMAND));
+    assert_eq!(app.store.notes().len(), notes);
+    assert!(!app.note_open());
+    let combo = &app.settings.settings().app.global_hotkey_combo;
+    assert_eq!(combo.to_string(), "CmdOrCtrl+N");
+}
+
+#[test]
+fn escape_cancels_recording_and_keeps_the_combo() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    let _ = app.update(Message::ToggleSettings);
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(escape());
+    assert!(!app.hotkey_recording);
+    assert!(app.settings_panel.open, "Esc only stopped the recording");
+    assert_eq!(
+        app.settings.settings().app.global_hotkey_combo,
+        Combo::default()
+    );
+    // The Record button again also cancels.
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(Message::HotkeyRecord);
+    assert!(!app.hotkey_recording);
+}
+
+#[test]
+fn app_reset_restores_the_hotkey_and_stops_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    app.settings.settings_mut().app.global_hotkey_combo = Combo::parse("Alt+F3").unwrap();
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(Message::ResetGroup(SettingsGroup::App));
+    assert!(!app.hotkey_recording);
+    assert_eq!(
+        app.settings.settings().app.global_hotkey_combo,
+        Combo::default()
+    );
+}
+
+#[test]
+fn closing_settings_stops_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    let _ = app.update(Message::ToggleSettings);
+    let _ = app.update(Message::HotkeyRecord);
+    let _ = app.update(Message::CloseSettings);
+    assert!(!app.hotkey_recording);
 }

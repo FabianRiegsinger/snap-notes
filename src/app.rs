@@ -254,6 +254,9 @@ pub enum Message {
     /// of this generation: the panel closes, if it still shows it.
     ExportStatusExpired(u64, Instant),
     SettingChanged(SettingKey, f32),
+    /// The global hotkey's Record button: starts recording the next
+    /// modified key press as the hotkey, or cancels the recording.
+    HotkeyRecord,
     /// Text typed into a slider's min or max field.
     RangeEdited(SettingKey, RangeEnd, String),
     /// Enter in a slider's min or max field: the field shows the bound in
@@ -627,6 +630,9 @@ pub struct App {
     hotkey: Option<hotkey::Manager>,
     /// Why the last hotkey registration failed; shown in Settings.
     hotkey_error: Option<String>,
+    /// The next modified key press becomes the global hotkey (Esc
+    /// cancels); no shortcut runs meanwhile.
+    hotkey_recording: bool,
     /// The menu bar / tray icon exists.
     tray_ok: bool,
     /// The tray icon could not be created, so the Dock icon is shown this
@@ -845,6 +851,7 @@ impl App {
             pending_focus: None,
             hotkey: None,
             hotkey_error: None,
+            hotkey_recording: false,
             tray_ok: false,
             tray_failed: false,
             keep_open_until: None,
@@ -930,6 +937,7 @@ impl App {
             | Message::SettingChanged(..)
             | Message::RangeEdited(..)
             | Message::RangeSubmitted(..)
+            | Message::HotkeyRecord
             | Message::SettingToggled(..)
             | Message::ReminderAlertChosen(..)
             | Message::ResetGroup(..)
@@ -1118,6 +1126,13 @@ impl App {
                     tray_ok: self.tray_ok,
                     dock_forced: self.tray_failed,
                     hotkey_error: self.hotkey_error.as_deref(),
+                    hotkey_label: self
+                        .settings
+                        .settings()
+                        .app
+                        .global_hotkey_combo
+                        .label(cfg!(target_os = "macos")),
+                    hotkey_recording: self.hotkey_recording,
                     dragging: self.settings_panel.drag.is_some(),
                 });
                 layers.push(pin(opaque(panel)).x(rect.x).y(rect.y).into());

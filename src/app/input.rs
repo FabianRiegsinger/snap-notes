@@ -6,6 +6,14 @@ use super::*;
 impl App {
     pub(super) fn handle_input(&mut self, message: Message) -> Task<Message> {
         match message {
+            // While recording the global hotkey, key presses go to the
+            // recording only.
+            Message::Key(keyboard::Event::KeyPressed {
+                key,
+                physical_key,
+                modifiers,
+                ..
+            }) if self.hotkey_recording => self.record_hotkey(&key, physical_key, modifiers),
             // Hidden notes don't react to the keyboard.
             Message::Key(_) if !self.visible => {}
             Message::Key(keyboard::Event::KeyPressed {
@@ -287,6 +295,42 @@ impl App {
             window::enable_mouse_passthrough(id)
         } else {
             window::disable_mouse_passthrough(id)
+        }
+    }
+
+    /// A key press while recording the global hotkey: Esc cancels, a key
+    /// with at least one modifier becomes the hotkey, anything else (a bare
+    /// key, a modifier on its own) is ignored.
+    fn record_hotkey(
+        &mut self,
+        key: &keyboard::Key,
+        physical_key: keyboard::key::Physical,
+        modifiers: keyboard::Modifiers,
+    ) {
+        use keyboard::key::{Named, Physical};
+        if *key == keyboard::Key::Named(Named::Escape) {
+            self.hotkey_recording = false;
+            self.sync_hotkey();
+            return;
+        }
+        let Physical::Code(code) = physical_key else {
+            return;
+        };
+        let mac = cfg!(target_os = "macos");
+        let mods = hotkey::Mods {
+            primary: if mac {
+                modifiers.logo()
+            } else {
+                modifiers.control()
+            },
+            ctrl: mac && modifiers.control(),
+            alt: modifiers.alt(),
+            shift: modifiers.shift(),
+        };
+        if let Some(combo) = hotkey::Combo::from_press(mods, &format!("{code:?}")) {
+            self.settings.settings_mut().app.global_hotkey_combo = combo;
+            self.hotkey_recording = false;
+            self.sync_hotkey();
         }
     }
 }

@@ -119,6 +119,10 @@ impl App {
             }
             Message::CloseSettings => {
                 self.range_drafts.clear();
+                if self.hotkey_recording {
+                    self.hotkey_recording = false;
+                    self.sync_hotkey();
+                }
                 if self.settings_panel.close() {
                     self.settings_panel.cancel_drag();
                     self.animating = true;
@@ -190,6 +194,12 @@ impl App {
                     return self.apply_settings();
                 }
             }
+            Message::HotkeyRecord => {
+                self.hotkey_recording = !self.hotkey_recording;
+                // The old hotkey is let go while recording, so its own
+                // keys can be recorded too.
+                self.sync_hotkey();
+            }
             Message::RangeSubmitted(key, end) => {
                 self.range_drafts.remove(&(key, end));
             }
@@ -225,6 +235,7 @@ impl App {
                     self.range_drafts.retain(|(key, _), _| key.group() != group);
                 }
                 if group == SettingsGroup::App {
+                    self.hotkey_recording = false;
                     self.keep_open_until = Some(Instant::now() + FOCUS_GRACE);
                     self.sync_hotkey();
                     return self.apply_app_visibility();

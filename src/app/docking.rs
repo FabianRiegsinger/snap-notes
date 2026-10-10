@@ -263,13 +263,18 @@ impl App {
         if self.window_id.is_none() {
             return;
         }
-        let wanted = !cfg!(any(windows, target_os = "macos"))
-            || self.settings.settings().is_on(SettingToggle::GlobalHotkey);
+        let settings = self.settings.settings();
+        let wanted = (!cfg!(any(windows, target_os = "macos"))
+            || settings.is_on(SettingToggle::GlobalHotkey))
+            && !self.hotkey_recording;
+        let combo = settings.app.global_hotkey_combo.clone();
         if !wanted {
             self.hotkey = None;
             self.hotkey_error = None;
-        } else if self.hotkey.is_none() {
-            self.apply_registration(hotkey::register());
+        } else if self.hotkey.as_ref().is_none_or(|h| h.combo != combo) {
+            // Let go of the old combo before taking the new one.
+            self.hotkey = None;
+            self.apply_registration(hotkey::register(&combo));
         }
     }
 
