@@ -90,7 +90,6 @@ impl Frame {
     }
 
     /// The window rect `r` in the frame.
-    #[cfg(test)]
     fn local(&self, r: Rectangle) -> LocalRect {
         self.edge.rect_to_local(r - self.shift(), self.window())
     }
@@ -687,6 +686,86 @@ fn chip_frame(
     edge.place_away(anchor, size, CHIP_GAP, edge.along_only(bounds))
 }
 
+/// Where the hovered slot's tooltip around a label of size `label` sits
+/// for `pill` in `window`, clear of every pill in the row: past the whole
+/// row on its away side, centred along the edge on `pill`; if that leaves
+/// the window, after the row along the edge, then before it (where the
+/// bars are); failing all, clamped into the window.
+fn slot_tooltip_frame(
+    strip: &StripLayout,
+    window: Rectangle,
+    pill: Rectangle,
+    label: Size,
+) -> Rectangle {
+    let edge = strip.edge;
+    let frame = Frame {
+        edge,
+        bounds: window,
+    };
+    let size = Size::new(
+        label.width + 2.0 * CHIP_PADDING.width,
+        label.height + 2.0 * CHIP_PADDING.height,
+    );
+    let (length, thickness) = (edge.edge_length(size), edge.thickness(size));
+    let b = frame.local(window);
+    let p = frame.local(pill);
+    let pills =
+        [strip.add_button, strip.search_button, strip.settings_button].map(|r| frame.local(r));
+    let row_far = pills
+        .iter()
+        .map(|r| r.away + r.thickness)
+        .fold(p.away, f32::max);
+    let row_start = pills.iter().map(|r| r.along).fold(p.along, f32::min);
+    let row_end = pills
+        .iter()
+        .map(|r| r.along + r.length)
+        .fold(p.along + p.length, f32::max);
+    let clamp = |v: f32, lo: f32, extent: f32, room: f32| v.clamp(lo, (lo + room - extent).max(lo));
+    let along_in = |along: f32| clamp(along, b.along, length, b.length);
+    let away_in = |away: f32| clamp(away, b.away, thickness, b.thickness);
+    let chip = |along: f32, away: f32| LocalRect {
+        along,
+        away,
+        length,
+        thickness,
+    };
+    let beside = away_in(p.away + (p.thickness - thickness) / 2.0);
+    let candidates = [
+        chip(
+            along_in(p.along + (p.length - length) / 2.0),
+            row_far + CHIP_GAP,
+        ),
+        chip(row_end + CHIP_GAP, beside),
+        chip(row_start - CHIP_GAP - length, beside),
+    ];
+    // Past the row it must fit whole; along the edge only along it, as a
+    // window thinner than the chip cuts it off either way.
+    let fits = |c: &LocalRect| {
+        c.along >= b.along
+            && c.along + c.length <= b.along + b.length
+            && (c.away + c.thickness <= b.away + b.thickness || c.away < row_far)
+    };
+    let rects = candidates.map(|c| frame.rect(c));
+    let clear_of_bars = |r: &Rectangle| strip.bars.iter().all(|bar| r.intersection(bar).is_none());
+    candidates
+        .iter()
+        .zip(rects)
+        .filter(|(c, _)| fits(c))
+        .map(|(_, r)| r)
+        .find(clear_of_bars)
+        .or_else(|| {
+            candidates
+                .iter()
+                .zip(rects)
+                .find(|(c, _)| fits(c))
+                .map(|(_, r)| r)
+        })
+        .unwrap_or_else(|| {
+            let first = candidates[0];
+            frame.rect(chip(along_in(first.along), away_in(first.away)))
+        })
+}
+
 /// Where the chip labelled `text` (and `accent`) beside `anchor`, centred
 /// on `along` (a coordinate along `edge`), is drawn in `bounds`, for
 /// hit-testing without a renderer.
@@ -702,28 +781,19 @@ pub fn chip_rect(
     chip_frame(bounds, anchor, along, label, edge)
 }
 
-/// Draws a hint chip beside `anchor` (a bar or slot) in `bounds`, on its
-/// away side from the screen `edge` and centred on it along the edge: a
-/// small card like the peek's paper with the `hint`'s text at 0.75 ink and
-/// its accent after it at full ink, all at `alpha`. Returns its rect.
+/// Draws a hint chip where `place` puts it for its label's size: a small
+/// card like the peek's paper with the `hint`'s text at 0.75 ink and its
+/// accent after it at full ink, all at `alpha`. Returns its rect.
 fn draw_chip(
     renderer: &mut iced::Renderer,
     theme: &theme::Theme,
-    bounds: Rectangle,
-    anchor: Rectangle,
     hint: Hint,
     alpha: f32,
-    edge: Edge,
+    place: impl FnOnce(Size) -> Rectangle,
 ) -> Rectangle {
     let Hint { text, accent, .. } = hint;
     let paragraph = chip_paragraph(text, accent, theme.ink(alpha));
-    let rect = chip_frame(
-        bounds,
-        anchor,
-        along_center(anchor, edge),
-        paragraph.min_bounds(),
-        edge,
-    );
+    let rect = place(paragraph.min_bounds());
     if alpha <= 0.0 {
         return rect;
     }
@@ -1466,6 +1536,7 @@ impl<'a> BarStrip<'a> {
         tree: &Tree,
         renderer: &mut iced::Renderer,
         bounds: Rectangle,
+        viewport: Rectangle,
         cursor: mouse::Cursor,
     ) {
         let strip = self.layout_in(bounds);
@@ -1774,7 +1845,16 @@ impl<'a> BarStrip<'a> {
         let state = tree.state.downcast_ref::<StripState>();
         if let Some((hint, alpha)) = self.frame_chip(state, &strip) {
             if let Some(anchor) = hint_anchor(&strip, hint.at) {
-                draw_chip(renderer, &self.theme, bounds, anchor, hint, alpha, edge);
+                // A slot's tooltip keeps clear of the whole row; other chips
+                // sit beside their anchor, on its away side and centred on it.
+                let tooltip = self.hint_kind() == HintKind::Tooltip;
+                draw_chip(renderer, &self.theme, hint, alpha, |label| {
+                    if tooltip {
+                        slot_tooltip_frame(&strip, viewport, anchor, label)
+                    } else {
+                        chip_frame(bounds, anchor, along_center(anchor, edge), label, edge)
+                    }
+                });
             }
         }
     }
@@ -1825,7 +1905,7 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
         _style: &renderer::Style,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
-        _viewport: &Rectangle,
+        viewport: &Rectangle,
     ) {
         if self.slid() && !self.any_alert() {
             // Fully hidden: slide everything off-screen together.
@@ -1833,13 +1913,19 @@ impl<'a> advanced::Widget<Message, Theme, iced::Renderer> for BarStrip<'a> {
                 renderer,
                 hide_translation(self.edge, self.x_offset),
                 |renderer| {
-                    self.draw_strip(tree, renderer, layout.bounds(), mouse::Cursor::Unavailable);
+                    self.draw_strip(
+                        tree,
+                        renderer,
+                        layout.bounds(),
+                        *viewport,
+                        mouse::Cursor::Unavailable,
+                    );
                 },
             );
             return;
         }
         // In place, or alert-only: per-bar slide keeps alerting bars visible.
-        self.draw_strip(tree, renderer, layout.bounds(), cursor);
+        self.draw_strip(tree, renderer, layout.bounds(), *viewport, cursor);
     }
 
     fn update(
@@ -2661,6 +2747,77 @@ mod tests {
             state.tooltip_due(due).is_none(),
             "no redraw left to wait for"
         );
+    }
+
+    /// Whether `a` and `b` share any area (touching is fine).
+    fn overlaps(a: Rectangle, b: Rectangle) -> bool {
+        const EPS: f32 = 0.01;
+        a.x < b.x + b.width - EPS
+            && b.x < a.x + a.width - EPS
+            && a.y < b.y + b.height - EPS
+            && b.y < a.y + a.height - EPS
+    }
+
+    #[test]
+    fn slot_tooltips_never_overlap_pills() {
+        let bars = BarSettings::default();
+        let row = actions_row_extent(&bars, 3, |_| 1.0);
+        let at = Instant::now();
+        for edge in Edge::ALL {
+            for slot in [Slot::Add, Slot::Search, Slot::Settings] {
+                let text = slot_tooltip(Some((slot, at)), at + TOOLTIP_DELAY).unwrap();
+                let label = chip_paragraph(text, None, Color::TRANSPARENT).min_bounds();
+                let chip_thickness = edge.thickness(label) + 2.0 * edge.thickness(CHIP_PADDING);
+                // A normal wide window, and one too thin for the chip past
+                // the row (whose extent includes the hover pad).
+                let tight = row - ACTIONS_HOVER_PAD + chip_thickness;
+                for thickness in [500.0, tight] {
+                    let window = Rectangle::new(Point::ORIGIN, edge.size(900.0, thickness));
+                    let widget = shaped(window, edge, |b| LocalRect {
+                        thickness: row,
+                        ..b
+                    });
+                    let strip = compute_layout(
+                        LayoutInput {
+                            count: 3,
+                            bounds: widget,
+                            scroll_offset: 0.0,
+                            bars: &bars,
+                            actions_expanded: true,
+                            actions_progress: 1.0,
+                            collapse: None,
+                            edge,
+                        },
+                        |_| 1.0,
+                    );
+                    let pills = [strip.add_button, strip.search_button, strip.settings_button];
+                    let pill = match slot {
+                        Slot::Add => strip.add_button,
+                        Slot::Search => strip.search_button,
+                        _ => strip.settings_button,
+                    };
+                    let chip = slot_tooltip_frame(&strip, window, pill, label);
+                    let case = format!("{edge:?} {thickness} {slot:?}: {chip:?}");
+                    for other in pills {
+                        assert!(!overlaps(chip, other), "{case} covers pill {other:?}");
+                    }
+                    for bar in &strip.bars {
+                        assert!(!overlaps(chip, *bar), "{case} covers bar {bar:?}");
+                    }
+                    assert!(
+                        chip.x >= window.x - 0.01
+                            && chip.y >= window.y - 0.01
+                            && chip.x + chip.width <= window.x + window.width + 0.01
+                            && chip.y + chip.height <= window.y + window.height + 0.01,
+                        "{case} leaves the window"
+                    );
+                    // With room, centred on its own pill past the row.
+                    let centred =
+                        (along_center(chip, edge) - along_center(pill, edge)).abs() < 0.01;
+                    assert_eq!(centred, thickness == 500.0, "{case}");
+                }
+            }
+        }
     }
 
     #[test]
