@@ -10,6 +10,47 @@ pub fn enforce_single_instance() {
 #[cfg(not(target_os = "windows"))]
 pub fn enforce_single_instance() {}
 
+/// Where notes, settings and images live. A `notes.json` or `settings.json`
+/// next to the executable keeps it portable; otherwise the per-user app-data
+/// folder, falling back to the executable's folder if that can't be made.
+pub fn data_dir() -> std::path::PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    choose_data_dir(&exe_dir, app_data_dir_from(|key| std::env::var_os(key)))
+}
+
+fn choose_data_dir(
+    exe_dir: &std::path::Path,
+    app_data: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    let portable = ["notes.json", "settings.json"]
+        .iter()
+        .any(|file| exe_dir.join(file).exists());
+    match app_data {
+        Some(dir) if !portable && std::fs::create_dir_all(&dir).is_ok() => dir,
+        _ => exe_dir.to_path_buf(),
+    }
+}
+
+/// The per-user app-data folder for this platform, read from `env`.
+fn app_data_dir_from(
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if cfg!(target_os = "macos") {
+        Some(PathBuf::from(env("HOME")?).join("Library/Application Support/Snap Notes"))
+    } else if cfg!(windows) {
+        Some(PathBuf::from(env("APPDATA")?).join("Snap Notes"))
+    } else {
+        let base = env("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
+        Some(base.join("snap-notes"))
+    }
+}
+
 /// Picks a renderer setup that can draw a transparent window. On Windows only
 /// DX12 with a DirectComposition swapchain can; the default HWND swapchain and
 /// Vulkan paint the transparent parts black. Explicit settings in the
@@ -360,5 +401,83 @@ mod tests {
 
         // SAFETY: the window was created above on this thread.
         unsafe { DestroyWindow(hwnd) };
+    }
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn portable_files_next_to_the_exe_win() {
+        let exe = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(exe.path().join("notes.json"), "[]").unwrap();
+        let dir = choose_data_dir(exe.path(), Some(home.path().join("Snap Notes")));
+        assert_eq!(dir, exe.path());
+    }
+
+    #[test]
+    fn settings_alone_also_marks_a_portable_install() {
+        let exe = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(exe.path().join("settings.json"), "{}").unwrap();
+        let dir = choose_data_dir(exe.path(), Some(home.path().join("Snap Notes")));
+        assert_eq!(dir, exe.path());
+    }
+
+    #[test]
+    fn fresh_install_uses_the_app_data_folder_and_creates_it() {
+        let exe = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let app_data = home.path().join("Snap Notes");
+        let dir = choose_data_dir(exe.path(), Some(app_data.clone()));
+        assert_eq!(dir, app_data);
+        assert!(app_data.is_dir());
+    }
+
+    #[test]
+    fn without_an_app_data_folder_falls_back_to_the_exe() {
+        let exe = tempfile::tempdir().unwrap();
+        assert_eq!(choose_data_dir(exe.path(), None), exe.path());
+    }
+
+    #[test]
+    fn app_data_folder_per_platform() {
+        let env = |key: &str| match key {
+            "HOME" => Some("/home/u".into()),
+            "APPDATA" => Some("C:\\Users\\u\\AppData\\Roaming".into()),
+            _ => None,
+        };
+        let dir = app_data_dir_from(env).unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                dir,
+                PathBuf::from("/home/u/Library/Application Support/Snap Notes")
+            );
+        } else if cfg!(windows) {
+            assert_eq!(
+                dir,
+                PathBuf::from("C:\\Users\\u\\AppData\\Roaming").join("Snap Notes")
+            );
+        } else {
+            assert_eq!(dir, PathBuf::from("/home/u/.local/share/snap-notes"));
+        }
+    }
+
+    #[test]
+    fn xdg_data_home_wins_on_linux() {
+        let env = |key: &str| match key {
+            "HOME" => Some("/home/u".into()),
+            "XDG_DATA_HOME" => Some("/data".into()),
+            _ => None,
+        };
+        if !cfg!(any(windows, target_os = "macos")) {
+            assert_eq!(
+                app_data_dir_from(env).unwrap(),
+                PathBuf::from("/data/snap-notes")
+            );
+        }
     }
 }

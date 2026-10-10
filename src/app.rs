@@ -711,15 +711,6 @@ pub struct DragState {
     pub current_y: f32,
 }
 
-/// Notes and settings live next to the executable (portable app).
-fn data_dir() -> PathBuf {
-    std::env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .to_path_buf()
-}
-
 /// Seeds a fresh store with template notes and deletes images no note uses.
 /// If the notes file exists but could not be loaded, neither happens: the
 /// file is not overwritten and its images are kept.
@@ -739,12 +730,12 @@ fn prepare_store(store: &mut NoteStore, palette: &[NoteColor]) {
 
 impl App {
     pub fn boot() -> (Self, Task<Message>) {
-        let settings = SettingsStore::load(data_dir().join("settings.json"));
+        let settings = SettingsStore::load(platform::data_dir().join("settings.json"));
         // Hide the Dock icon as early as possible so it barely flashes.
         if !settings.settings().app.show_dock_icon {
             platform::set_dock_policy(false);
         }
-        let mut store = NoteStore::load(data_dir().join("notes.json"));
+        let mut store = NoteStore::load(platform::data_dir().join("notes.json"));
         prepare_store(&mut store, &settings.settings().palette);
         (
             Self::new(store, settings),
@@ -874,7 +865,7 @@ impl App {
     /// The screen edge saved in the settings, for the window's first
     /// placement before the app boots.
     pub fn saved_edge() -> Edge {
-        SettingsStore::load(data_dir().join("settings.json"))
+        SettingsStore::load(platform::data_dir().join("settings.json"))
             .settings()
             .window
             .edge
