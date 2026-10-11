@@ -463,6 +463,19 @@ fn palette_section<'a>(
     col.into()
 }
 
+/// Ink strength of the line between settings sections.
+const DIVIDER_INK: f32 = 0.08;
+
+/// A subtle hairline between two settings sections.
+fn section_divider<'a>(theme: theme::Theme, a: f32) -> Element<'a, Message> {
+    container(Space::new().width(Fill).height(1))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(theme.ink(DIVIDER_INK * a).into()),
+            ..Default::default()
+        })
+        .into()
+}
+
 /// The tabs under the card's title, splitting its width: the active one in
 /// full ink over a solid underline, the others muted over a faint one.
 fn tab_bar<'a>(active: SettingsTab, theme: theme::Theme, a: f32) -> Element<'a, Message> {
@@ -576,6 +589,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
             hotkey_recording,
             hotkey_hint,
         );
+        let mut first = true;
         for group in SettingsGroup::ALL.into_iter().filter(|g| g.tab() == tab) {
             let section = match group {
                 // Only macOS and Windows have the menu bar / tray icon.
@@ -616,6 +630,10 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
                     section.into()
                 }
             };
+            if !first {
+                body = body.push(section_divider(theme, a));
+            }
+            first = false;
             body = body.push(section);
         }
 
