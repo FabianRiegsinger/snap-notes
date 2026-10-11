@@ -44,29 +44,7 @@ impl App {
             }
             Message::ReminderPickerDone => {
                 self.commit_title();
-                let Some(draft) = self.reminder_picker.take() else {
-                    return Task::none();
-                };
-                let Some(at) = draft.at() else {
-                    return Task::none();
-                };
-                let Some(id) = self.active_note else {
-                    return Task::none();
-                };
-                let title = self
-                    .store
-                    .notes()
-                    .iter()
-                    .find(|n| n.id == id)
-                    .map(|n| reminder::with_reminder(&n.title, at))
-                    .unwrap_or_else(|| reminder::with_reminder("", at));
-                if let Some(note) = self.store.note_mut(id) {
-                    reminder::retitle(note, title, chrono::Local::now());
-                    note.reminder_fired = None;
-                    note.updated_at = chrono::Utc::now();
-                }
-                self.pulsing.remove(&id);
-                self.store.mark_dirty();
+                self.apply_reminder_picker();
             }
             Message::ReminderPickerClear => {
                 self.commit_title();
@@ -91,32 +69,65 @@ impl App {
                 self.store.mark_dirty();
             }
             Message::ReminderToCalendar => {
-                self.commit_title();
-                let Some((note, at)) = self.active_reminder() else {
+                let Some((note, at)) = self.share_reminder() else {
                     return Task::none();
                 };
-                self.reminder_picker = None;
-                let dir = std::env::temp_dir();
+                let dir = std::env::temp_dir().join("snap-notes");
                 match crate::ics::calendar_file(&dir, &note, at, chrono::Utc::now()) {
-                    Ok(path) => open_external(&path.to_string_lossy()),
+                    Ok(path) => self.open_external(&path.to_string_lossy()),
                     Err(e) => eprintln!("could not write the calendar file: {e}"),
                 }
             }
             Message::ReminderByEmail => {
-                self.commit_title();
-                let Some((note, at)) = self.active_reminder() else {
+                let Some((note, at)) = self.share_reminder() else {
                     return Task::none();
                 };
-                self.reminder_picker = None;
-                open_external(&crate::share::mailto(&note, &reminder::export_label(at)));
+                self.open_external(&crate::share::mailto(&note, &reminder::export_label(at)));
             }
             _ => unreachable!("not a reminders message"),
         }
         Task::none()
     }
 
-    /// The active note and its reminder time, if it has one.
-    fn active_reminder(&self) -> Option<(crate::note::Note, chrono::DateTime<chrono::Local>)> {
+    /// Hands a file or link to the system's default app. Tests only record
+    /// it.
+    fn open_external(&mut self, target: &str) {
+        #[cfg(not(test))]
+        platform::open_url(target);
+        #[cfg(test)]
+        self.opened.push(target.to_string());
+    }
+
+    /// Closes the reminder picker, setting the active note's reminder to
+    /// the picked time (as Done does).
+    fn apply_reminder_picker(&mut self) {
+        let Some(draft) = self.reminder_picker.take() else {
+            return;
+        };
+        let (Some(at), Some(id)) = (draft.at(), self.active_note) else {
+            return;
+        };
+        let title = self
+            .store
+            .notes()
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| reminder::with_reminder(&n.title, at))
+            .unwrap_or_else(|| reminder::with_reminder("", at));
+        if let Some(note) = self.store.note_mut(id) {
+            reminder::retitle(note, title, chrono::Local::now());
+            note.reminder_fired = None;
+            note.updated_at = chrono::Utc::now();
+        }
+        self.pulsing.remove(&id);
+        self.store.mark_dirty();
+    }
+
+    /// For the picker's share buttons: commits the title and the picked
+    /// time, then returns the active note and its reminder time, if any.
+    fn share_reminder(&mut self) -> Option<(crate::note::Note, chrono::DateTime<chrono::Local>)> {
+        self.commit_title();
+        self.apply_reminder_picker();
         let id = self.active_note?;
         let note = self.store.notes().iter().find(|n| n.id == id)?;
         Some((note.clone(), reminder::at(note)?))
@@ -309,12 +320,4 @@ impl App {
             *from != 0.0 && since.elapsed().as_secs_f32() < JUMP_SETTLE_SECS
         })
     }
-}
-
-/// Hands a file or link to the system's default app. Tests never open one.
-fn open_external(target: &str) {
-    #[cfg(not(test))]
-    platform::open_url(target);
-    #[cfg(test)]
-    let _ = target;
 }

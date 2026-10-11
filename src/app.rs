@@ -541,6 +541,9 @@ pub struct App {
     text_color_picker_open: bool,
     /// Calendar draft while the reminder picker bubble is open.
     reminder_picker: Option<ReminderDraft>,
+    /// Files and links handed to the system's default app (tests only).
+    #[cfg(test)]
+    opened: Vec<String>,
     note_hovered: bool,
     drag: Option<DragState>,
     scroll_offset: f32,
@@ -801,6 +804,8 @@ impl App {
             color_bubble_rect: None,
             text_color_picker_open: false,
             reminder_picker: None,
+            #[cfg(test)]
+            opened: Vec::new(),
             note_hovered: false,
             drag: None,
             scroll_offset: 0.0,

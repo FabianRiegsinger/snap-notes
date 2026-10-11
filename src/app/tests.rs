@@ -3690,9 +3690,40 @@ fn reminder_picker_done_writes_absolute_tag() {
     assert!(note.reminder_set_at.is_some());
 }
 
-/// The calendar file the app writes for note `id`.
-fn calendar_path(id: Uuid) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("snap-notes-{id}.ics"))
+/// The calendar file the app writes for note `id`; removed when dropped,
+/// so a failed assert leaves nothing behind.
+struct CalendarFile(std::path::PathBuf);
+
+impl CalendarFile {
+    fn of(id: Uuid) -> Self {
+        Self(
+            std::env::temp_dir()
+                .join("snap-notes")
+                .join(format!("snap-notes-{id}.ics")),
+        )
+    }
+
+    fn read(&self) -> String {
+        std::fs::read_to_string(&self.0).unwrap()
+    }
+}
+
+impl Drop for CalendarFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// `at` as an iCalendar UTC time.
+fn ics_time(at: chrono::DateTime<chrono::Local>) -> String {
+    at.with_timezone(&chrono::Utc)
+        .format("%Y%m%dT%H%M%SZ")
+        .to_string()
+}
+
+fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<chrono::Local> {
+    use chrono::TimeZone;
+    chrono::Local.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
 }
 
 #[test]
@@ -3700,46 +3731,87 @@ fn reminder_to_calendar_writes_the_event_and_closes_the_picker() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_note(&dir, "Buy **milk**");
     let id = app.store.notes()[0].id;
+    let file = CalendarFile::of(id);
     let _ = app.update(Message::TitleEdited("Call @2026-11-03 16:45".into()));
     let _ = app.update(Message::OpenReminderPicker);
     assert!(app.reminder_picker.is_some());
     let _ = app.update(Message::ReminderToCalendar);
     assert!(app.reminder_picker.is_none());
-    let path = calendar_path(id);
-    let ics = std::fs::read_to_string(&path).unwrap();
-    let _ = std::fs::remove_file(&path);
+    let ics = file.read();
     assert!(ics.contains(&format!("UID:{id}@snap-notes\r\n")), "{ics}");
     assert!(ics.contains("SUMMARY:Call\r\n"), "{ics}");
     assert!(ics.contains("DESCRIPTION:Buy milk\r\n"), "{ics}");
+    assert_eq!(app.opened, [file.0.to_string_lossy().to_string()]);
     // The title edit was committed first.
     assert_eq!(app.store.notes()[0].title, "Call @2026-11-03 16:45");
 }
 
 #[test]
-fn reminder_by_email_closes_the_picker() {
+fn calendar_uses_the_picker_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "text");
+    let file = CalendarFile::of(app.store.notes()[0].id);
+    let _ = app.update(Message::TitleEdited("Call @2026-11-03 16:45".into()));
+    let _ = app.update(Message::OpenReminderPicker);
+    let _ = app.update(Message::ReminderPickerHour(1));
+    let _ = app.update(Message::ReminderToCalendar);
+    let start = format!("DTSTART:{}\r\n", ics_time(local(2026, 11, 3, 17, 45)));
+    let ics = file.read();
+    assert!(ics.contains(&start), "{ics}");
+    let note = &app.store.notes()[0];
+    assert_eq!(note.title, "Call @2026-11-03 17:45");
+    assert_eq!(crate::reminder::at(note), Some(local(2026, 11, 3, 17, 45)));
+    assert!(app.reminder_picker.is_none());
+}
+
+#[test]
+fn email_uses_the_picker_time() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_note(&dir, "text");
     let _ = app.update(Message::TitleEdited("Call @2026-11-03 16:45".into()));
     let _ = app.update(Message::OpenReminderPicker);
+    let _ = app.update(Message::ReminderPickerHour(1));
     let _ = app.update(Message::ReminderByEmail);
     assert!(app.reminder_picker.is_none());
-    assert_eq!(app.store.notes()[0].title, "Call @2026-11-03 16:45");
+    assert_eq!(app.store.notes()[0].title, "Call @2026-11-03 17:45");
+    assert_eq!(app.opened.len(), 1);
+    assert!(
+        app.opened[0]
+            .starts_with("mailto:?subject=Call&body=Reminder%3A%20Tue%203%20Nov%2017%3A45"),
+        "{}",
+        app.opened[0]
+    );
 }
 
 #[test]
-fn sharing_without_a_reminder_does_nothing() {
+fn calendar_sets_a_new_reminder_from_the_picker() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_with_note(&dir, "text");
-    let id = app.store.notes()[0].id;
+    let file = CalendarFile::of(app.store.notes()[0].id);
     let _ = app.update(Message::TitleEdited("Call".into()));
     let _ = app.update(Message::OpenReminderPicker);
+    let draft = app.reminder_picker.clone().unwrap();
+    let _ = app.update(Message::ReminderToCalendar);
+    let at = draft.at().unwrap();
+    let note = &app.store.notes()[0];
+    assert_eq!(crate::reminder::at(note), Some(at));
+    assert!(file
+        .read()
+        .contains(&format!("DTSTART:{}\r\n", ics_time(at))));
+    assert!(app.reminder_picker.is_none());
+}
+
+#[test]
+fn sharing_without_a_reminder_or_picker_does_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "text");
+    let file = CalendarFile::of(app.store.notes()[0].id);
+    let _ = app.update(Message::TitleEdited("Call".into()));
     let _ = app.update(Message::ReminderToCalendar);
     let _ = app.update(Message::ReminderByEmail);
-    assert!(!calendar_path(id).exists());
-    assert!(
-        app.reminder_picker.is_some(),
-        "the picker stays for setting one"
-    );
+    assert!(!file.0.exists());
+    assert!(app.opened.is_empty());
+    assert_eq!(app.store.notes()[0].title, "Call");
 }
 
 #[test]

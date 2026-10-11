@@ -48,6 +48,8 @@ pub fn event(note: &Note, due: DateTime<Local>, now: DateTime<Utc>) -> String {
         format!("DTSTAMP:{}", stamp(now)),
         format!("DTSTART:{}", stamp(start)),
         format!("DTEND:{}", stamp(start + Duration::minutes(EVENT_MINUTES))),
+        // Grows with every export, so calendars take a re-import as an update.
+        format!("SEQUENCE:{}", now.timestamp() / 60),
         format!("SUMMARY:{summary}"),
     ];
     if !description.is_empty() {
@@ -97,14 +99,15 @@ fn escape(text: &str) -> String {
     out
 }
 
-/// Writes the note's event to `<dir>/snap-notes-<id>.ics` (replacing an
-/// older one) and returns its path.
+/// Writes the note's event to `<dir>/snap-notes-<id>.ics` (creating `dir`,
+/// replacing an older file) and returns its path.
 pub fn calendar_file(
     dir: &Path,
     note: &Note,
     due: DateTime<Local>,
     now: DateTime<Utc>,
 ) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
     let path = dir.join(format!("snap-notes-{}.ics", note.id));
     crate::export::write(&path, &event(note, due, now))?;
     Ok(path)
@@ -165,6 +168,7 @@ mod tests {
             "DTSTAMP:20261011T090507Z".into(),
             "DTSTART:20261015T143000Z".into(),
             "DTEND:20261015T144500Z".into(),
+            format!("SEQUENCE:{}", now().timestamp() / 60),
             "SUMMARY:Call".into(),
             "DESCRIPTION:body".into(),
             "BEGIN:VALARM".into(),
@@ -217,6 +221,16 @@ mod tests {
         assert_eq!(value(&lines, "DESCRIPTION"), Some(body.as_str()));
         assert_eq!(value(&lines, "SUMMARY"), Some("ü".repeat(60).as_str()));
         assert!(ics.contains("\r\n "), "something folded");
+    }
+
+    #[test]
+    fn sequence_grows_with_time() {
+        let n = note("Call", "");
+        let seq = |at| {
+            let lines = unfolded(&event(&n, due(), at));
+            value(&lines, "SEQUENCE").unwrap().parse::<i64>().unwrap()
+        };
+        assert!(seq(now() + Duration::minutes(1)) > seq(now()));
     }
 
     #[test]
@@ -274,7 +288,12 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert_eq!(written, event(&n, due(), now()));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-        let missing = dir.path().join("missing");
-        assert!(calendar_file(&missing, &n, due(), now()).is_err());
+        // A missing folder is created; a file in its place fails.
+        let nested = dir.path().join("snap-notes");
+        let path = calendar_file(&nested, &n, due(), now()).unwrap();
+        assert_eq!(path.parent(), Some(nested.as_path()));
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "").unwrap();
+        assert!(calendar_file(&blocked, &n, due(), now()).is_err());
     }
 }

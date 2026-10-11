@@ -114,7 +114,7 @@ pub fn view<'a>(
     actions = actions.push(Space::new().width(Length::Fill));
     actions = actions.push(action_btn("Done", Message::ReminderPickerDone, true, theme));
 
-    let share = share_actions(can_clear);
+    let share = share_actions();
     let share = (!share.is_empty()).then(|| {
         row(share
             .into_iter()
@@ -130,11 +130,8 @@ pub fn view<'a>(
         .into()
 }
 
-/// The buttons that hand a set reminder to other apps; none without one.
-pub fn share_actions(has_reminder: bool) -> Vec<(&'static str, Message)> {
-    if !has_reminder {
-        return Vec::new();
-    }
+/// The buttons that hand the picked reminder to other apps.
+pub fn share_actions() -> Vec<(&'static str, Message)> {
     vec![
         ("Add to calendar", Message::ReminderToCalendar),
         ("Email", Message::ReminderByEmail),
@@ -293,11 +290,10 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
-    fn share_actions_only_with_a_reminder() {
-        assert!(share_actions(false).is_empty());
-        let labels: Vec<_> = share_actions(true).into_iter().map(|(l, _)| l).collect();
+    fn share_actions_always_offered() {
+        let labels: Vec<_> = share_actions().into_iter().map(|(l, _)| l).collect();
         assert_eq!(labels, ["Add to calendar", "Email"]);
-        let messages: Vec<_> = share_actions(true).into_iter().map(|(_, m)| m).collect();
+        let messages: Vec<_> = share_actions().into_iter().map(|(_, m)| m).collect();
         assert!(matches!(
             messages[..],
             [Message::ReminderToCalendar, Message::ReminderByEmail]
