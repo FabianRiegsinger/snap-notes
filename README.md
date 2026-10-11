@@ -13,7 +13,7 @@ Snap Notes turns sticky notes into slim colored bars along the edge of your scre
 - **Always there, never in the way.** About 6 px per note, always on top. Turn on auto-hide and the strip disappears completely until you touch the screen edge.
 - **Capture in a second.** Cmd/Ctrl+Shift+Space creates a note from any app. Drop a file on the strip, or make a note straight from your clipboard.
 - **Peek before you open.** Rest on a bar to read the note without leaving what you're doing.
-- **Never miss a thing.** Write `@15:00` or `@friday` in a title, or pick a date in the calendar. When it's due you get a notification and the note's bar jumps to get your attention.
+- **Never miss a thing.** Write `@15:00` or `@friday` in a title, or pick a date in the calendar. When it's due you get a notification and the note's bar jumps to get your attention, or send it to your calendar or mail.
 - **Notes that look good.** Real formatting: bold, italic, headings, checklists, links, images, colors and highlights. Checklist bars fill up as you tick items off.
 - **Stay organized.** Color-code notes, pin important ones to the top, drag bars onto each other to stack related notes, and search everything as you type.
 - **Your screen, your way.** Dock the strip to the right, left or top edge. It adapts to light and dark mode on its own, and every look and motion detail is adjustable.
