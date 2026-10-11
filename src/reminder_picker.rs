@@ -114,10 +114,31 @@ pub fn view<'a>(
     actions = actions.push(Space::new().width(Length::Fill));
     actions = actions.push(action_btn("Done", Message::ReminderPickerDone, true, theme));
 
-    column![nav, weekdays, grid, time_row, actions]
+    let share = share_actions(can_clear);
+    let share = (!share.is_empty()).then(|| {
+        row(share
+            .into_iter()
+            .map(|(label, message)| action_btn(label, message, false, theme)))
+        .spacing(space(2))
+    });
+
+    column![nav, weekdays, grid, time_row]
+        .push(share)
+        .push(actions)
         .spacing(space(2))
         .width(WIDTH)
         .into()
+}
+
+/// The buttons that hand a set reminder to other apps; none without one.
+pub fn share_actions(has_reminder: bool) -> Vec<(&'static str, Message)> {
+    if !has_reminder {
+        return Vec::new();
+    }
+    vec![
+        ("Add to calendar", Message::ReminderToCalendar),
+        ("Email", Message::ReminderByEmail),
+    ]
 }
 
 fn month_grid<'a>(draft: &'a ReminderDraft, theme: theme::Theme) -> Element<'a, Message> {
@@ -270,6 +291,18 @@ fn last_day_of_month(year: i32, month: u32) -> u32 {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn share_actions_only_with_a_reminder() {
+        assert!(share_actions(false).is_empty());
+        let labels: Vec<_> = share_actions(true).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(labels, ["Add to calendar", "Email"]);
+        let messages: Vec<_> = share_actions(true).into_iter().map(|(_, m)| m).collect();
+        assert!(matches!(
+            messages[..],
+            [Message::ReminderToCalendar, Message::ReminderByEmail]
+        ));
+    }
 
     #[test]
     fn adjust_time_wraps_within_day() {

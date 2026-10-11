@@ -90,9 +90,36 @@ impl App {
                 self.pulsing.remove(&id);
                 self.store.mark_dirty();
             }
+            Message::ReminderToCalendar => {
+                self.commit_title();
+                let Some((note, at)) = self.active_reminder() else {
+                    return Task::none();
+                };
+                self.reminder_picker = None;
+                let dir = std::env::temp_dir();
+                match crate::ics::calendar_file(&dir, &note, at, chrono::Utc::now()) {
+                    Ok(path) => open_external(&path.to_string_lossy()),
+                    Err(e) => eprintln!("could not write the calendar file: {e}"),
+                }
+            }
+            Message::ReminderByEmail => {
+                self.commit_title();
+                let Some((note, at)) = self.active_reminder() else {
+                    return Task::none();
+                };
+                self.reminder_picker = None;
+                open_external(&crate::share::mailto(&note, &reminder::export_label(at)));
+            }
             _ => unreachable!("not a reminders message"),
         }
         Task::none()
+    }
+
+    /// The active note and its reminder time, if it has one.
+    fn active_reminder(&self) -> Option<(crate::note::Note, chrono::DateTime<chrono::Local>)> {
+        let id = self.active_note?;
+        let note = self.store.notes().iter().find(|n| n.id == id)?;
+        Some((note.clone(), reminder::at(note)?))
     }
 
     /// Opens the reminder calendar for the active note, prefilling from its
@@ -282,4 +309,12 @@ impl App {
             *from != 0.0 && since.elapsed().as_secs_f32() < JUMP_SETTLE_SECS
         })
     }
+}
+
+/// Hands a file or link to the system's default app. Tests never open one.
+fn open_external(target: &str) {
+    #[cfg(not(test))]
+    platform::open_url(target);
+    #[cfg(test)]
+    let _ = target;
 }

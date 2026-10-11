@@ -380,6 +380,10 @@ pub enum Message {
     ReminderPickerMinute(i32),
     ReminderPickerDone,
     ReminderPickerClear,
+    /// Picker: open the reminder as an event in the calendar app.
+    ReminderToCalendar,
+    /// Picker: start an email with the note and its reminder.
+    ReminderByEmail,
     DragStart(usize, f32),
     DragMove(f32),
     DragEnd,
@@ -998,6 +1002,8 @@ impl App {
             | Message::ReminderPickerMinute(..)
             | Message::ReminderPickerDone
             | Message::ReminderPickerClear
+            | Message::ReminderToCalendar
+            | Message::ReminderByEmail
             | Message::ReminderTick => self.handle_reminders(message),
             Message::Key(..)
             | Message::CursorMoved(..)

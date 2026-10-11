@@ -3690,6 +3690,58 @@ fn reminder_picker_done_writes_absolute_tag() {
     assert!(note.reminder_set_at.is_some());
 }
 
+/// The calendar file the app writes for note `id`.
+fn calendar_path(id: Uuid) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("snap-notes-{id}.ics"))
+}
+
+#[test]
+fn reminder_to_calendar_writes_the_event_and_closes_the_picker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "Buy **milk**");
+    let id = app.store.notes()[0].id;
+    let _ = app.update(Message::TitleEdited("Call @2026-11-03 16:45".into()));
+    let _ = app.update(Message::OpenReminderPicker);
+    assert!(app.reminder_picker.is_some());
+    let _ = app.update(Message::ReminderToCalendar);
+    assert!(app.reminder_picker.is_none());
+    let path = calendar_path(id);
+    let ics = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert!(ics.contains(&format!("UID:{id}@snap-notes\r\n")), "{ics}");
+    assert!(ics.contains("SUMMARY:Call\r\n"), "{ics}");
+    assert!(ics.contains("DESCRIPTION:Buy milk\r\n"), "{ics}");
+    // The title edit was committed first.
+    assert_eq!(app.store.notes()[0].title, "Call @2026-11-03 16:45");
+}
+
+#[test]
+fn reminder_by_email_closes_the_picker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "text");
+    let _ = app.update(Message::TitleEdited("Call @2026-11-03 16:45".into()));
+    let _ = app.update(Message::OpenReminderPicker);
+    let _ = app.update(Message::ReminderByEmail);
+    assert!(app.reminder_picker.is_none());
+    assert_eq!(app.store.notes()[0].title, "Call @2026-11-03 16:45");
+}
+
+#[test]
+fn sharing_without_a_reminder_does_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_note(&dir, "text");
+    let id = app.store.notes()[0].id;
+    let _ = app.update(Message::TitleEdited("Call".into()));
+    let _ = app.update(Message::OpenReminderPicker);
+    let _ = app.update(Message::ReminderToCalendar);
+    let _ = app.update(Message::ReminderByEmail);
+    assert!(!calendar_path(id).exists());
+    assert!(
+        app.reminder_picker.is_some(),
+        "the picker stays for setting one"
+    );
+}
+
 #[test]
 fn reminder_picker_clear_strips_tag_and_dismiss_keeps_title() {
     let dir = tempfile::tempdir().unwrap();
