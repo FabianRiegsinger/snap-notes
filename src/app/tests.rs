@@ -5387,9 +5387,9 @@ fn a_note_key_opens_its_bar_and_never_closes_it() {
 fn choosing_note_keys_saves_them() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app_in(&dir);
-    let _ = app.update(Message::NoteKeysChosen(crate::hotkey::NoteKeys::AltShift));
+    let _ = app.update(Message::NoteKeysChosen(crate::hotkey::NoteKeys::CtrlAlt));
     assert_eq!(
         app.settings.settings().window.note_keys,
-        crate::hotkey::NoteKeys::AltShift
+        crate::hotkey::NoteKeys::CtrlAlt
     );
 }

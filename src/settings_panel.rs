@@ -274,7 +274,7 @@ fn edge_row<'a>(chosen: Edge, theme: theme::Theme, a: f32) -> Element<'a, Messag
 fn note_keys_row<'a>(chosen: NoteKeys, theme: theme::Theme, a: f32) -> Element<'a, Message> {
     let mac = cfg!(target_os = "macos");
     let mut buttons = row![].spacing(space(1));
-    for keys in NoteKeys::ALL {
+    for keys in NoteKeys::offered() {
         buttons = buttons.push(segment_button(
             keys.label(mac),
             keys == chosen,

@@ -280,6 +280,14 @@ impl NoteKeys {
         NoteKeys::Off,
     ];
 
+    /// The choices Settings offers. macOS never delivers a hotkey held
+    /// with only Option+Shift (it registers but stays silent), so not there.
+    pub fn offered() -> impl Iterator<Item = NoteKeys> {
+        NoteKeys::ALL
+            .into_iter()
+            .filter(|&k| !(cfg!(target_os = "macos") && k == NoteKeys::AltShift))
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             NoteKeys::CtrlShift => "Ctrl+Shift",
@@ -289,10 +297,10 @@ impl NoteKeys {
         }
     }
 
-    /// The keys saved as `s`; anything unknown is the default.
+    /// The keys saved as `s`; anything unknown or not offered here is the
+    /// default.
     pub fn parse(s: &str) -> NoteKeys {
-        NoteKeys::ALL
-            .into_iter()
+        NoteKeys::offered()
             .find(|k| k.as_str().eq_ignore_ascii_case(s))
             .unwrap_or_default()
     }
@@ -528,10 +536,15 @@ mod tests {
 
     #[test]
     fn note_keys_round_trip_and_default_to_ctrl_shift() {
-        for keys in NoteKeys::ALL {
+        for keys in NoteKeys::offered() {
             assert_eq!(NoteKeys::parse(keys.as_str()), keys);
         }
-        assert_eq!(NoteKeys::parse("alt+shift"), NoteKeys::AltShift);
+        let alt_shift = if cfg!(target_os = "macos") {
+            NoteKeys::CtrlShift
+        } else {
+            NoteKeys::AltShift
+        };
+        assert_eq!(NoteKeys::parse("alt+shift"), alt_shift);
         assert_eq!(NoteKeys::parse("bogus"), NoteKeys::CtrlShift);
     }
 
