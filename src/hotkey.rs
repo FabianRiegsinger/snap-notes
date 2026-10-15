@@ -4,6 +4,7 @@
 
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use std::cell::OnceCell;
 use std::fmt;
 
 /// Keys a combo may end in besides letters and digits, by their W3C code
@@ -208,11 +209,34 @@ impl fmt::Display for Combo {
     }
 }
 
+thread_local! {
+    /// One manager for every hotkey: on macOS a second one can't install
+    /// its event handler, so it fails with a stale OS error.
+    static SHARED: OnceCell<GlobalHotKeyManager> = const { OnceCell::new() };
+}
+
+/// Runs `f` with the shared manager, made on first use.
+fn with_manager<T>(f: impl FnOnce(&GlobalHotKeyManager) -> T) -> Result<T, String> {
+    SHARED.with(|cell| {
+        if cell.get().is_none() {
+            let manager = GlobalHotKeyManager::new().map_err(|e| e.to_string())?;
+            let _ = cell.set(manager);
+        }
+        Ok(f(cell.get().expect("set above")))
+    })
+}
+
 /// The registered hotkey. Dropping it unregisters the hotkey.
 pub struct Manager {
-    _manager: GlobalHotKeyManager,
+    hotkey: HotKey,
     /// The combo it holds.
     pub combo: Combo,
+}
+
+impl Drop for Manager {
+    fn drop(&mut self) {
+        let _ = with_manager(|m| m.unregister(self.hotkey));
+    }
 }
 
 /// Registers `combo`. On failure (another app holds it, or there is no
@@ -228,19 +252,13 @@ pub fn register(combo: &Combo) -> Result<Manager, String> {
         return Err(reason);
     }
     let hotkey = combo.hotkey()?;
-    GlobalHotKeyManager::new()
-        .and_then(|manager| {
-            manager.register(hotkey)?;
-            Ok(manager)
-        })
-        .map(|manager| Manager {
-            _manager: manager,
+    with_manager(|manager| manager.register(hotkey).map_err(|e| e.to_string()))
+        .and_then(|registered| registered)
+        .map(|()| Manager {
+            hotkey,
             combo: combo.clone(),
         })
-        .map_err(|e| {
-            eprintln!("could not register the global hotkey {combo}: {e}");
-            e.to_string()
-        })
+        .inspect_err(|e| eprintln!("could not register the global hotkey {combo}: {e}"))
 }
 
 /// The modifiers held with a digit 1–9 to open the note on that bar,
@@ -302,17 +320,28 @@ impl NoteKeys {
 
 /// The registered note hotkeys; dropping it unregisters them.
 pub struct NoteHotkeys {
-    _manager: GlobalHotKeyManager,
     /// The modifiers they were registered with.
     pub keys: NoteKeys,
-    /// Hotkey id per digit 1–9, `None` where registering failed.
-    ids: Vec<Option<u32>>,
+    /// Hotkey per digit 1–9, `None` where registering failed.
+    hotkeys: Vec<Option<HotKey>>,
 }
 
 impl NoteHotkeys {
     /// The bar (0 for digit 1) the hotkey with `id` opens.
     pub fn slot(&self, id: u32) -> Option<usize> {
-        self.ids.iter().position(|&i| i == Some(id))
+        self.hotkeys
+            .iter()
+            .position(|h| h.is_some_and(|h| h.id() == id))
+    }
+}
+
+impl Drop for NoteHotkeys {
+    fn drop(&mut self) {
+        let _ = with_manager(|m| {
+            for hotkey in self.hotkeys.iter().flatten() {
+                let _ = m.unregister(*hotkey);
+            }
+        });
     }
 }
 
@@ -323,26 +352,22 @@ pub fn register_notes(keys: NoteKeys) -> Result<NoteHotkeys, String> {
     if std::env::var_os("DISPLAY").is_none() {
         return Err("it needs an X11 display".to_string());
     }
-    let manager = GlobalHotKeyManager::new().map_err(|e| e.to_string())?;
-    let ids = keys
-        .combos()
-        .iter()
-        .map(|combo| {
-            let hotkey = combo.hotkey().ok()?;
-            match manager.register(hotkey) {
-                Ok(()) => Some(hotkey.id()),
-                Err(e) => {
-                    eprintln!("could not register the note hotkey {combo}: {e}");
-                    None
+    let hotkeys = with_manager(|manager| {
+        keys.combos()
+            .iter()
+            .map(|combo| {
+                let hotkey = combo.hotkey().ok()?;
+                match manager.register(hotkey) {
+                    Ok(()) => Some(hotkey),
+                    Err(e) => {
+                        eprintln!("could not register the note hotkey {combo}: {e}");
+                        None
+                    }
                 }
-            }
-        })
-        .collect();
-    Ok(NoteHotkeys {
-        _manager: manager,
-        keys,
-        ids,
-    })
+            })
+            .collect()
+    })?;
+    Ok(NoteHotkeys { keys, hotkeys })
 }
 
 /// The id of each hotkey press, pushed as it happens so the app can sleep
