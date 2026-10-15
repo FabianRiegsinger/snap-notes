@@ -590,7 +590,7 @@ pub fn post_it(p: PostIt<'_>) -> Element<'_, Message> {
                             controls,
                         )
                     },
-                    header_button(Icon::Close, Message::ClosePanel, false, theme, controls),
+                    header_button(Icon::Close, Message::CloseFront, false, theme, controls),
                 ]
                 .spacing(2)
                 .align_y(iced::Alignment::Center),

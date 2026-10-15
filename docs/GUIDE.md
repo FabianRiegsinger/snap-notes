@@ -34,7 +34,7 @@
 
 ### Notes
 - **Unfold and fold:** a click morphs the bar into a sticky note. Esc, the close button or a click on its bar folds it back. A click outside the notes folds every open note.
-- **Several notes at once:** opening another note doesn't close the open one. The new note unfolds in front, and the others stay open behind it, rendered where they were. A note that would cover one exactly is moved a step down and away from the edge. Click a note behind to bring it to the front, as you left it. Esc folds only the front note, and the next one comes forward. Deleting the front note does the same.
+- **Several notes at once:** opening another note doesn't close the open one. The new note unfolds in front, and the others stay open behind it, rendered where they were. A note that would cover one exactly is moved a step down and away from the edge. Click a note behind to bring it to the front, as you left it. Esc or the close button folds only the front note, and the next one comes forward. Deleting the front note does the same.
 - **Title and body:** each note has a title header and a scrolling body. The scrollbar only appears once the text overflows.
 - **Move it anywhere:** drag the grip at the top. The note reopens where you left it, and double-clicking the grip docks it again.
 - **Resize it:** drag any edge or corner. Each note remembers its own size.

@@ -303,6 +303,9 @@ pub enum Message {
     /// A press on the open note's border starts resizing it.
     ResizeStart(Edges),
     ClosePanel,
+    /// The open note's close button: folds only that note; the notes
+    /// behind stay open.
+    CloseFront,
     /// The open note's trash button: its header asks whether to delete it.
     RequestDelete(Uuid),
     /// "Delete" in the header's or the peek's question: the note folds or
@@ -1008,6 +1011,7 @@ impl App {
             | Message::NoteResetPosition
             | Message::ResizeStart(..)
             | Message::ClosePanel
+            | Message::CloseFront
             | Message::FocusNote(..)
             | Message::RequestDelete(..)
             | Message::ConfirmDelete

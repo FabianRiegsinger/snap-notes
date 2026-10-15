@@ -5318,6 +5318,16 @@ fn clicking_outside_closes_every_open_note() {
 }
 
 #[test]
+fn the_close_button_closes_only_its_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, ids) = two_open(&dir);
+    let _ = app.update(Message::CloseFront);
+    settle(&mut app);
+    assert_eq!(app.active_note, Some(ids[0]));
+    assert!(app.behind.is_empty());
+}
+
+#[test]
 fn deleting_the_front_note_brings_the_one_behind_forward() {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, ids) = two_open(&dir);

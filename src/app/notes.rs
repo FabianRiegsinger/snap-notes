@@ -17,6 +17,7 @@ impl App {
                 | Message::NoteDragStart
                 | Message::ResizeStart(..)
                 | Message::ClosePanel
+                | Message::CloseFront
                 | Message::CopyNote
                 | Message::TogglePin
                 | Message::ToggleColorPicker
@@ -269,6 +270,7 @@ impl App {
                     self.reminder_picker = None;
                 }
             }
+            Message::CloseFront => return self.close_front(),
             Message::RequestDelete(id) => {
                 if self.active_note == Some(id) && self.pending_delete.is_none() {
                     // The question replaces the bubble and the picker, so
