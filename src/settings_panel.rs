@@ -4,6 +4,7 @@
 use crate::app::Message;
 use crate::color_picker::swatch;
 use crate::edge::Edge;
+use crate::hotkey::NoteKeys;
 use crate::icons::{icon, Icon};
 use crate::note_panel::pressable;
 use crate::settings::SettingToggle;
@@ -200,6 +201,9 @@ pub const AUTO_HIDE_LABEL: &str = "Auto-hide";
 /// The Window group's three-way screen edge control.
 pub const SCREEN_EDGE_LABEL: &str = "Screen edge";
 
+/// The Window group's control for the keys that, with 1–9, open a note.
+pub const NOTE_KEYS_LABEL: &str = "Open note 1–9";
+
 /// The Motion group's Jump / Pulse control for fired reminders.
 pub const REMINDER_ALERT_LABEL: &str = "Reminder alert";
 
@@ -257,6 +261,30 @@ fn edge_row<'a>(chosen: Edge, theme: theme::Theme, a: f32) -> Element<'a, Messag
     }
     row![
         text(SCREEN_EDGE_LABEL)
+            .size(TEXT_XS)
+            .color(theme.ink(0.75 * a)),
+        Space::new().width(Fill),
+        buttons,
+    ]
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+/// The Window group's choice of modifiers that open notes 1–9.
+fn note_keys_row<'a>(chosen: NoteKeys, theme: theme::Theme, a: f32) -> Element<'a, Message> {
+    let mac = cfg!(target_os = "macos");
+    let mut buttons = row![].spacing(space(1));
+    for keys in NoteKeys::ALL {
+        buttons = buttons.push(segment_button(
+            keys.label(mac),
+            keys == chosen,
+            Message::NoteKeysChosen(keys),
+            theme,
+            a,
+        ));
+    }
+    row![
+        text(NOTE_KEYS_LABEL)
             .size(TEXT_XS)
             .color(theme.ink(0.75 * a)),
         Space::new().width(Fill),
@@ -626,6 +654,7 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
                             switch(settings.is_on(t), AUTO_HIDE_LABEL, theme, a)
                                 .on_toggle(move |_| Message::SettingToggled(t)),
                         );
+                        section = section.push(note_keys_row(settings.window.note_keys, theme, a));
                     }
                     section.into()
                 }

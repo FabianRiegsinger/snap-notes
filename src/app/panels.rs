@@ -209,6 +209,10 @@ impl App {
                 self.animating |= self.pulse_running();
                 return self.apply_settings();
             }
+            Message::NoteKeysChosen(keys) => {
+                self.settings.settings_mut().window.note_keys = keys;
+                self.sync_note_hotkeys();
+            }
             Message::SettingToggled(toggle) => {
                 self.settings.settings_mut().toggle(toggle);
                 if toggle == SettingToggle::DockIcon {
@@ -241,6 +245,7 @@ impl App {
                     self.sync_hotkey();
                     return self.apply_app_visibility();
                 }
+                self.sync_note_hotkeys();
                 if self.edge() != edge {
                     return self.edge_changed(edge);
                 }

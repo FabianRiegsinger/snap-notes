@@ -53,6 +53,7 @@ impl App {
                 }
             }
             Message::NoteResetPosition => {
+                self.placed = None;
                 if let Some(id) = self.active_note {
                     if let Some(note) = self.store.note_mut(id) {
                         note.position = None;
@@ -252,8 +253,14 @@ impl App {
                     platform::open_url(url);
                 }
             }
+            Message::FocusNote(id) if self.behind.iter().any(|open| open.id == id) => {
+                return self.open_note_id(id);
+            }
+            Message::FocusNote(_) => {}
             Message::ClosePanel => {
                 self.commit_title();
+                // Closes every open note, not just the front one.
+                self.front_only = false;
                 if self.active_note.is_some() {
                     self.morph.close();
                     self.animating = true;
@@ -448,6 +455,7 @@ impl App {
             self.last_deleted = None;
             self.pending_delete = Some(id);
             self.morph.close();
+            self.front_only = true;
             self.animating = true;
         }
     }
@@ -484,7 +492,7 @@ impl App {
         }
 
         if self.active_note == Some(id) && self.morph.is_opening() {
-            return self.update(Message::ClosePanel);
+            return self.close_front();
         }
 
         let switching = self.active_note.is_some_and(|active| active != id);
@@ -495,36 +503,59 @@ impl App {
                 self.finish_note_drag();
             }
             self.finish_note_resize();
+            if self.morph.is_opening() {
+                // Opening another note leaves this one open behind it.
+                self.send_behind();
+            } else if !self.front_only {
+                // Everything is folding away; the notes behind stay closed.
+                self.behind.clear();
+            }
         }
+        self.front_only = false;
         // Starting the collapse may have removed a note, moving this one.
         let Some(index) = self.store.notes().iter().position(|n| n.id == id) else {
             return Task::none();
         };
         let note = &self.store.notes()[index];
+        let fresh = text_editor::Content::with_text(&note.content);
+        let empty = note.content.trim().is_empty();
         self.pulsing.remove(&id);
         if self.jump_settle.is_some_and(|(sid, _, _)| sid == id) {
             self.jump_settle = None;
         }
-        self.editor_content = Some(text_editor::Content::with_text(&note.content));
-        self.history.clear();
         self.rendered_click = None;
-        self.editing = note.content.trim().is_empty();
         self.hide_peek();
         // A note and the panels never show at the same time.
         self.settings_panel.close();
         self.close_search();
         self.close_export();
         self.active_note = Some(id);
-        self.reparse();
         self.color_picker_open = false;
         self.text_color_picker_open = false;
         self.reminder_picker = None;
+        let behind = self.behind.iter().position(|open| open.id == id);
+        if let Some(open) = behind.map(|i| self.behind.remove(i)) {
+            // Back to the front where it was, as it was.
+            self.editor_content = Some(open.content);
+            self.history = open.history;
+            self.editing = false;
+            self.placed = Some(open.rect.position());
+            self.reparse();
+            self.morph.finish_open();
+            return self.dock_window();
+        }
+        self.editor_content = Some(fresh);
+        self.history.clear();
+        self.editing = empty;
+        self.reparse();
         if let Some(bar) = self
             .note_entry(index)
             .and_then(|entry| self.strip_layout().bars.get(entry).copied())
         {
             self.anchor_along = along_center(bar, self.edge());
         }
+        self.placed = None;
+        self.placed = self.cascade();
         if switching {
             self.morph.restart();
         } else {
@@ -532,6 +563,79 @@ impl App {
         }
         self.animating = true;
         self.dock_window()
+    }
+
+    /// Folds the active note away alone; the frontmost note behind it
+    /// becomes active once it has (see `finish_close`).
+    pub(super) fn close_front(&mut self) -> Task<Message> {
+        let task = self.update(Message::ClosePanel);
+        self.front_only = true;
+        task
+    }
+
+    /// Keeps the active note open behind, rendered where it is now, with
+    /// its editor and undo for when it comes back to the front.
+    fn send_behind(&mut self) {
+        let Some(id) = self.active_note else {
+            return;
+        };
+        let Some(content) = self.editor_content.take() else {
+            return;
+        };
+        // The rendered view catches up with what was typed.
+        self.reparse();
+        let rect = self.note_target_rect();
+        self.behind.retain(|open| open.id != id);
+        self.behind.push(OpenNote {
+            id,
+            rect,
+            content,
+            doc: std::mem::replace(&mut self.doc, Doc { blocks: Vec::new() }),
+            broken_images: std::mem::take(&mut self.broken_images),
+            history: std::mem::take(&mut self.history),
+        });
+    }
+
+    /// Where the active note goes when it would hide a note open behind:
+    /// stepped away from the edge until its corner is clear. `None` when it
+    /// already is.
+    fn cascade(&self) -> Option<Point> {
+        const STEP: f32 = 32.0;
+        let taken = |p: Point| {
+            self.behind
+                .iter()
+                .any(|open| open.rect.position().distance(p) < STEP)
+        };
+        let mut at = self.note_target_rect().position();
+        if !taken(at) {
+            return None;
+        }
+        let step = match self.edge() {
+            Edge::Right => Vector::new(-STEP, STEP),
+            Edge::Left | Edge::Top => Vector::new(STEP, STEP),
+        };
+        for _ in 0..self.behind.len() {
+            at += step;
+            if !taken(at) {
+                break;
+            }
+        }
+        Some(at)
+    }
+
+    /// Where a note open behind shows: in place, or folding into its bar
+    /// along with the active note while everything closes.
+    pub(super) fn behind_frame(&self, open: &OpenNote) -> MorphFrame {
+        let progress = if self.morph.is_opening() || self.front_only {
+            1.0
+        } else {
+            self.morph.progress()
+        };
+        let source = self
+            .id_entry(open.id)
+            .and_then(|entry| self.strip_layout().bars.get(entry).copied())
+            .map_or(open.rect, |bar| self.slid(bar));
+        morph_frame(source, open.rect, progress)
     }
 
     /// Gives the open note `color`; it is saved after the usual debounce.
@@ -625,6 +729,15 @@ impl App {
         if self.active_note == Some(id) {
             self.editor_content = Some(text_editor::Content::with_text(&content));
             self.reparse();
+        }
+        // A note open behind shows, and later edits, the new text too.
+        if let Some(i) = self.behind.iter().position(|open| open.id == id) {
+            let (doc, broken) = self.parse_note(&content);
+            let open = &mut self.behind[i];
+            open.content = text_editor::Content::with_text(&content);
+            open.doc = doc;
+            open.broken_images = broken;
+            open.history.clear();
         }
     }
 
@@ -828,9 +941,14 @@ impl App {
         else {
             return;
         };
-        self.doc = rich::parse(&note.content, &self.settings.settings().palette);
-        self.broken_images = self
-            .doc
+        (self.doc, self.broken_images) = self.parse_note(&note.content);
+    }
+
+    /// `content` parsed for the rendered view, and its image references
+    /// that are missing or can't be decoded.
+    fn parse_note(&self, content: &str) -> (Doc, HashSet<String>) {
+        let doc = rich::parse(content, &self.settings.settings().palette);
+        let broken = doc
             .blocks
             .iter()
             .filter_map(|b| match &b.kind {
@@ -840,6 +958,7 @@ impl App {
                 _ => None,
             })
             .collect();
+        (doc, broken)
     }
 
     pub(super) fn finish_close(&mut self) -> Task<Message> {
@@ -848,6 +967,13 @@ impl App {
             self.finish_note_drag();
         }
         self.commit_title();
+        let next = if std::mem::take(&mut self.front_only) {
+            self.behind.pop()
+        } else {
+            self.behind.clear();
+            None
+        };
+        self.placed = None;
         self.active_note = None;
         self.note_hovered = false;
         self.editor_content = None;
@@ -864,7 +990,16 @@ impl App {
             Some(id) => self.start_collapse(id),
             None => Task::none(),
         };
-        Task::batch([collapse, self.dock_window()])
+        // The frontmost note behind comes forward, as it was.
+        let front = match next {
+            Some(open) => {
+                let id = open.id;
+                self.behind.push(open);
+                self.open_note_id(id)
+            }
+            None => Task::none(),
+        };
+        Task::batch([collapse, front, self.dock_window()])
     }
 
     /// Starts shrinking the deleted note's bar away. A collapse still
@@ -874,6 +1009,7 @@ impl App {
         let finished = self.finish_collapse();
         // Only the latest delete can be undone, so not one before this.
         self.last_deleted = None;
+        self.behind.retain(|open| open.id != id);
         let mut morph = Morph::with_secs(COLLAPSE_SECS, self.settings.settings().motion.speed);
         morph.restart();
         self.collapsing = Some((id, morph));
@@ -944,6 +1080,7 @@ impl App {
             return;
         };
         let rect = resize.rect;
+        self.placed = None;
         if let Some(note) = self.active_note.and_then(|id| self.store.note_mut(id)) {
             note.size = Some([rect.width, rect.height]);
             note.position = Some([rect.x, rect.y]);
@@ -967,6 +1104,7 @@ impl App {
         let rect = self.note_target_rect();
         self.note_drag = None;
         self.note_drag_pos = None;
+        self.placed = None;
         if let Some(id) = self.active_note {
             if let Some(note) = self.store.note_mut(id) {
                 note.position = Some([rect.x, rect.y]);
@@ -1029,6 +1167,7 @@ impl App {
         let height = height.min(room.height.max(MIN_SIZE.height));
         let saved = self
             .note_drag_pos
+            .or(self.placed)
             .or_else(|| note?.position.map(|[x, y]| Point::new(x, y)));
         if let Some(top_left) = saved {
             let max_x = (self.window_size.width - width - NOTE_MARGIN).max(NOTE_MARGIN);

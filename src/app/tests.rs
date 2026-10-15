@@ -5252,3 +5252,134 @@ fn trash_closes_the_color_bubble_so_esc_drops_the_question() {
     assert!(!app.color_picker_open);
     assert_eq!(app.active_note, Some(id), "Esc only dropped the question");
 }
+
+/// Notes "a" and "b" (with text, so they open rendered) with "a" open and
+/// then "b" opened beside it.
+fn two_open(dir: &tempfile::TempDir) -> (App, Vec<Uuid>) {
+    let (mut app, ids) = app_with_notes(dir, &[("a", "alpha"), ("b", "beta")]);
+    let _ = app.update(Message::BarClicked(0));
+    settle(&mut app);
+    let _ = app.update(Message::BarClicked(1));
+    settle(&mut app);
+    (app, ids)
+}
+
+fn behind_ids(app: &App) -> Vec<Uuid> {
+    app.behind.iter().map(|open| open.id).collect()
+}
+
+#[test]
+fn opening_another_note_keeps_the_first_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, ids) = two_open(&dir);
+    assert_eq!(app.active_note, Some(ids[1]));
+    assert_eq!(behind_ids(&app), vec![ids[0]]);
+    // Clicks on it reach the app instead of falling through.
+    assert!(app.is_interactive(app.behind[0].rect.center()));
+}
+
+#[test]
+fn a_press_on_a_note_behind_brings_it_forward_where_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, ids) = two_open(&dir);
+    let rect = app.behind[0].rect;
+    let _ = app.update(Message::FocusNote(ids[0]));
+    assert_eq!(app.active_note, Some(ids[0]));
+    assert_eq!(behind_ids(&app), vec![ids[1]]);
+    assert_eq!(app.morph.progress(), 1.0, "no unfold from the bar");
+    assert_eq!(app.note_frame().unwrap().rect, rect);
+    assert_eq!(
+        app.editor_content.as_ref().unwrap().text().trim_end(),
+        "alpha"
+    );
+}
+
+#[test]
+fn escape_closes_only_the_front_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, ids) = two_open(&dir);
+    let _ = app.update(escape());
+    settle(&mut app);
+    assert_eq!(app.active_note, Some(ids[0]));
+    assert!(app.behind.is_empty());
+    let _ = app.update(escape());
+    settle(&mut app);
+    assert_eq!(app.active_note, None);
+}
+
+#[test]
+fn clicking_outside_closes_every_open_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, _) = two_open(&dir);
+    let _ = app.update(Message::ClosePanel);
+    settle(&mut app);
+    assert_eq!(app.active_note, None);
+    assert!(app.behind.is_empty());
+}
+
+#[test]
+fn deleting_the_front_note_brings_the_one_behind_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, ids) = two_open(&dir);
+    let _ = app.update(Message::RequestDelete(ids[1]));
+    let _ = app.update(Message::ConfirmDelete);
+    settle(&mut app);
+    assert_eq!(app.active_note, Some(ids[0]));
+    assert!(app.behind.is_empty());
+    assert_eq!(app.store.notes().len(), 1);
+}
+
+#[test]
+fn a_note_behind_that_is_deleted_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, ids) = two_open(&dir);
+    let _ = app.start_collapse(ids[0]);
+    assert!(app.behind.is_empty());
+    assert_eq!(app.active_note, Some(ids[1]));
+}
+
+#[test]
+fn a_note_opened_onto_another_cascades_off_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, ids) = app_with_notes(&dir, &[("a", "alpha"), ("b", "beta")]);
+    for id in &ids {
+        app.store.note_mut(*id).unwrap().position = Some([300.0, 200.0]);
+    }
+    let _ = app.update(Message::BarClicked(0));
+    settle(&mut app);
+    let _ = app.update(Message::BarClicked(1));
+    settle(&mut app);
+    let front = app.note_frame().unwrap().rect.position();
+    assert_eq!(app.behind[0].rect.position(), Point::new(300.0, 200.0));
+    assert_ne!(front, Point::new(300.0, 200.0));
+}
+
+#[test]
+fn a_note_key_opens_its_bar_and_never_closes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, ids) = app_with_notes(&dir, &[("a", "alpha"), ("b", "beta")]);
+    let _ = app.update(Message::NoteKeyPressed(0));
+    settle(&mut app);
+    let _ = app.update(Message::NoteKeyPressed(1));
+    settle(&mut app);
+    assert_eq!(app.active_note, Some(ids[1]));
+    assert_eq!(behind_ids(&app), vec![ids[0]]);
+    // Its own key again leaves it open.
+    let _ = app.update(Message::NoteKeyPressed(1));
+    settle(&mut app);
+    assert_eq!(app.active_note, Some(ids[1]));
+    // Past the last bar, nothing happens.
+    let _ = app.update(Message::NoteKeyPressed(8));
+    assert_eq!(app.active_note, Some(ids[1]));
+}
+
+#[test]
+fn choosing_note_keys_saves_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_in(&dir);
+    let _ = app.update(Message::NoteKeysChosen(crate::hotkey::NoteKeys::AltShift));
+    assert_eq!(
+        app.settings.settings().window.note_keys,
+        crate::hotkey::NoteKeys::AltShift
+    );
+}

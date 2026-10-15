@@ -243,13 +243,115 @@ pub fn register(combo: &Combo) -> Result<Manager, String> {
         })
 }
 
-/// One item per hotkey press, pushed as it happens so the app can sleep
+/// The modifiers held with a digit 1–9 to open the note on that bar,
+/// counted from the strip's start. Only the modifiers can be chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoteKeys {
+    #[default]
+    CtrlShift,
+    CtrlAlt,
+    AltShift,
+    Off,
+}
+
+impl NoteKeys {
+    pub const ALL: [NoteKeys; 4] = [
+        NoteKeys::CtrlShift,
+        NoteKeys::CtrlAlt,
+        NoteKeys::AltShift,
+        NoteKeys::Off,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NoteKeys::CtrlShift => "Ctrl+Shift",
+            NoteKeys::CtrlAlt => "Ctrl+Alt",
+            NoteKeys::AltShift => "Alt+Shift",
+            NoteKeys::Off => "Off",
+        }
+    }
+
+    /// The keys saved as `s`; anything unknown is the default.
+    pub fn parse(s: &str) -> NoteKeys {
+        NoteKeys::ALL
+            .into_iter()
+            .find(|k| k.as_str().eq_ignore_ascii_case(s))
+            .unwrap_or_default()
+    }
+
+    /// How Settings shows it: symbols on macOS ("⌃⇧"), words elsewhere.
+    pub fn label(self, mac: bool) -> &'static str {
+        match (self, mac) {
+            (NoteKeys::CtrlShift, true) => "⌃⇧",
+            (NoteKeys::CtrlAlt, true) => "⌃⌥",
+            (NoteKeys::AltShift, true) => "⌥⇧",
+            (keys, _) => keys.as_str(),
+        }
+    }
+
+    /// The combos for digits 1–9, in order; none when Off.
+    pub fn combos(self) -> Vec<Combo> {
+        if self == NoteKeys::Off {
+            return Vec::new();
+        }
+        (1..=9)
+            .filter_map(|d| Combo::parse(&format!("{}+{d}", self.as_str())))
+            .collect()
+    }
+}
+
+/// The registered note hotkeys; dropping it unregisters them.
+pub struct NoteHotkeys {
+    _manager: GlobalHotKeyManager,
+    /// The modifiers they were registered with.
+    pub keys: NoteKeys,
+    /// Hotkey id per digit 1–9, `None` where registering failed.
+    ids: Vec<Option<u32>>,
+}
+
+impl NoteHotkeys {
+    /// The bar (0 for digit 1) the hotkey with `id` opens.
+    pub fn slot(&self, id: u32) -> Option<usize> {
+        self.ids.iter().position(|&i| i == Some(id))
+    }
+}
+
+/// Registers the digit hotkeys for `keys`. A digit another app holds is
+/// skipped (the reason goes to stderr); the others still work.
+pub fn register_notes(keys: NoteKeys) -> Result<NoteHotkeys, String> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() {
+        return Err("it needs an X11 display".to_string());
+    }
+    let manager = GlobalHotKeyManager::new().map_err(|e| e.to_string())?;
+    let ids = keys
+        .combos()
+        .iter()
+        .map(|combo| {
+            let hotkey = combo.hotkey().ok()?;
+            match manager.register(hotkey) {
+                Ok(()) => Some(hotkey.id()),
+                Err(e) => {
+                    eprintln!("could not register the note hotkey {combo}: {e}");
+                    None
+                }
+            }
+        })
+        .collect();
+    Ok(NoteHotkeys {
+        _manager: manager,
+        keys,
+        ids,
+    })
+}
+
+/// The id of each hotkey press, pushed as it happens so the app can sleep
 /// while idle instead of polling.
-pub fn events() -> iced::Subscription<()> {
+pub fn events() -> iced::Subscription<u32> {
     iced::Subscription::run(event_stream)
 }
 
-fn event_stream() -> impl iced::futures::Stream<Item = ()> {
+fn event_stream() -> impl iced::futures::Stream<Item = u32> {
     iced::stream::channel(4, async |sender| {
         let sender = std::sync::Mutex::new(sender);
         // The crate keeps only the first handler it is given, so this
@@ -257,7 +359,7 @@ fn event_stream() -> impl iced::futures::Stream<Item = ()> {
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
             if event.state == HotKeyState::Pressed {
                 if let Ok(mut sender) = sender.lock() {
-                    let _ = sender.try_send(());
+                    let _ = sender.try_send(event.id);
                 }
             }
         }));
@@ -380,6 +482,32 @@ mod tests {
         ] {
             assert!(Combo::check_press(mods, "KeyQ").is_ok(), "{mods:?}");
         }
+    }
+
+    #[test]
+    fn note_keys_end_in_the_digits_one_to_nine() {
+        let saved: Vec<String> = NoteKeys::CtrlShift
+            .combos()
+            .iter()
+            .map(Combo::to_string)
+            .collect();
+        assert_eq!(saved.len(), 9);
+        assert_eq!(saved[0], "Ctrl+Shift+1");
+        assert_eq!(saved[8], "Ctrl+Shift+9");
+        for keys in [NoteKeys::CtrlAlt, NoteKeys::AltShift] {
+            assert_eq!(keys.combos().len(), 9, "{keys:?}");
+            assert!(keys.combos().iter().all(|c| c.hotkey().is_ok()));
+        }
+        assert!(NoteKeys::Off.combos().is_empty());
+    }
+
+    #[test]
+    fn note_keys_round_trip_and_default_to_ctrl_shift() {
+        for keys in NoteKeys::ALL {
+            assert_eq!(NoteKeys::parse(keys.as_str()), keys);
+        }
+        assert_eq!(NoteKeys::parse("alt+shift"), NoteKeys::AltShift);
+        assert_eq!(NoteKeys::parse("bogus"), NoteKeys::CtrlShift);
     }
 
     #[test]

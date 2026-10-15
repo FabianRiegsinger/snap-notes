@@ -3,7 +3,7 @@
 use crate::app::{NOTE_GAP, NOTE_MARGIN};
 use crate::bar_strip::STRIP_WIDTH;
 use crate::edge::Edge;
-use crate::hotkey::Combo;
+use crate::hotkey::{Combo, NoteKeys};
 use crate::note::{NoteColor, DEFAULT_PALETTE, DEFAULT_SLOTS, PALETTE};
 use crate::resize::{MAX_NOTE_WIDTH, MIN_SIZE};
 
@@ -143,10 +143,17 @@ pub struct WindowSettings {
     /// The screen edge the strip docks to.
     #[serde(serialize_with = "serialize_edge")]
     pub edge: Edge,
+    /// The modifiers that, with a digit 1–9, open the note on that bar.
+    #[serde(serialize_with = "serialize_note_keys")]
+    pub note_keys: NoteKeys,
 }
 
 fn serialize_edge<S: serde::Serializer>(edge: &Edge, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(edge.as_str())
+}
+
+fn serialize_note_keys<S: serde::Serializer>(keys: &NoteKeys, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(keys.as_str())
 }
 
 impl Default for WindowSettings {
@@ -155,6 +162,7 @@ impl Default for WindowSettings {
             height_fraction: 0.9,
             auto_hide: true,
             edge: Edge::default(),
+            note_keys: NoteKeys::default(),
         }
     }
 }
@@ -619,6 +627,10 @@ impl Settings {
         let edge = value.get("window").and_then(|w| w.get("edge"));
         if let Some(v) = edge.and_then(|v| v.as_str()) {
             settings.window.edge = Edge::parse(v);
+        }
+        let note_keys = value.get("window").and_then(|w| w.get("note_keys"));
+        if let Some(v) = note_keys.and_then(|v| v.as_str()) {
+            settings.window.note_keys = NoteKeys::parse(v);
         }
         let alert = value.get("motion").and_then(|m| m.get("reminder_alert"));
         if let Some(v) = alert.and_then(|v| v.as_str()) {
@@ -1359,6 +1371,19 @@ mod tests {
         assert!(s.can_toggle(SettingToggle::GlobalHotkey));
         s.reset(SettingsGroup::App);
         assert!(s.app.global_hotkey);
+    }
+
+    #[test]
+    fn note_keys_default_to_ctrl_shift_and_persist() {
+        let mut s = Settings::default();
+        assert_eq!(s.window.note_keys, NoteKeys::CtrlShift);
+        s.window.note_keys = NoteKeys::Off;
+        let json = serde_json::to_string(&s).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["window"]["note_keys"], "Off");
+        assert_eq!(Settings::from_json(&json), s);
+        s.reset(SettingsGroup::Window);
+        assert_eq!(s.window.note_keys, NoteKeys::CtrlShift);
     }
 
     #[test]

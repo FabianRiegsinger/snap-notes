@@ -33,7 +33,8 @@
   - **On Linux:** while the strip is hidden, the window shrinks to a 2 px sliver along the whole chosen edge. Move the cursor into it anywhere to reveal the strip.
 
 ### Notes
-- **Unfold and fold:** a click morphs the bar into a sticky note. Esc, the close button, a click outside the note or a click on its bar folds it back.
+- **Unfold and fold:** a click morphs the bar into a sticky note. Esc, the close button or a click on its bar folds it back. A click outside the notes folds every open note.
+- **Several notes at once:** opening another note doesn't close the open one. The new note unfolds in front, and the others stay open behind it, rendered where they were. A note that would cover one exactly is moved a step down and away from the edge. Click a note behind to bring it to the front, as you left it. Esc folds only the front note, and the next one comes forward. Deleting the front note does the same.
 - **Title and body:** each note has a title header and a scrolling body. The scrollbar only appears once the text overflows.
 - **Move it anywhere:** drag the grip at the top. The note reopens where you left it, and double-clicking the grip docks it again.
 - **Resize it:** drag any edge or corner. Each note remembers its own size.
@@ -125,7 +126,7 @@ Every slider has small min and max fields at its ends. Type a new bound to widen
 | Tab | Group | What you can adjust |
 |---|---|---|
 | Application | App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey: a toggle to use it, and a **Global hotkey** row showing its keys (Cmd/Ctrl+Shift+Space by default). Click **Record**, then press the new combination: it needs Cmd, Ctrl or Alt/Option plus one key (a letter, digit, F1–F12, Space, an arrow or another named key); with Shift alone the prompt says "Needs Cmd/Ctrl or Alt", except for F1–F12. Bare keys are ignored, and no other shortcut runs meanwhile. Esc, **Cancel**, a click anywhere else, or closing Settings stops recording. The new hotkey works right away. If it can't be registered (for example, another app uses it), the previous hotkey stays and a red line under the toggle names the combination that failed and why. Reset restores the default keys. On Linux, failures are only logged. |
-| Application | Window | **Strip length** (the share of the edge the strip may use, which is the width on Top), **Screen edge** (Right, Left or Top), and **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)) |
+| Application | Window | **Strip length** (the share of the edge the strip may use, which is the width on Top), **Screen edge** (Right, Left or Top), **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)), and **Open note 1–9**: the keys held with a digit to open a note (Ctrl+Shift by default, or Ctrl+Alt, Alt+Shift, or Off). Only the keys can be changed; the digits stay 1–9. |
 | Application | Data | **Export…** your notes to one file (see [Export](#export)) |
 | Styling | Bars | Width, height and gap |
 | Styling | Hover | Magnification, how far it spreads, and the peek delay (0–3 s by default) |
@@ -141,13 +142,14 @@ On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Ne
 | Shortcut | Action |
 |---|---|
 | Cmd+Shift+Space (macOS), Ctrl+Shift+Space (elsewhere), or the keys you recorded in Settings | Global hotkey: show the notes and create a new note in edit mode, from any app. On Linux it is always on and needs X11 (Wayland is not supported). |
+| Ctrl+Shift+1 … Ctrl+Shift+9, or the keys chosen in Settings | Open the note on bar 1 to 9, from any app. Bar 1 is the top bar (the leftmost on Top), and a stack's bar opens its top note. Open notes stay open, and a note that is already open stays open. |
 | Cmd/Ctrl+N | New note |
 | Cmd/Ctrl+F | Open or close search |
 | Cmd/Ctrl+, | Open or close settings |
 | Cmd/Ctrl+V | Paste an image into the open note |
 | Cmd/Ctrl+Z | Undo the last delete (only while no note is open) |
 | Enter | Open the first search result (in the search field) |
-| Esc | Cancel a delete question, leave edit mode, close search, export or settings, or fold the open note |
+| Esc | Cancel a delete question, leave edit mode, close search, export or settings, or fold the front note |
 
 The Cmd/Ctrl shortcuts also work while you type in a note's title or body or in the search field.
 

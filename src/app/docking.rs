@@ -44,6 +44,32 @@ impl App {
                 }
                 return Task::batch(tasks);
             }
+            Message::GlobalKey(id) => {
+                let slot = self.note_hotkeys.as_ref().and_then(|keys| keys.slot(id));
+                return self.update(match slot {
+                    Some(slot) => Message::NoteKeyPressed(slot),
+                    None => Message::HotkeyPressed,
+                });
+            }
+            Message::NoteKeyPressed(entry) => {
+                let Some(index) = self.clicked_note(entry) else {
+                    return Task::none();
+                };
+                self.force_reveal = true;
+                let mut tasks = Vec::new();
+                if !self.visible {
+                    tasks.push(self.update(Message::ToggleVisibility));
+                }
+                // The open note stays open; any other opens beside it.
+                let id = self.store.notes()[index].id;
+                if !(self.active_note == Some(id) && self.morph.is_opening()) {
+                    tasks.push(self.open_note(index));
+                }
+                if let Some(id) = self.window_id {
+                    tasks.push(window::gain_focus(id));
+                }
+                return Task::batch(tasks);
+            }
             Message::TrayReady(ok) => {
                 self.tray_ok = ok;
                 // Without a tray icon the Dock icon is the only way back in.
@@ -276,6 +302,24 @@ impl App {
             self.hotkey = None;
             self.apply_registration(hotkey::register(&combo));
         }
+        self.sync_note_hotkeys();
+    }
+
+    /// Registers the note hotkeys to match the setting; they are let go
+    /// while the global hotkey is being recorded, so their keys can be.
+    pub(super) fn sync_note_hotkeys(&mut self) {
+        if self.window_id.is_none() {
+            return;
+        }
+        let keys = self.settings.settings().window.note_keys;
+        if keys == hotkey::NoteKeys::Off || self.hotkey_recording {
+            self.note_hotkeys = None;
+        } else if self.note_hotkeys.as_ref().is_none_or(|h| h.keys != keys) {
+            self.note_hotkeys = None;
+            self.note_hotkeys = hotkey::register_notes(keys)
+                .inspect_err(|e| eprintln!("note hotkeys unavailable: {e}"))
+                .ok();
+        }
     }
 
     /// Makes a recorded `combo` the global hotkey.
@@ -299,6 +343,7 @@ impl App {
     ) {
         self.hotkey_recording = false;
         self.hotkey_hint = None;
+        self.sync_note_hotkeys();
         let wanted = !cfg!(any(windows, target_os = "macos"))
             || self.settings.settings().is_on(SettingToggle::GlobalHotkey);
         if !wanted {
@@ -385,6 +430,12 @@ impl App {
         };
         self.pointer = moved(pointer);
         self.last_cursor = moved(last_cursor);
+        // Notes open behind keep their screen spot too.
+        if let Some(shift) = shift {
+            for open in &mut self.behind {
+                open.rect = open.rect + shift;
+            }
+        }
         // Re-anchor in the docked window.
         self.follow_open_bar();
         let strip = self.strip_layout();

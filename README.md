@@ -39,10 +39,11 @@ Linux builds need `pkg-config`, `libxkbcommon-dev`, `libwayland-dev` and `libfon
 | Shortcut | Does |
 |---|---|
 | Cmd/Ctrl+Shift+Space | New note, from any app |
+| Ctrl+Shift+1…9 | Open note 1–9, counted from the top, from any app |
 | Cmd/Ctrl+N | New note |
 | Cmd/Ctrl+F | Search |
 | Cmd/Ctrl+, | Settings |
-| Esc | Close what's open |
+| Esc | Close the front note or panel |
 
 ## Learn more
 

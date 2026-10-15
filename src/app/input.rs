@@ -67,7 +67,7 @@ impl App {
                     keyboard::Key::Named(Named::Escape) if self.editing => {
                         return self.update(Message::EditorBlurred)
                     }
-                    keyboard::Key::Named(Named::Escape) => return self.update(Message::ClosePanel),
+                    keyboard::Key::Named(Named::Escape) => return self.close_front(),
                     // In edit mode the body editor's own key binding handles
                     // undo/redo; the title field ignores them, so skip it here.
                     // With the color bubble open, its hex field has the keys.
@@ -192,6 +192,10 @@ impl App {
         strip_used
             || over_bubble
             || over_panel(self.note_frame())
+            || self
+                .behind
+                .iter()
+                .any(|open| over_panel(Some(self.behind_frame(open))))
             || over_panel(self.settings_frame())
             || over_panel(self.search_frame())
             || over_panel(self.export_frame())

@@ -155,6 +155,12 @@ impl Morph {
         self.opening = true;
     }
 
+    /// Fully open at once, without animating.
+    pub fn finish_open(&mut self) {
+        self.progress = 1.0;
+        self.opening = true;
+    }
+
     pub fn restart(&mut self) {
         self.progress = 0.0;
         self.opening = true;

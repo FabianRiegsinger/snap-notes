@@ -407,6 +407,15 @@ pub enum Message {
     ToggleVisibility,
     /// The global hotkey: shows the notes and opens a new one.
     HotkeyPressed,
+    /// A registered global hotkey with this id was pressed.
+    GlobalKey(u32),
+    /// A note hotkey: opens the note on this bar (0 is the first).
+    NoteKeyPressed(usize),
+    /// Settings: the modifiers that open notes 1–9.
+    NoteKeysChosen(hotkey::NoteKeys),
+    /// A press on a note left open behind the active one: it comes to the
+    /// front.
+    FocusNote(Uuid),
     /// The tray icon was created (or failed to be).
     TrayReady(bool),
     TrayMenu(String),
@@ -635,6 +644,16 @@ pub struct App {
     pending_focus: Option<PendingFocus>,
     /// The registered global hotkey; dropping it unregisters it.
     hotkey: Option<hotkey::Manager>,
+    /// The registered hotkeys that open notes 1–9.
+    note_hotkeys: Option<hotkey::NoteHotkeys>,
+    /// Notes left open behind the active one, back to front.
+    behind: Vec<OpenNote>,
+    /// Where the active note sits while open, ahead of its saved position:
+    /// where it was behind, or cascaded off a note it would cover.
+    placed: Option<Point>,
+    /// The active note folds away alone; the frontmost note behind it
+    /// becomes active once it has.
+    front_only: bool,
     /// Why the last hotkey registration failed; shown in Settings.
     hotkey_error: Option<String>,
     /// The next modified key press becomes the global hotkey (Esc
@@ -664,6 +683,17 @@ pub struct App {
     pointer: Option<Point>,
     /// Files are being dragged over the window.
     file_hover: bool,
+}
+
+/// A note left open behind the active one: shown rendered where it was,
+/// its editor and undo kept for when it comes back to the front.
+struct OpenNote {
+    id: Uuid,
+    rect: Rectangle,
+    content: text_editor::Content,
+    doc: Doc,
+    broken_images: HashSet<String>,
+    history: History<(String, text_editor::Cursor)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -855,6 +885,10 @@ impl App {
             entries_synced,
             pending_focus: None,
             hotkey: None,
+            note_hotkeys: None,
+            behind: Vec::new(),
+            placed: None,
+            front_only: false,
             hotkey_error: None,
             hotkey_recording: false,
             hotkey_hint: None,
@@ -904,6 +938,8 @@ impl App {
             | Message::EdgeChosen(..)
             | Message::ToggleVisibility
             | Message::HotkeyPressed
+            | Message::GlobalKey(..)
+            | Message::NoteKeyPressed(..)
             | Message::TrayReady(..)
             | Message::TrayMenu(..)
             | Message::Quit
@@ -948,6 +984,7 @@ impl App {
             | Message::HotkeyRecord
             | Message::SettingToggled(..)
             | Message::ReminderAlertChosen(..)
+            | Message::NoteKeysChosen(..)
             | Message::ResetGroup(..)
             | Message::SettingsTabSelected(..)
             | Message::PaletteSlotSelected(..)
@@ -971,6 +1008,7 @@ impl App {
             | Message::NoteResetPosition
             | Message::ResizeStart(..)
             | Message::ClosePanel
+            | Message::FocusNote(..)
             | Message::RequestDelete(..)
             | Message::ConfirmDelete
             | Message::CancelDelete
@@ -1080,6 +1118,7 @@ impl App {
                             .on_press(Message::ClosePanel)
                             .into(),
                     );
+                    layers.extend(self.behind_views());
                     let note_view = post_it(PostIt {
                         note,
                         title_text: self.title_field_text().unwrap_or_default(),
@@ -1205,6 +1244,56 @@ impl App {
         stack(layers).width(Fill).height(Fill).into()
     }
 
+    /// The notes open behind the active one, back to front: rendered and
+    /// still, a press anywhere on one brings it to the front.
+    fn behind_views(&self) -> Vec<Element<'_, Message>> {
+        let settings = self.settings.settings();
+        self.behind
+            .iter()
+            .filter_map(|open| {
+                let note = self.store.notes().iter().find(|n| n.id == open.id)?;
+                let frame = self.behind_frame(open);
+                let rect = frame.rect;
+                if rect.width < 1.0 || rect.height < 1.0 {
+                    return None;
+                }
+                let card = post_it(PostIt {
+                    note,
+                    title_text: crate::note_panel::title_field_text(note),
+                    theme: self.theme,
+                    palette: &settings.palette,
+                    paper_tint: settings.notes.paper_tint,
+                    idle_control_alpha: settings.notes.idle_control_alpha,
+                    content: &open.content,
+                    editing: false,
+                    doc: &open.doc,
+                    data_dir: &self.data_dir,
+                    broken_images: &open.broken_images,
+                    size: rect.size(),
+                    morph_progress: 1.0,
+                    content_alpha: frame.content_alpha,
+                    copied: false,
+                    confirm_delete: false,
+                    pinned: self.top_pinned(note),
+                    color_picker_open: false,
+                    color_hex: "",
+                    text_color_picker_open: false,
+                    hovered: false,
+                    dragging: false,
+                    mode_fade: 1.0,
+                    reminder: reminder::status(note),
+                    reminder_draft: None,
+                });
+                // The cover takes every press, so the card's own controls
+                // can't act on the active note.
+                let cover = mouse_area(Space::new().width(Fill).height(Fill))
+                    .on_press(Message::FocusNote(open.id));
+                let card = stack([card, opaque(cover)]);
+                Some(pin(opaque(card)).x(rect.x).y(rect.y).into())
+            })
+            .collect()
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         let save = iced::time::every(Duration::from_secs(1)).map(|_| Message::SaveTick);
         let resized = window::resize_events().map(|(_id, size)| Message::WindowResized(size));
@@ -1244,7 +1333,7 @@ impl App {
             subs.push(tray::menu_events().map(Message::TrayMenu));
         }
         // Always on: the hotkey's event handler can only be installed once.
-        subs.push(hotkey::events().map(|()| Message::HotkeyPressed));
+        subs.push(hotkey::events().map(Message::GlobalKey));
         if self.hover_bar.is_some() && !self.peek.is_opening() {
             subs.push(iced::time::every(PEEK_POLL).map(Message::PeekTick));
         }
