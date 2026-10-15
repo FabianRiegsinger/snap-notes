@@ -261,57 +261,30 @@ pub fn register(combo: &Combo) -> Result<Manager, String> {
         .inspect_err(|e| eprintln!("could not register the global hotkey {combo}: {e}"))
 }
 
-/// The modifiers held with a digit 1–9 to open the note on that bar,
-/// counted from the strip's start. Only the modifiers can be chosen.
+/// Whether Ctrl+Shift with a digit 1–9 opens the note on that bar,
+/// counted from the strip's start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NoteKeys {
     #[default]
     CtrlShift,
-    CtrlAlt,
-    AltShift,
     Off,
 }
 
 impl NoteKeys {
-    pub const ALL: [NoteKeys; 4] = [
-        NoteKeys::CtrlShift,
-        NoteKeys::CtrlAlt,
-        NoteKeys::AltShift,
-        NoteKeys::Off,
-    ];
-
-    /// The choices Settings offers. macOS never delivers a hotkey held
-    /// with only Option+Shift (it registers but stays silent), so not there.
-    pub fn offered() -> impl Iterator<Item = NoteKeys> {
-        NoteKeys::ALL
-            .into_iter()
-            .filter(|&k| !(cfg!(target_os = "macos") && k == NoteKeys::AltShift))
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             NoteKeys::CtrlShift => "Ctrl+Shift",
-            NoteKeys::CtrlAlt => "Ctrl+Alt",
-            NoteKeys::AltShift => "Alt+Shift",
             NoteKeys::Off => "Off",
         }
     }
 
-    /// The keys saved as `s`; anything unknown or not offered here is the
-    /// default.
+    /// The keys saved as `s`; only "Off" turns them off, so modifiers
+    /// saved by older versions (Ctrl+Alt, Alt+Shift) become Ctrl+Shift.
     pub fn parse(s: &str) -> NoteKeys {
-        NoteKeys::offered()
-            .find(|k| k.as_str().eq_ignore_ascii_case(s))
-            .unwrap_or_default()
-    }
-
-    /// How Settings shows it: symbols on macOS ("⌃⇧"), words elsewhere.
-    pub fn label(self, mac: bool) -> &'static str {
-        match (self, mac) {
-            (NoteKeys::CtrlShift, true) => "⌃⇧",
-            (NoteKeys::CtrlAlt, true) => "⌃⌥",
-            (NoteKeys::AltShift, true) => "⌥⇧",
-            (keys, _) => keys.as_str(),
+        if s.eq_ignore_ascii_case("off") {
+            NoteKeys::Off
+        } else {
+            NoteKeys::CtrlShift
         }
     }
 
@@ -527,24 +500,20 @@ mod tests {
         assert_eq!(saved.len(), 9);
         assert_eq!(saved[0], "Ctrl+Shift+1");
         assert_eq!(saved[8], "Ctrl+Shift+9");
-        for keys in [NoteKeys::CtrlAlt, NoteKeys::AltShift] {
-            assert_eq!(keys.combos().len(), 9, "{keys:?}");
-            assert!(keys.combos().iter().all(|c| c.hotkey().is_ok()));
-        }
+        assert!(NoteKeys::CtrlShift
+            .combos()
+            .iter()
+            .all(|c| c.hotkey().is_ok()));
         assert!(NoteKeys::Off.combos().is_empty());
     }
 
     #[test]
     fn note_keys_round_trip_and_default_to_ctrl_shift() {
-        for keys in NoteKeys::offered() {
+        for keys in [NoteKeys::CtrlShift, NoteKeys::Off] {
             assert_eq!(NoteKeys::parse(keys.as_str()), keys);
         }
-        let alt_shift = if cfg!(target_os = "macos") {
-            NoteKeys::CtrlShift
-        } else {
-            NoteKeys::AltShift
-        };
-        assert_eq!(NoteKeys::parse("alt+shift"), alt_shift);
+        assert_eq!(NoteKeys::parse("alt+shift"), NoteKeys::CtrlShift);
+        assert_eq!(NoteKeys::parse("off"), NoteKeys::Off);
         assert_eq!(NoteKeys::parse("bogus"), NoteKeys::CtrlShift);
     }
 

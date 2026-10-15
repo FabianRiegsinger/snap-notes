@@ -126,7 +126,7 @@ Every slider has small min and max fields at its ends. Type a new bound to widen
 | Tab | Group | What you can adjust |
 |---|---|---|
 | Application | App | Show or hide the menu bar/tray icon and the Dock icon/taskbar button. At least one always stays visible. On macOS and Windows, also the global hotkey: a toggle to use it, and a **Global hotkey** row showing its keys (Cmd/Ctrl+Shift+Space by default). Click **Record**, then press the new combination: it needs Cmd, Ctrl or Alt/Option plus one key (a letter, digit, F1–F12, Space, an arrow or another named key); with Shift alone the prompt says "Needs Cmd/Ctrl or Alt", except for F1–F12. Bare keys are ignored, and no other shortcut runs meanwhile. Esc, **Cancel**, a click anywhere else, or closing Settings stops recording. The new hotkey works right away. If it can't be registered (for example, another app uses it), the previous hotkey stays and a red line under the toggle names the combination that failed and why. Reset restores the default keys. On Linux, failures are only logged. |
-| Application | Window | **Strip length** (the share of the edge the strip may use, which is the width on Top), **Screen edge** (Right, Left or Top), **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)), and **Open note 1–9**: the keys held with a digit to open a note (Ctrl+Shift by default, or Ctrl+Alt, Alt+Shift, or Off; macOS has no Alt+Shift, because it never delivers Option+Shift hotkeys). Only the keys can be changed; the digits stay 1–9. |
+| Application | Window | **Strip length** (the share of the edge the strip may use, which is the width on Top), **Screen edge** (Right, Left or Top), **Auto-hide** (on by default, see [The bar strip](#the-bar-strip)), and **Open notes with Ctrl+Shift+1–9**: Ctrl+Shift+1–9 opens the note on that bar (on by default; switch it off here). |
 | Application | Data | **Export…** your notes to one file (see [Export](#export)) |
 | Styling | Bars | Width, height and gap |
 | Styling | Hover | Magnification, how far it spreads, and the peek delay (0–3 s by default) |
@@ -142,7 +142,7 @@ On macOS and Windows a small icon offers **Show/Hide Notes**, **New Note**, **Ne
 | Shortcut | Action |
 |---|---|
 | Cmd+Shift+Space (macOS), Ctrl+Shift+Space (elsewhere), or the keys you recorded in Settings | Global hotkey: show the notes and create a new note in edit mode, from any app. On Linux it is always on and needs X11 (Wayland is not supported). |
-| Ctrl+Shift+1 … Ctrl+Shift+9, or the keys chosen in Settings | Open the note on bar 1 to 9, from any app. Bar 1 is the top bar (the leftmost on Top), and a stack's bar opens its top note. Open notes stay open, and a note that is already open stays open. |
+| Ctrl+Shift+1 … Ctrl+Shift+9 (unless switched off in Settings) | Open the note on bar 1 to 9, from any app. Bar 1 is the top bar (the leftmost on Top), and a stack's bar opens its top note. Open notes stay open, and a note that is already open stays open. |
 | Cmd/Ctrl+N | New note |
 | Cmd/Ctrl+F | Open or close search |
 | Cmd/Ctrl+, | Open or close settings |
