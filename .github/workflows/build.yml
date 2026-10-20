@@ -91,7 +91,10 @@ jobs:
           done
           ls -l release
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: release/*
-          generate_release_notes: true
+      - name: Publish release
+        # Releases are immutable once published, so the workflow must create
+        # the release itself: gh uploads to a draft, then publishes it.
+        # Push only the tag; do not create the release by hand first.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --generate-notes
