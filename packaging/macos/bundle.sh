@@ -36,10 +36,14 @@ else
     codesign --force --sign - "$app"
 fi
 
-ln -s /Applications "$work/dmg/Applications"
+# The styled window: background, big icons, no toolbar. dmgbuild writes
+# Finder's layout itself, so this needs no Finder scripting.
+tiffutil -cathidpicheck packaging/macos/dmg-background.png packaging/macos/dmg-background@2x.png \
+    -out "$work/background.tiff" >/dev/null
 mkdir -p "$(dirname "$out")"
 rm -f "$out"
-hdiutil create -volname "Snap Notes" -srcfolder "$work/dmg" -format UDZO "$out" >/dev/null
+pipx run --spec dmgbuild==1.6.7 dmgbuild -s packaging/macos/dmg-settings.py \
+    -D app="$app" -D background="$work/background.tiff" "Snap Notes" "$out" >/dev/null
 rm -rf "$work"
 
 if [ -n "$identity" ]; then
