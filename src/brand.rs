@@ -153,4 +153,18 @@ mod tests {
         std::fs::write(&path, ico_bytes()).unwrap();
         assert!(path.metadata().unwrap().len() > 1000);
     }
+
+    /// The 1024 px mark the macOS and Linux packages build their icons from.
+    #[test]
+    fn writes_assets_icon_png() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon.png");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1024, 1024);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header().unwrap();
+        writer.write_image_data(&icon_rgba(1024)).unwrap();
+        writer.finish().unwrap();
+        assert!(path.metadata().unwrap().len() > 1000);
+    }
 }

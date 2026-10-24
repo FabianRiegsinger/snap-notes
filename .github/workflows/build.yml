@@ -63,6 +63,38 @@ jobs:
           path: target/release/${{ matrix.bin }}
           if-no-files-found: error
 
+      # Installers: a drag-to-Applications .dmg, a .deb with a menu entry,
+      # and a per-user Windows setup.exe.
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: packaging/macos/bundle.sh "package/snap-notes-${{ matrix.name }}.dmg"
+
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-deb
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: mkdir -p package && cargo deb --no-build --output "package/snap-notes-${{ matrix.name }}.deb"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            choco install innosetup -y --no-progress
+            $env:PATH += ";${env:ProgramFiles(x86)}\Inno Setup 6"
+          }
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          iscc "/DVersion=$version" "/O$PWD\package" "/Fsnap-notes-${{ matrix.name }}-setup" packaging\windows\snap-notes.iss
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.name }}
+          path: package/*
+          if-no-files-found: error
+
   release:
     name: Release
     # A pushed tag like v1.2.0 publishes a GitHub Release with every build.
@@ -81,7 +113,9 @@ jobs:
         # renamed binaries go to their own folder.
         run: |
           mkdir release
-          for d in dist/*/; do
+          # Installers already carry their final names.
+          mv dist/package-*/* release/
+          for d in dist/snap-notes-*/; do
             name=$(basename "$d")
             for f in "$d"*; do
               ext=""

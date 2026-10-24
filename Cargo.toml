@@ -40,6 +40,18 @@ tempfile = "3"
 iced_tiny_skia = "0.14"
 ttf-parser = "0.25"
 
+# Linux package: `cargo deb` installs the binary plus a menu entry and icon.
+[package.metadata.deb]
+maintainer = "Fabian Riegsinger"
+copyright = "Fabian Riegsinger"
+extended-description = "Sticky notes as slim colored bars along the edge of your screen."
+section = "utils"
+assets = [
+    ["target/release/snap-notes", "usr/bin/", "755"],
+    ["packaging/linux/snap-notes.desktop", "usr/share/applications/", "644"],
+    ["assets/icon.png", "usr/share/icons/hicolor/1024x1024/apps/snap-notes.png", "644"],
+]
+
 [profile.release]
 opt-level = "z"
 lto = true

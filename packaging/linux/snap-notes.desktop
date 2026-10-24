@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Snap Notes
+Comment=Sticky notes as slim bars on your screen edge
+Exec=snap-notes
+Icon=snap-notes
+Terminal=false
+Categories=Utility;
+StartupWMClass=snap-notes
