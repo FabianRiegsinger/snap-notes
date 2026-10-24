@@ -222,6 +222,10 @@ impl App {
                     // `update` steps auto-hide right after this.
                     return Task::none();
                 }
+                if toggle == SettingToggle::StartAtLogin {
+                    self.sync_start_at_login();
+                    return Task::none();
+                }
                 self.sync_hotkey();
                 return self.apply_app_visibility();
             }
@@ -246,6 +250,9 @@ impl App {
                     return self.apply_app_visibility();
                 }
                 self.sync_note_hotkeys();
+                if group == SettingsGroup::Window {
+                    self.sync_start_at_login();
+                }
                 if self.edge() != edge {
                     return self.edge_changed(edge);
                 }

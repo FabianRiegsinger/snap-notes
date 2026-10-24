@@ -146,6 +146,8 @@ pub struct WindowSettings {
     /// The modifiers that, with a digit 1–9, open the note on that bar.
     #[serde(serialize_with = "serialize_note_keys")]
     pub note_keys: NoteKeys,
+    /// The OS launches the app when the user logs in.
+    pub start_at_login: bool,
 }
 
 fn serialize_edge<S: serde::Serializer>(edge: &Edge, s: S) -> Result<S::Ok, S::Error> {
@@ -163,6 +165,7 @@ impl Default for WindowSettings {
             auto_hide: true,
             edge: Edge::default(),
             note_keys: NoteKeys::default(),
+            start_at_login: false,
         }
     }
 }
@@ -258,6 +261,8 @@ pub enum SettingToggle {
     GlobalHotkey,
     /// In the Window group, on every platform.
     AutoHide,
+    /// In the Window group, on every platform.
+    StartAtLogin,
 }
 
 impl SettingToggle {
@@ -273,7 +278,9 @@ impl SettingToggle {
         match self {
             SettingToggle::MenuBarIcon => Some(SettingToggle::DockIcon),
             SettingToggle::DockIcon => Some(SettingToggle::MenuBarIcon),
-            SettingToggle::GlobalHotkey | SettingToggle::AutoHide => None,
+            SettingToggle::GlobalHotkey | SettingToggle::AutoHide | SettingToggle::StartAtLogin => {
+                None
+            }
         }
     }
 }
@@ -620,9 +627,14 @@ impl Settings {
         if !settings.app.show_menu_bar_icon && !settings.app.show_dock_icon {
             settings.app.show_menu_bar_icon = true;
         }
-        let auto_hide = value.get("window").and_then(|w| w.get("auto_hide"));
-        if let Some(v) = auto_hide.and_then(|v| v.as_bool()) {
-            settings.window.auto_hide = v;
+        for (field, target) in [
+            ("auto_hide", &mut settings.window.auto_hide),
+            ("start_at_login", &mut settings.window.start_at_login),
+        ] {
+            let saved = value.get("window").and_then(|w| w.get(field));
+            if let Some(v) = saved.and_then(|v| v.as_bool()) {
+                *target = v;
+            }
         }
         let edge = value.get("window").and_then(|w| w.get("edge"));
         if let Some(v) = edge.and_then(|v| v.as_str()) {
@@ -645,6 +657,7 @@ impl Settings {
             SettingToggle::DockIcon => self.app.show_dock_icon,
             SettingToggle::GlobalHotkey => self.app.global_hotkey,
             SettingToggle::AutoHide => self.window.auto_hide,
+            SettingToggle::StartAtLogin => self.window.start_at_login,
         }
     }
 
@@ -664,6 +677,7 @@ impl Settings {
             SettingToggle::DockIcon => &mut self.app.show_dock_icon,
             SettingToggle::GlobalHotkey => &mut self.app.global_hotkey,
             SettingToggle::AutoHide => &mut self.window.auto_hide,
+            SettingToggle::StartAtLogin => &mut self.window.start_at_login,
         };
         *value = !*value;
         true
@@ -1303,6 +1317,15 @@ mod tests {
     fn app_defaults_show_only_the_menu_bar_icon() {
         let s = Settings::default();
         assert!(s.app.show_menu_bar_icon && !s.app.show_dock_icon && s.app.global_hotkey);
+    }
+
+    #[test]
+    fn start_at_login_is_off_until_saved_on() {
+        assert!(!Settings::default().is_on(SettingToggle::StartAtLogin));
+        let s = Settings::from_json(r#"{"window":{"start_at_login":true}}"#);
+        assert!(s.is_on(SettingToggle::StartAtLogin) && s.window.auto_hide);
+        let back = Settings::from_json(&serde_json::to_string(&s).unwrap());
+        assert!(back.window.start_at_login);
     }
 
     #[test]

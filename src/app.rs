@@ -775,6 +775,12 @@ impl App {
         if !settings.settings().app.show_dock_icon {
             platform::set_dock_policy(false);
         }
+        // Re-pointed every launch, so an updated or moved app still starts.
+        if settings.settings().window.start_at_login {
+            if let Err(e) = crate::login::set(true) {
+                eprintln!("could not refresh start at login: {e}");
+            }
+        }
         let mut store = NoteStore::load(platform::data_dir().join("notes.json"));
         prepare_store(&mut store, &settings.settings().palette);
         (

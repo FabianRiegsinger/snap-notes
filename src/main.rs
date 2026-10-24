@@ -20,6 +20,7 @@ mod icons;
 mod ics;
 mod images;
 mod list_continue;
+mod login;
 mod note;
 mod note_panel;
 mod notify;

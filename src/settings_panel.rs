@@ -198,6 +198,9 @@ fn slider_row<'a>(
 /// The Window group's toggle, on every platform.
 pub const AUTO_HIDE_LABEL: &str = "Auto-hide";
 
+/// The Window group's switch for launching the app at login.
+pub const START_AT_LOGIN_LABEL: &str = "Start at login";
+
 /// The Window group's three-way screen edge control.
 pub const SCREEN_EDGE_LABEL: &str = "Screen edge";
 
@@ -341,6 +344,7 @@ fn toggle_label(toggle: SettingToggle) -> &'static str {
         SettingToggle::DockIcon => "Show Dock icon",
         SettingToggle::GlobalHotkey => HOTKEY_LABEL,
         SettingToggle::AutoHide => AUTO_HIDE_LABEL,
+        SettingToggle::StartAtLogin => START_AT_LOGIN_LABEL,
     }
 }
 
@@ -351,6 +355,7 @@ fn toggle_label(toggle: SettingToggle) -> &'static str {
         SettingToggle::DockIcon => "Show taskbar button",
         SettingToggle::GlobalHotkey => HOTKEY_LABEL,
         SettingToggle::AutoHide => AUTO_HIDE_LABEL,
+        SettingToggle::StartAtLogin => START_AT_LOGIN_LABEL,
     }
 }
 
@@ -629,11 +634,15 @@ pub fn settings_panel(v: SettingsView<'_>) -> Element<'_, Message> {
                     }
                     if group == SettingsGroup::Window {
                         section = section.push(edge_row(settings.window.edge, theme, a));
-                        let t = SettingToggle::AutoHide;
-                        section = section.push(
-                            switch(settings.is_on(t), AUTO_HIDE_LABEL, theme, a)
-                                .on_toggle(move |_| Message::SettingToggled(t)),
-                        );
+                        for (t, label) in [
+                            (SettingToggle::AutoHide, AUTO_HIDE_LABEL),
+                            (SettingToggle::StartAtLogin, START_AT_LOGIN_LABEL),
+                        ] {
+                            section = section.push(
+                                switch(settings.is_on(t), label, theme, a)
+                                    .on_toggle(move |_| Message::SettingToggled(t)),
+                            );
+                        }
                         let on = settings.window.note_keys == NoteKeys::CtrlShift;
                         section =
                             section.push(switch(on, NOTE_KEYS_LABEL, theme, a).on_toggle(|on| {

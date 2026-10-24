@@ -322,6 +322,16 @@ impl App {
         }
     }
 
+    /// Adds or removes the OS login entry to match the setting. If the OS
+    /// refuses, the switch flips back so it shows what will happen.
+    pub(super) fn sync_start_at_login(&mut self) {
+        let window = &mut self.settings.settings_mut().window;
+        if let Err(e) = crate::login::set(window.start_at_login) {
+            eprintln!("could not change start at login: {e}");
+            window.start_at_login = !window.start_at_login;
+        }
+    }
+
     /// Makes a recorded `combo` the global hotkey.
     pub(super) fn adopt_hotkey(&mut self, combo: hotkey::Combo) {
         if self.window_id.is_none() {

@@ -65,8 +65,34 @@ jobs:
 
       # Installers: a drag-to-Applications .dmg, a .deb with a menu entry,
       # and a per-user Windows setup.exe.
+      - name: Import Developer ID certificate (macOS)
+        # Skipped without the secrets; the .dmg is then ad-hoc signed.
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          [ -n "$MACOS_CERTIFICATE" ] || exit 0
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password=$(uuidgen)
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)
+          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
       - name: Package (macOS)
         if: runner.os == 'macOS'
+        env:
+          # Notarizing takes minutes, so only tagged releases do it.
+          APPLE_ID: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_ID || '' }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: packaging/macos/bundle.sh "package/snap-notes-${{ matrix.name }}.dmg"
 
       - uses: taiki-e/install-action@v2

@@ -27,7 +27,7 @@ macOS, Windows and Linux, from a single small executable.
 
 Download the latest build for **Windows, macOS (Apple silicon) or Linux** from [Releases](https://github.com/FabianRiegsinger/snap-notes/releases):
 
-- **macOS:** open `snap-notes-macos-arm64.dmg` and drag Snap Notes into Applications. The app is not notarized, so the first time, right-click it and choose Open. If macOS says it is damaged, run `xattr -dr com.apple.quarantine "/Applications/Snap Notes.app"`.
+- **macOS:** open `snap-notes-macos-arm64.dmg` and drag Snap Notes into Applications. Releases are signed and notarized when the repository has its Apple signing secrets (see [Releasing](#releasing)). For an unnotarized build, right-click the app and choose Open the first time; if macOS says it is damaged, run `xattr -dr com.apple.quarantine "/Applications/Snap Notes.app"`.
 - **Windows:** run `snap-notes-windows-x64-setup.exe`. It installs for your user only (no admin needed) and adds Snap Notes to the Start menu. Remove it under Settings > Apps.
 - **Linux (Debian/Ubuntu):** `sudo apt install ./snap-notes-linux-x64.deb` (or `-arm64`). Snap Notes then shows up in your app menu.
 
@@ -39,6 +39,20 @@ cargo build --release
 ```
 
 Linux builds need `pkg-config`, `libxkbcommon-dev`, `libwayland-dev` and `libfontconfig1-dev`.
+
+## Releasing
+
+Push a tag like `v1.2.0`. CI builds every installer and publishes a GitHub Release. To sign and notarize the macOS app, add these repository secrets first (it needs a paid Apple Developer account):
+
+| Secret | Value |
+|---|---|
+| `MACOS_CERTIFICATE` | Your "Developer ID Application" certificate exported as `.p12`, base64-encoded (`base64 -i cert.p12 \| pbcopy`) |
+| `MACOS_CERTIFICATE_PASSWORD` | The password you gave the `.p12` export |
+| `APPLE_ID` | Your Apple ID email |
+| `APPLE_TEAM_ID` | Your 10-character team ID, from developer.apple.com → Membership |
+| `APPLE_APP_PASSWORD` | An app-specific password from account.apple.com |
+
+Without them the macOS app is ad-hoc signed and not notarized.
 
 ## Shortcuts worth knowing
 
