@@ -100,9 +100,6 @@ impl App {
                 }
                 self.last_cursor = Some(position);
                 self.pointer = Some(position);
-                if let Some(offset) = self.note_drag {
-                    self.note_drag_pos = Some(position - offset);
-                }
                 self.settings_panel.drag_to(position);
                 self.search_panel.drag_to(position);
                 let room = self.note_room();

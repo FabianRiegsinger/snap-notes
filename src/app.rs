@@ -291,6 +291,8 @@ pub enum Message {
     TitleBlurred(bool),
     NoteHovered(bool),
     NoteDragStart,
+    /// The cursor moved while the open note is dragged (window coordinates).
+    NoteDragMove(Point),
     NoteResetPosition,
     /// Drag the settings panel from its top grip.
     SettingsDragStart,
@@ -1014,6 +1016,7 @@ impl App {
             | Message::TitleBlurred(..)
             | Message::NoteHovered(..)
             | Message::NoteDragStart
+            | Message::NoteDragMove(..)
             | Message::NoteResetPosition
             | Message::ResizeStart(..)
             | Message::ClosePanel
@@ -1251,6 +1254,17 @@ impl App {
         }
 
         layers.push(strip.into());
+        // On top while the note is dragged: a widget's move message is
+        // applied before the frame is drawn, while the `CursorMoved`
+        // subscription arrives an event-loop hop later and the note lags.
+        if self.note_drag.is_some() {
+            layers.push(
+                mouse_area(Space::new().width(Fill).height(Fill))
+                    .on_move(Message::NoteDragMove)
+                    .interaction(mouse::Interaction::Grabbing)
+                    .into(),
+            );
+        }
         stack(layers).width(Fill).height(Fill).into()
     }
 

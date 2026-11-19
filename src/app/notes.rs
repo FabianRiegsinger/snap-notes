@@ -15,6 +15,7 @@ impl App {
                 | Message::ToggleTask(..)
                 | Message::TitleEdited(..)
                 | Message::NoteDragStart
+                | Message::NoteDragMove(..)
                 | Message::ResizeStart(..)
                 | Message::ClosePanel
                 | Message::CloseFront
@@ -40,6 +41,11 @@ impl App {
                     let top_left = frame.rect.position();
                     self.note_drag = Some(cursor - top_left);
                     self.note_drag_pos = Some(top_left);
+                }
+            }
+            Message::NoteDragMove(position) => {
+                if let Some(offset) = self.note_drag {
+                    self.note_drag_pos = Some(position - offset);
                 }
             }
             Message::ResizeStart(edges) => {

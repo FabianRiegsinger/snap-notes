@@ -60,11 +60,12 @@ impl App {
                 if !self.visible {
                     tasks.push(self.update(Message::ToggleVisibility));
                 }
-                // The open note stays open; any other opens beside it.
+                // The front note's own key closes it; any other opens beside it.
                 let id = self.store.notes()[index].id;
-                if !(self.active_note == Some(id) && self.morph.is_opening()) {
-                    tasks.push(self.open_note(index));
+                if self.visible && self.active_note == Some(id) && self.morph.is_opening() {
+                    return self.close_front();
                 }
+                tasks.push(self.open_note(index));
                 if let Some(id) = self.window_id {
                     tasks.push(window::gain_focus(id));
                 }

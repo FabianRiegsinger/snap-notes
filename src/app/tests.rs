@@ -3944,7 +3944,7 @@ fn switching_notes_mid_drag_keeps_the_drag_off_the_new_note() {
     let start = app.note_target_rect().center();
     let _ = app.update(Message::CursorMoved(start));
     let _ = app.update(Message::NoteDragStart);
-    let _ = app.update(Message::CursorMoved(start - iced::Vector::new(40.0, 30.0)));
+    let _ = app.update(Message::NoteDragMove(start - iced::Vector::new(40.0, 30.0)));
     let _ = app.update(Message::BarClicked(1));
     assert_eq!(app.active_note, Some(ids[1]));
     assert!(app.note_drag.is_none() && app.note_drag_pos.is_none());
@@ -5365,7 +5365,7 @@ fn a_note_opened_onto_another_cascades_off_it() {
 }
 
 #[test]
-fn a_note_key_opens_its_bar_and_never_closes_it() {
+fn a_note_key_opens_its_bar_and_closes_it_again() {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, ids) = app_with_notes(&dir, &[("a", "alpha"), ("b", "beta")]);
     let _ = app.update(Message::NoteKeyPressed(0));
@@ -5374,13 +5374,41 @@ fn a_note_key_opens_its_bar_and_never_closes_it() {
     settle(&mut app);
     assert_eq!(app.active_note, Some(ids[1]));
     assert_eq!(behind_ids(&app), vec![ids[0]]);
-    // Its own key again leaves it open.
-    let _ = app.update(Message::NoteKeyPressed(1));
-    settle(&mut app);
-    assert_eq!(app.active_note, Some(ids[1]));
     // Past the last bar, nothing happens.
     let _ = app.update(Message::NoteKeyPressed(8));
     assert_eq!(app.active_note, Some(ids[1]));
+    // Its own key again closes it alone; the note behind comes forward.
+    let _ = app.update(Message::NoteKeyPressed(1));
+    settle(&mut app);
+    assert_eq!(app.active_note, Some(ids[0]));
+    assert!(behind_ids(&app).is_empty());
+    // And once more for the last one: nothing stays open.
+    let _ = app.update(Message::NoteKeyPressed(0));
+    settle(&mut app);
+    assert_eq!(app.active_note, None);
+    // Pressed again, it opens.
+    let _ = app.update(Message::NoteKeyPressed(0));
+    settle(&mut app);
+    assert_eq!(app.active_note, Some(ids[0]));
+}
+
+#[test]
+fn a_note_drag_follows_the_overlay_moves_not_the_late_subscription() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, _ids) = app_with_notes(&dir, &[("a", "1")]);
+    let _ = app.update(Message::BarClicked(0));
+    settle(&mut app);
+    let start = app.note_target_rect().center();
+    let _ = app.update(Message::CursorMoved(start));
+    let _ = app.update(Message::NoteDragStart);
+    let moved = app.note_target_rect().position() - iced::Vector::new(40.0, 30.0);
+    let _ = app.update(Message::NoteDragMove(start - iced::Vector::new(40.0, 30.0)));
+    assert_eq!(app.note_target_rect().position(), moved);
+    // A stale cursor event from the subscription doesn't pull it back.
+    let _ = app.update(Message::CursorMoved(start));
+    assert_eq!(app.note_target_rect().position(), moved);
+    let _ = app.update(Message::MouseButton(false));
+    assert_eq!(app.store.notes()[0].position, Some([moved.x, moved.y]));
 }
 
 #[test]

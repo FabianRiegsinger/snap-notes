@@ -59,7 +59,7 @@ Without them the macOS app is ad-hoc signed and not notarized.
 | Shortcut | Does |
 |---|---|
 | Cmd/Ctrl+Shift+Space | New note, from any app |
-| Ctrl+Shift+1…9 | Open note 1–9, counted from the top, from any app |
+| Ctrl+Shift+1…9 | Open note 1–9, counted from the top, from any app; the same keys close it again |
 | Cmd/Ctrl+N | New note |
 | Cmd/Ctrl+F | Search |
 | Cmd/Ctrl+, | Settings |
